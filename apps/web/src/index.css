@@ -404,6 +404,21 @@
       animation: none;
     }
   }
+
+  /* Beat Streamdown's list-inside so wrapped lines align with the first. */
+  .chat-markdown ul,
+  .chat-markdown ol {
+    list-style-position: outside;
+    padding-inline-start: 1.35em;
+  }
+
+  .chat-markdown ol {
+    padding-inline-start: 1.7em;
+  }
+
+  .chat-markdown li {
+    padding-inline-start: 0.4em;
+  }
 }
 
 @layer components {
@@ -813,8 +828,7 @@
 
   .chat-markdown ul,
   .chat-markdown ol {
-    padding-inline-start: 1.375rem;
-    margin-block: 0.625rem;
+    margin-block: 0.5rem;
   }
 
   .chat-markdown ul {
@@ -835,11 +849,16 @@
 
   .chat-markdown li {
     display: list-item;
-    margin-block: 0.25rem;
+    margin-block: 0.3rem;
   }
 
   .chat-markdown li::marker {
     color: var(--muted-foreground);
+  }
+
+  .chat-markdown li > ul,
+  .chat-markdown li > ol {
+    margin-block: 0.25rem;
   }
 
   .chat-markdown blockquote {
