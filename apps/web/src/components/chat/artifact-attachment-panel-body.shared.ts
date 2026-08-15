@@ -3,6 +3,7 @@ import { clampAttachmentPanelWidth } from "@/components/chat/attachment-panel-wi
 import {
   artifactCodeLanguage,
   isDocxFile,
+  isEditableArtifact,
   isHtmlArtifactMimeType,
   isImageArtifactMimeType,
   isLegacyDocFile,
@@ -45,6 +46,49 @@ export function artifactCanTogglePreviewSource({
   isMarkdown: boolean;
 }): boolean {
   return isHtml || isMarkdown;
+}
+
+/** Markdown/HTML: source view is the editor. JSON/txt: explicit Edit. */
+export function artifactPanelShowsSourceEditor({
+  canEdit,
+  canTogglePreview,
+  previewMode,
+  editing,
+}: {
+  canEdit: boolean;
+  canTogglePreview: boolean;
+  previewMode: ArtifactPreviewMode;
+  editing: boolean;
+}): boolean {
+  if (!canEdit) {
+    return false;
+  }
+
+  if (canTogglePreview) {
+    return previewMode === "source";
+  }
+
+  return editing;
+}
+
+export function artifactPanelShowsEditAction({
+  canEdit,
+  canTogglePreview,
+}: {
+  canEdit: boolean;
+  canTogglePreview: boolean;
+}): boolean {
+  return canEdit && !canTogglePreview;
+}
+
+export function artifactCanEdit({
+  filename,
+  mimeType,
+}: {
+  filename: string;
+  mimeType: string;
+}): boolean {
+  return isEditableArtifact(filename, mimeType);
 }
 
 export function artifactPanelHeadingName(filename: string): string {
@@ -123,14 +167,16 @@ export function artifactPanelBodyClassName({
   isVideo = false,
   isMarkdown,
   previewMode = "preview",
+  editing = false,
 }: {
   isHtml: boolean;
   isImage: boolean;
   isVideo?: boolean;
   isMarkdown: boolean;
   previewMode?: ArtifactPreviewMode;
+  editing?: boolean;
 }): string | undefined {
-  if (isHtml || isImage || isVideo) {
+  if (editing || isHtml || isImage || isVideo) {
     return "flex flex-col overflow-hidden p-0";
   }
 

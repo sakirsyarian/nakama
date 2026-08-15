@@ -492,6 +492,27 @@ export function useDeleteArtifactMutation() {
   });
 }
 
+export function useUpdateArtifactMutation() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: ({
+      profileId,
+      path,
+      content,
+    }: {
+      profileId: string;
+      path: string;
+      content: string;
+    }) => client.writeProfileArtifactContent(profileId, path, content),
+    onSuccess: async (_data, variables) => {
+      await queryClient.invalidateQueries({
+        queryKey: queryKeys.artifacts.profile(variables.profileId),
+      });
+    },
+  });
+}
+
 export function useArtifactShareStatusQuery(
   profileId: string,
   artifactPath: string,

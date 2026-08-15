@@ -4,14 +4,17 @@ import {
   Video01Icon,
   ViewIcon,
 } from "hugeicons-react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ArtifactAttachmentPanelActions } from "@/components/chat/artifact-attachment-panel-actions";
 import { ArtifactAttachmentPanelBody } from "@/components/chat/artifact-attachment-panel-body";
 import {
+  artifactCanEdit,
   artifactCanTogglePreviewSource,
   artifactPanelBodyClassName,
   artifactPanelDefaultWidth,
   artifactPanelHeaderMeta,
+  artifactPanelShowsEditAction,
+  artifactPanelShowsSourceEditor,
   downloadActionLabel,
 } from "@/components/chat/artifact-attachment-panel-body.shared";
 import {
@@ -30,9 +33,12 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
+import { useAuth } from "@/context/use-auth";
 import { useChatAttachmentPanel } from "@/context/use-chat-attachment-panel";
+import { useUpdateArtifactMutation } from "@/hooks/use-resource-mutations";
 import {
   artifactCodeLanguage,
+  artifactContentWritePath,
   buildArtifactContentUrl,
   type ChatArtifactRef,
   isDocxFile,
@@ -45,7 +51,7 @@ import {
   isVideoArtifactMimeType,
   resolveArtifactMimeType,
 } from "@/lib/chat-artifacts";
-import { client } from "@/lib/client";
+import { client, formatError } from "@/lib/client";
 import { formatBytes } from "@/lib/knowledge-base-files";
 import { cn } from "@/lib/utils";
 
@@ -155,6 +161,14 @@ export function ArtifactAttachmentPreview({
   const [copied, setCopied] = useState(false);
   const [previewMode, setPreviewMode] =
     useState<ArtifactPreviewMode>("preview");
+  const [editing, setEditing] = useState(false);
+  const [dirty, setDirty] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const draftRef = useRef("");
+  const editorMountedRef = useRef(false);
+  const saveArtifactRef = useRef<() => Promise<void>>(async () => undefined);
+  const { activeOrg } = useAuth();
+  const updateArtifact = useUpdateArtifactMutation();
   const downloadUrl = `${client.baseUrl}${buildArtifactContentUrl(profileId, artifact.path)}`;
   const mimeType = resolveArtifactMimeType(
     artifact.mimeType,
@@ -167,14 +181,17 @@ export function ArtifactAttachmentPreview({
     isDocxFile(artifact.filename, mimeType) ||
     isLegacyDocFile(artifact.filename, mimeType);
   const isMarkdown = isMarkdownArtifactMimeType(mimeType) || isWordDocument;
-  const showPreviewToggle = artifactCanTogglePreviewSource({
+  const canEdit =
+    (activeOrg?.role === "admin" || activeOrg?.role === "member") &&
+    artifactCanEdit({ filename: artifact.filename, mimeType });
+  const canTogglePreview = artifactCanTogglePreviewSource({
     isHtml,
     isMarkdown,
   });
   const header = artifactPanelHeaderMeta({
     filename: artifact.filename,
     mimeType,
-    showPreviewToggle,
+    showPreviewToggle: canTogglePreview,
     sizeBytes: artifact.sizeBytes,
   });
   const language = artifactCodeLanguage(artifact.filename);
@@ -203,6 +220,19 @@ export function ArtifactAttachmentPreview({
     open,
     profileId,
   });
+  const isSourceEditor =
+    !loading &&
+    artifactPanelShowsSourceEditor({
+      canEdit,
+      canTogglePreview,
+      editing,
+      previewMode,
+    });
+  const showEditAction = artifactPanelShowsEditAction({
+    canEdit,
+    canTogglePreview,
+  });
+  const showSaveActions = dirty || (editing && !canTogglePreview);
 
   useEffect(() => {
     if (!copied) {
@@ -213,10 +243,37 @@ export function ArtifactAttachmentPreview({
     return () => window.clearTimeout(timeout);
   }, [copied]);
 
+  function handleDraftChange(next: string) {
+    draftRef.current = next;
+    const nextDirty = next !== (content ?? "");
+    setDirty((current) => (current === nextDirty ? current : nextDirty));
+  }
+
   function buildPanelBody(
     loadingOverride?: boolean,
     mode: ArtifactPreviewMode = previewMode
   ) {
+    const sourceEditor =
+      !(loadingOverride ?? loading) &&
+      artifactPanelShowsSourceEditor({
+        canEdit,
+        canTogglePreview,
+        editing,
+        previewMode: mode,
+      });
+
+    if (sourceEditor) {
+      const initial = dirty ? draftRef.current : (content ?? "");
+      draftRef.current = initial;
+      return (
+        <ArtifactTextEditor
+          initialValue={initial}
+          onChange={handleDraftChange}
+          onSave={() => void saveArtifactRef.current()}
+        />
+      );
+    }
+
     const panelKind = isImage
       ? "image"
       : isVideo
@@ -228,7 +285,7 @@ export function ArtifactAttachmentPreview({
       <ArtifactAttachmentPreviewPanelBody
         artifact={artifact}
         canPreview={canPreview}
-        content={content}
+        content={canEdit && dirty ? draftRef.current : content}
         error={error}
         imagePreviewUrl={imagePreviewUrl}
         kind={panelKind}
@@ -242,8 +299,16 @@ export function ArtifactAttachmentPreview({
   }
 
   function buildPanelConfig(mode: ArtifactPreviewMode = previewMode) {
+    const sourceEditor = artifactPanelShowsSourceEditor({
+      canEdit,
+      canTogglePreview,
+      editing,
+      previewMode: mode,
+    });
+
     return {
       bodyClassName: artifactPanelBodyClassName({
+        editing: sourceEditor,
         isHtml,
         isImage,
         isMarkdown,
@@ -256,16 +321,23 @@ export function ArtifactAttachmentPreview({
         <>
           <ArtifactAttachmentPanelActions
             additionalMenuItems={<ArtifactShareMenuItem share={share} />}
+            canEdit={showEditAction}
             content={content}
             copied={copied}
             copyDisabled={isImage || isVideo}
             downloadLabel={downloadLabel}
             downloadUrl={downloadUrl}
+            editing={showSaveActions}
             filename={artifact.filename}
             fullscreen={fullscreen}
             loading={loading}
+            onCancelEdit={cancelEditing}
             onCopy={() => void copyArtifact()}
+            onEdit={startEditing}
+            onSave={() => void saveArtifactRef.current()}
             onToggleFullscreen={() => setFullscreen((current) => !current)}
+            saveDisabled={!dirty}
+            saving={updateArtifact.isPending}
           />
           <ArtifactSharePublishDialogFromState
             artifactPath={artifact.path}
@@ -273,11 +345,12 @@ export function ArtifactAttachmentPreview({
           />
         </>
       ),
-      leading: showPreviewToggle ? (
+      leading: canTogglePreview ? (
         <ArtifactPreviewModeToggle mode={mode} onChange={setPreviewMode} />
       ) : null,
       resizable: !fullscreen,
-      subtitle: header.subtitle,
+      subtitle: saveError ?? header.subtitle,
+      subtitleClassName: saveError ? "text-destructive" : undefined,
       title: header.title,
       typeLabel: header.typeLabel,
     };
@@ -285,10 +358,34 @@ export function ArtifactAttachmentPreview({
 
   useEffect(() => {
     if (!open) {
+      editorMountedRef.current = false;
       return;
     }
 
-    update(id, buildPanelConfig());
+    const config = buildPanelConfig();
+    if (isSourceEditor) {
+      if (editorMountedRef.current) {
+        update(id, {
+          bodyClassName: config.bodyClassName,
+          fullscreen: config.fullscreen,
+          headerActions: config.headerActions,
+          leading: config.leading,
+          resizable: config.resizable,
+          subtitle: config.subtitle,
+          subtitleClassName: config.subtitleClassName,
+          title: config.title,
+          typeLabel: config.typeLabel,
+        });
+        return;
+      }
+
+      editorMountedRef.current = true;
+      update(id, config);
+      return;
+    }
+
+    editorMountedRef.current = false;
+    update(id, config);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     open,
@@ -314,11 +411,70 @@ export function ArtifactAttachmentPreview({
     share.busy,
     share.publishDialogOpen,
     previewMode,
-    showPreviewToggle,
     header.subtitle,
     header.title,
     header.typeLabel,
+    canEdit,
+    isSourceEditor,
+    showEditAction,
+    showSaveActions,
+    editing,
+    dirty,
+    saveError,
+    updateArtifact.isPending,
   ]);
+
+  function startEditing() {
+    draftRef.current = content ?? "";
+    setDirty(false);
+    setSaveError(null);
+    editorMountedRef.current = false;
+    setEditing(true);
+  }
+
+  function cancelEditing() {
+    draftRef.current = content ?? "";
+    setDirty(false);
+    setSaveError(null);
+    editorMountedRef.current = false;
+    setEditing(false);
+    if (canTogglePreview) {
+      setPreviewMode("preview");
+    }
+  }
+
+  function resetEditor() {
+    setEditing(false);
+    setDirty(false);
+    draftRef.current = "";
+    setSaveError(null);
+    editorMountedRef.current = false;
+    if (canTogglePreview) {
+      setPreviewMode("preview");
+    }
+  }
+
+  async function saveArtifact() {
+    const nextContent = draftRef.current;
+    if (nextContent === (content ?? "") || updateArtifact.isPending) {
+      return;
+    }
+
+    try {
+      await updateArtifact.mutateAsync({
+        content: nextContent,
+        path: artifactContentWritePath(artifact.path),
+        profileId,
+      });
+      setContent(nextContent);
+      setDirty(false);
+      setSaveError(null);
+    } catch (saveFailure) {
+      setSaveError(formatError(saveFailure));
+    }
+  }
+
+  saveArtifactRef.current = saveArtifact;
 
   async function copyArtifact() {
     if (isImage || isVideo) {
@@ -330,7 +486,7 @@ export function ArtifactAttachmentPreview({
       if (!text) {
         const result = await client.readProfileArtifactContent(
           profileId,
-          artifact.path,
+          artifactContentWritePath(artifact.path),
           {
             inline: true,
             render: isWordDocument ? "markdown" : undefined,
@@ -351,6 +507,7 @@ export function ArtifactAttachmentPreview({
     setFullscreen(false);
     setCopied(false);
     setPreviewMode("preview");
+    resetEditor();
     show({
       ...buildPanelConfig("preview"),
       content: buildPanelBody(
@@ -368,6 +525,7 @@ export function ArtifactAttachmentPreview({
         setFullscreen(false);
         setCopied(false);
         setPreviewMode("preview");
+        resetEditor();
       },
       resizable: true,
     });
@@ -383,6 +541,39 @@ export function ArtifactAttachmentPreview({
       onOpen={openPanel}
       variant={variant}
     />
+  );
+}
+
+function ArtifactTextEditor({
+  initialValue,
+  onChange,
+  onSave,
+}: {
+  initialValue: string;
+  onChange: (value: string) => void;
+  onSave: () => void;
+}) {
+  const [value, setValue] = useState(initialValue);
+
+  return (
+    <div className="flex min-h-0 flex-1 flex-col">
+      <textarea
+        className="min-h-0 flex-1 resize-none overflow-y-auto border-0 bg-transparent px-4 py-3 font-mono text-sm leading-relaxed outline-none"
+        onChange={(event) => {
+          const next = event.target.value;
+          setValue(next);
+          onChange(next);
+        }}
+        onKeyDown={(event) => {
+          if ((event.metaKey || event.ctrlKey) && event.key === "s") {
+            event.preventDefault();
+            onSave();
+          }
+        }}
+        spellCheck
+        value={value}
+      />
+    </div>
   );
 }
 

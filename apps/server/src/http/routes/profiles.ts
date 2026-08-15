@@ -11,6 +11,8 @@ import type {
   ProfileResponse,
   SoulStackResponse,
   SoulStatusResponse,
+  UpdateArtifactFileRequest,
+  UpdateArtifactFileResponse,
   UpdateProfileRequest,
   UpdateSoulFileRequest,
   UploadKnowledgeBaseRequest,
@@ -21,6 +23,7 @@ import { filterProfilesForChatAccess } from "@nakama/core/profiles";
 import type { ServerOptions } from "../context";
 import {
   requireActiveOrgIdFromContext,
+  requireNotViewerFromContext,
   requireOrgAdmin,
   requirePlatformAdminFromContext,
 } from "../org-guards";
@@ -108,6 +111,13 @@ export function registerProfileRoutes(
     .object({})
     .passthrough()
     .openapi("DeleteArtifactResponse");
+  const updateArtifactFileSchema = z
+    .object({ content: z.string() })
+    .openapi("UpdateArtifactFileRequest");
+  const updateArtifactFileResponseSchema = z
+    .object({})
+    .passthrough()
+    .openapi("UpdateArtifactFileResponse");
   const listKnowledgeBaseSchema = z
     .object({})
     .passthrough()
@@ -363,6 +373,44 @@ export function registerProfileRoutes(
       },
       summary:
         "Read artifact bytes for a profile (org members; list/delete remain platform-admin)",
+      tags: ["Profiles"],
+    })
+  );
+  app.openAPIRegistry.registerPath(
+    createRoute({
+      method: "put",
+      operationId: "writeProfileArtifactContent",
+      path: "/v1/profiles/{profileId}/artifacts/content",
+      request: {
+        body: {
+          content: { "application/json": { schema: updateArtifactFileSchema } },
+          required: true,
+        },
+        params: profileIdParam,
+        query: artifactPathQuery,
+      },
+      responses: {
+        200: {
+          content: {
+            "application/json": { schema: updateArtifactFileResponseSchema },
+          },
+          description: "Updated artifact",
+        },
+        400: {
+          content: { "application/json": { schema: errorSchema } },
+          description: "Invalid path or content",
+        },
+        403: {
+          content: { "application/json": { schema: errorSchema } },
+          description: "Forbidden",
+        },
+        500: {
+          content: { "application/json": { schema: errorSchema } },
+          description: "Error",
+        },
+      },
+      summary:
+        "Overwrite a text artifact for a profile (org members; viewers cannot write)",
       tags: ["Profiles"],
     })
   );
@@ -707,6 +755,26 @@ export function registerProfileRoutes(
         "Content-Type": artifact.contentType,
       },
     });
+  });
+
+  app.put("/v1/profiles/:profileId/artifacts/content", async (c) => {
+    requireNotViewerFromContext(c);
+    const orgId = requireActiveOrgIdFromContext(c);
+    const profileId = decodeURIComponent(c.req.param("profileId"));
+    const artifactPath = c.req.query("path");
+
+    if (!artifactPath) {
+      return json({ error: "path is required" }, 400);
+    }
+
+    const body = await readJson<UpdateArtifactFileRequest>(c.req.raw);
+    if (typeof body.content !== "string") {
+      return json({ error: "content is required" }, 400);
+    }
+
+    return json<UpdateArtifactFileResponse>(
+      await agent.writeProfileArtifact(orgId, profileId, artifactPath, body)
+    );
   });
 
   app.delete("/v1/profiles/:profileId/artifacts", async (c) => {

@@ -70,6 +70,8 @@ import type {
   TranscribeAudioResponse,
   TranscriptionSettings,
   TranscriptionSettingsResponse,
+  UpdateArtifactFileRequest,
+  UpdateArtifactFileResponse,
   UpdateComposioSettingsRequest,
   UpdateDiscordSettingsRequest,
   UpdateEmailSettingsRequest,
@@ -133,6 +135,7 @@ import {
   normalizeUserContextContent,
   type OrgRole,
   ollamaRequiresApiKey,
+  PathGuardError,
   persistInlineAttachmentsInContent,
   readArtifactFile,
   readBundledSkillBody,
@@ -154,6 +157,7 @@ import {
   saveUserTimezone,
   saveWhatsAppConfig,
   USER_CONTEXT_TEMPLATE,
+  writeArtifactFile,
   writeSoulFile,
 } from "@nakama/core";
 import { canAccessSuperBotProfile } from "@nakama/core/profiles";
@@ -2772,6 +2776,47 @@ export class AgentService {
       profileId,
       render: options.render,
     });
+  }
+
+  async writeProfileArtifact(
+    orgId: string,
+    profileId: string,
+    filename: string,
+    request: UpdateArtifactFileRequest
+  ): Promise<UpdateArtifactFileResponse> {
+    await this.requireProfile(orgId, profileId);
+
+    if (typeof request.content !== "string") {
+      throw new NakamaApiError("content is required.", 400);
+    }
+
+    try {
+      return await writeArtifactFile({
+        content: request.content,
+        filename,
+        orgId,
+        profileId,
+      });
+    } catch (error) {
+      if (error instanceof PathGuardError) {
+        throw new NakamaApiError(error.message, 400);
+      }
+
+      const code = (error as NodeJS.ErrnoException).code;
+      const message = error instanceof Error ? error.message : "";
+      if (code === "ENOENT" || message.startsWith("Artifact not found")) {
+        throw new NakamaApiError(`Artifact not found: ${filename}`, 404);
+      }
+
+      if (
+        message.includes("cannot be edited") ||
+        message.includes("sidecars cannot be edited")
+      ) {
+        throw new NakamaApiError(message, 400);
+      }
+
+      throw error;
+    }
   }
 
   async deleteProfileArtifact(

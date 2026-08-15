@@ -21,6 +21,7 @@ interface AttachmentDetailPanelProps {
   onWidthChange: (width: number) => void;
   resizable?: boolean;
   subtitle?: string | null;
+  subtitleClassName?: string;
   title: string;
   typeLabel?: string | null;
   width: number;
@@ -30,6 +31,7 @@ export function AttachmentDetailPanel({
   title,
   typeLabel,
   subtitle,
+  subtitleClassName,
   leading,
   children,
   headerActions,
@@ -145,7 +147,12 @@ export function AttachmentDetailPanel({
                 ) : null}
               </h2>
               {leading ? null : subtitle ? (
-                <p className="mt-0.5 truncate text-muted-foreground text-xs">
+                <p
+                  className={cn(
+                    "mt-0.5 truncate text-xs",
+                    subtitleClassName ?? "text-muted-foreground"
+                  )}
+                >
                   {subtitle}
                 </p>
               ) : null}

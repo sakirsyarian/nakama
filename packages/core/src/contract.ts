@@ -1738,6 +1738,18 @@ export interface DeleteArtifactResponse {
   profileId: string;
 }
 
+export interface UpdateArtifactFileRequest {
+  content: string;
+}
+
+export interface UpdateArtifactFileResponse {
+  filename: string;
+  mimeType: string;
+  profileId: string;
+  sizeBytes: number;
+  updatedAt: string;
+}
+
 export interface PublishArtifactShareRequest {
   /** Public web origin for minting share URLs (workers; browsers send Origin). */
   clientOrigin?: string;

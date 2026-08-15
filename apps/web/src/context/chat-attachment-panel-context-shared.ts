@@ -11,6 +11,7 @@ export interface ChatAttachmentPanelConfig {
   onClose?: () => void;
   resizable?: boolean;
   subtitle?: string | null;
+  subtitleClassName?: string;
   title: string;
   typeLabel?: string | null;
 }

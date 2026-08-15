@@ -3,7 +3,11 @@ import { readFileSync } from "node:fs";
 import { copyFile, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { listArtifacts, readArtifactFile } from "./artifacts";
+import {
+  listArtifacts,
+  readArtifactFile,
+  writeArtifactFile,
+} from "./artifacts";
 import { getProfileArtifactsDir } from "./soul/resolve";
 
 const SAMPLE_DOCX_PATH = path.join(
@@ -168,6 +172,139 @@ test("lists sidecar-less artifacts with an inferred mime type", async () => {
 
   expect(summary?.mimeType).toBe("text/markdown");
   expect(listing.total).toBe(listing.artifacts.length);
+});
+
+test("overwrites a markdown artifact in place and refreshes the sidecar", async () => {
+  await writeArtifact("script.md", "# Draft\n");
+  await writeArtifact(
+    "script.md.nakama-meta.json",
+    JSON.stringify({
+      mimeType: "text/markdown",
+      savedAt: "2026-01-01T00:00:00.000Z",
+      sizeBytes: 8,
+    })
+  );
+
+  const written = await writeArtifactFile({
+    content: "# Final hook\n",
+    filename: "script.md",
+    orgId: ORG_ID,
+    profileId: PROFILE_ID,
+  });
+
+  const artifact = await readArtifactFile({
+    filename: "script.md",
+    orgId: ORG_ID,
+    profileId: PROFILE_ID,
+  });
+  const sidecar = JSON.parse(
+    await readFileSync(
+      path.join(
+        getProfileArtifactsDir(ORG_ID, PROFILE_ID),
+        "script.md.nakama-meta.json"
+      ),
+      "utf8"
+    )
+  ) as { mimeType: string; sizeBytes: number; savedAt: string };
+
+  expect(written.filename).toBe("script.md");
+  expect(artifact.bytes.toString("utf8")).toBe("# Final hook\n");
+  expect(sidecar.mimeType).toBe("text/markdown");
+  expect(sidecar.sizeBytes).toBe(Buffer.byteLength("# Final hook\n", "utf8"));
+  expect(sidecar.savedAt).not.toBe("2026-01-01T00:00:00.000Z");
+  expect(
+    await listArtifacts(ORG_ID, PROFILE_ID).then((listing) =>
+      listing.artifacts.map((file) => file.filename)
+    )
+  ).toEqual(["script.md"]);
+});
+
+test("writes a sidecar when the artifact had none", async () => {
+  await writeArtifact("weekly/notes.txt", "old");
+
+  await writeArtifactFile({
+    content: "new notes",
+    filename: "weekly/notes.txt",
+    orgId: ORG_ID,
+    profileId: PROFILE_ID,
+  });
+
+  const sidecar = JSON.parse(
+    await readFileSync(
+      path.join(
+        getProfileArtifactsDir(ORG_ID, PROFILE_ID),
+        "weekly/notes.txt.nakama-meta.json"
+      ),
+      "utf8"
+    )
+  ) as { mimeType: string; sizeBytes: number };
+
+  expect(sidecar.mimeType).toBe("text/plain");
+  expect(sidecar.sizeBytes).toBe(Buffer.byteLength("new notes", "utf8"));
+});
+
+test("accepts an artifacts/ prefix when overwriting", async () => {
+  await writeArtifact("script.md", "# Draft\n");
+
+  const written = await writeArtifactFile({
+    content: "# From prefix\n",
+    filename: "artifacts/script.md",
+    orgId: ORG_ID,
+    profileId: PROFILE_ID,
+  });
+
+  const artifact = await readArtifactFile({
+    filename: "script.md",
+    orgId: ORG_ID,
+    profileId: PROFILE_ID,
+  });
+
+  expect(written.filename).toBe("script.md");
+  expect(artifact.bytes.toString("utf8")).toBe("# From prefix\n");
+});
+
+test("refuses binary, Word, missing, and sidecar paths", async () => {
+  await writeArtifact("photo.png", "not-an-image");
+  await copyFile(
+    SAMPLE_DOCX_PATH,
+    path.join(getProfileArtifactsDir(ORG_ID, PROFILE_ID), "laporan.docx")
+  );
+
+  await expect(
+    writeArtifactFile({
+      content: "nope",
+      filename: "photo.png",
+      orgId: ORG_ID,
+      profileId: PROFILE_ID,
+    })
+  ).rejects.toThrow();
+
+  await expect(
+    writeArtifactFile({
+      content: "# overwritten",
+      filename: "laporan.docx",
+      orgId: ORG_ID,
+      profileId: PROFILE_ID,
+    })
+  ).rejects.toThrow();
+
+  await expect(
+    writeArtifactFile({
+      content: "ghost",
+      filename: "missing.md",
+      orgId: ORG_ID,
+      profileId: PROFILE_ID,
+    })
+  ).rejects.toThrow();
+
+  await expect(
+    writeArtifactFile({
+      content: "{}",
+      filename: "script.md.nakama-meta.json",
+      orgId: ORG_ID,
+      profileId: PROFILE_ID,
+    })
+  ).rejects.toThrow();
 });
 
 test("paginates artifacts with limit and offset", async () => {

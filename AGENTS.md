@@ -109,7 +109,7 @@ Path: `~/.nakama/orgs/{orgId}/profiles/{profileId}/` (`getProfileSoulDir`). Load
 | Tool / skill | Notes |
 |---|---|
 | `update-profile-memory` / `archive-profile-memory` | MEMORY.md ↔ memory-archive/ |
-| `save-artifact` | Persist under `artifacts/` |
+| `save-artifact` | Persist under `artifacts/`. Text/Markdown/HTML/JSON can also be edited in the chat preview panel (`PUT /v1/profiles/:profileId/artifacts/content`). |
 | `knowledge_base_search` / `web_search` / `email` | KB, web, mailbox |
 | `search_files` / `ripgrep` | File/content search |
 | `bash` | Profile workspace shell — assign per profile; Super Bot by default |

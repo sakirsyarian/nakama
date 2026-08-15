@@ -150,6 +150,7 @@ export function ChatAttachmentPanelProvider({
               onWidthChange={setWidth}
               resizable={config.resizable ?? !fullscreen}
               subtitle={config.subtitle}
+              subtitleClassName={config.subtitleClassName}
               title={config.title}
               typeLabel={config.typeLabel}
               width={width}

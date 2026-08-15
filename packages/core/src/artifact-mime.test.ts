@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   artifactCodeLanguage,
   inferArtifactMimeType,
+  isEditableArtifact,
   isHtmlArtifactMimeType,
   isImageArtifactMimeType,
   isMarkdownArtifactMimeType,
@@ -77,6 +78,26 @@ describe("mime predicates", () => {
     expect(isVideoArtifactMimeType("image/png")).toBe(false);
     expect(isUnknownArtifactMimeType("application/octet-stream")).toBe(true);
     expect(isUnknownArtifactMimeType("text/plain")).toBe(false);
+  });
+
+  test("marks text-like artifacts editable and binaries not", () => {
+    expect(isEditableArtifact("script.md", "text/markdown")).toBe(true);
+    expect(isEditableArtifact("notes.txt", "text/plain")).toBe(true);
+    expect(isEditableArtifact("page.html", "text/html")).toBe(true);
+    expect(isEditableArtifact("data.json", "application/json")).toBe(true);
+    expect(isEditableArtifact("report.md", "application/octet-stream")).toBe(
+      true
+    );
+    expect(isEditableArtifact("icon.svg", "image/svg+xml")).toBe(true);
+    expect(isEditableArtifact("photo.png", "image/png")).toBe(false);
+    expect(isEditableArtifact("clip.mp4", "video/mp4")).toBe(false);
+    expect(isEditableArtifact("deck.pdf", "application/pdf")).toBe(false);
+    expect(
+      isEditableArtifact(
+        "laporan.docx",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+      )
+    ).toBe(false);
   });
 });
 

@@ -5,6 +5,7 @@ export {
   artifactCodeLanguage,
   inferArtifactMimeType,
   isDocxFile,
+  isEditableArtifact,
   isHtmlArtifactMimeType,
   isImageArtifactMimeType,
   isLegacyDocFile,
@@ -179,6 +180,13 @@ export function toArtifactsRelativePath(resolvedPath: string): string | null {
   }
 
   return null;
+}
+
+/** Path to send to artifact content GET/PUT (relative to the profile artifacts dir). */
+export function artifactContentWritePath(artifactPath: string): string {
+  return (
+    toArtifactsRelativePath(artifactPath) ?? artifactPath.replace(/\\/g, "/")
+  );
 }
 
 function siblingContentPath(metaResolvedPath: string): string | null {

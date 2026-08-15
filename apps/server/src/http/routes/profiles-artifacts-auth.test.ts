@@ -12,6 +12,11 @@ setupTestConfigDir("nakama-profiles-artifacts-auth-test-");
 
 function createApp() {
   const readCalls: Array<{ render?: "markdown" }> = [];
+  const writes: Array<{
+    content: string;
+    filename: string;
+    profileId: string;
+  }> = [];
   const agent = {
     deleteProfileArtifact: async () => ({
       deleted: true,
@@ -36,11 +41,27 @@ function createApp() {
         contentType: "text/markdown",
       };
     },
+    writeProfileArtifact: async (
+      _orgId: string,
+      profileId: string,
+      filename: string,
+      request: { content: string }
+    ) => {
+      writes.push({ content: request.content, filename, profileId });
+      return {
+        filename,
+        mimeType: "text/markdown",
+        profileId,
+        sizeBytes: Buffer.byteLength(request.content, "utf8"),
+        updatedAt: "2026-08-15T00:00:00.000Z",
+      };
+    },
   };
 
   return {
     ...createMinimalHonoApp({ agent }),
     readCalls,
+    writes,
   };
 }
 
@@ -243,5 +264,122 @@ describe("profile artifact content auth", () => {
     );
 
     expect(response.status).toBe(200);
+  });
+
+  test("org member can write artifact content", async () => {
+    const { app, databaseAdapter, writes } = createApp();
+    const memberSession = await setupFreshInstallSession(
+      app,
+      databaseAdapter,
+      "writer@example.com",
+      "member"
+    );
+
+    const response = await app.fetch(
+      new Request(
+        "http://localhost:4310/v1/profiles/profile_1/artifacts/content?path=script.md",
+        {
+          body: JSON.stringify({ content: "# Final hook\n" }),
+          headers: memberSession.headers(
+            {
+              "Content-Type": "application/json",
+              "X-CSRF-Token": memberSession.csrfToken,
+            },
+            memberSession.orgId
+          ),
+          method: "PUT",
+        }
+      )
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      filename: "script.md",
+      mimeType: "text/markdown",
+    });
+    expect(writes).toEqual([
+      {
+        content: "# Final hook\n",
+        filename: "script.md",
+        profileId: "profile_1",
+      },
+    ]);
+  });
+
+  test("org viewer cannot write artifact content", async () => {
+    const { app, databaseAdapter, writes } = createApp();
+    const viewerSession = await setupFreshInstallSession(
+      app,
+      databaseAdapter,
+      "viewer-write@example.com",
+      "viewer"
+    );
+
+    const response = await app.fetch(
+      new Request(
+        "http://localhost:4310/v1/profiles/profile_1/artifacts/content?path=script.md",
+        {
+          body: JSON.stringify({ content: "nope" }),
+          headers: viewerSession.headers(
+            {
+              "Content-Type": "application/json",
+              "X-CSRF-Token": viewerSession.csrfToken,
+            },
+            viewerSession.orgId
+          ),
+          method: "PUT",
+        }
+      )
+    );
+
+    expect(response.status).toBe(403);
+    expect(writes).toEqual([]);
+  });
+
+  test("write requires a path and string content", async () => {
+    const { app, databaseAdapter, writes } = createApp();
+    const memberSession = await setupFreshInstallSession(
+      app,
+      databaseAdapter,
+      "invalid-write@example.com",
+      "member"
+    );
+
+    const missingPath = await app.fetch(
+      new Request(
+        "http://localhost:4310/v1/profiles/profile_1/artifacts/content",
+        {
+          body: JSON.stringify({ content: "x" }),
+          headers: memberSession.headers(
+            {
+              "Content-Type": "application/json",
+              "X-CSRF-Token": memberSession.csrfToken,
+            },
+            memberSession.orgId
+          ),
+          method: "PUT",
+        }
+      )
+    );
+    const missingContent = await app.fetch(
+      new Request(
+        "http://localhost:4310/v1/profiles/profile_1/artifacts/content?path=script.md",
+        {
+          body: JSON.stringify({}),
+          headers: memberSession.headers(
+            {
+              "Content-Type": "application/json",
+              "X-CSRF-Token": memberSession.csrfToken,
+            },
+            memberSession.orgId
+          ),
+          method: "PUT",
+        }
+      )
+    );
+
+    expect(missingPath.status).toBe(400);
+    expect(missingContent.status).toBe(400);
+    expect(writes).toEqual([]);
   });
 });

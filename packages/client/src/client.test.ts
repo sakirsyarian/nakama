@@ -176,6 +176,42 @@ test("readProfileArtifactContent fetches artifact bytes with inline query", asyn
   expect(new TextDecoder().decode(result.data)).toBe("# Report");
 });
 
+test("writeProfileArtifactContent puts UTF-8 content", async () => {
+  const fetchCalls: Array<{ input: RequestInfo | URL; init?: RequestInit }> =
+    [];
+  const client = createClient({
+    authToken: "local-auth-token",
+    baseUrl: "http://localhost:4310",
+    fetch: async (input, init) => {
+      fetchCalls.push({ init, input });
+      return Response.json({
+        filename: "weekly/report.md",
+        mimeType: "text/markdown",
+        profileId: "profile_1",
+        sizeBytes: 8,
+        updatedAt: "2026-08-15T00:00:00.000Z",
+      });
+    },
+    orgId: "org_test",
+  });
+
+  const result = await client.writeProfileArtifactContent(
+    "profile_1",
+    "weekly/report.md",
+    "# Done\n"
+  );
+
+  expect(fetchCalls[0]!.input.toString()).toBe(
+    "http://localhost:4310/v1/profiles/profile_1/artifacts/content?path=weekly%2Freport.md"
+  );
+  expect(fetchCalls[0]!.init?.method).toBe("PUT");
+  expect(fetchCalls[0]!.init?.body).toBe(
+    JSON.stringify({ content: "# Done\n" })
+  );
+  expect(result.filename).toBe("weekly/report.md");
+  expect(result.sizeBytes).toBe(8);
+});
+
 test("data import helpers upload base64 archive data", async () => {
   const fetchCalls: Array<{ input: RequestInfo | URL; init?: RequestInit }> =
     [];

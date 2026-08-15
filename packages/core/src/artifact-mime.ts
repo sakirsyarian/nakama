@@ -128,6 +128,18 @@ export function isTextArtifactMimeType(mimeType: string): boolean {
   );
 }
 
+/** UTF-8 text the dashboard can open in an editor (not Word, raster, video, or PDF). */
+export function isEditableArtifact(
+  filename: string,
+  mimeType: string
+): boolean {
+  if (isDocxFile(filename, mimeType) || isLegacyDocFile(filename, mimeType)) {
+    return false;
+  }
+
+  return isTextArtifactMimeType(resolveArtifactMimeType(mimeType, filename));
+}
+
 /** Raster images previewable with `<img>`; SVG stays in the text path. */
 export function isImageArtifactMimeType(mimeType: string): boolean {
   const normalized = normalizeMimeType(mimeType);

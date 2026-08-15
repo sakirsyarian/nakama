@@ -1,9 +1,17 @@
-import { readdir, readFile, realpath, stat, unlink } from "node:fs/promises";
+import {
+  readdir,
+  readFile,
+  realpath,
+  stat,
+  unlink,
+  writeFile,
+} from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
 import {
   inferArtifactMimeType,
   isDocxFile,
+  isEditableArtifact,
   isLegacyDocFile,
 } from "./artifact-mime";
 import type {
@@ -11,6 +19,7 @@ import type {
   DeleteArtifactResponse,
   ListArtifactsOptions,
   ListArtifactsResponse,
+  UpdateArtifactFileResponse,
 } from "./contract";
 import { convertDocxToMarkdown } from "./docx-text";
 import { pathExists } from "./fs";
@@ -175,6 +184,91 @@ export async function readArtifactFile(input: {
     bytes,
     contentType: metadata.mimeType,
     filePath,
+  };
+}
+
+function normalizeArtifactFilename(filename: string): string {
+  const posix = filename.replace(/\\/g, "/").replace(/^\.\//, "");
+  if (posix.startsWith("artifacts/")) {
+    return posix.slice("artifacts/".length);
+  }
+  return filename;
+}
+
+async function resolveExistingArtifactFile(input: {
+  orgId: string;
+  profileId: string;
+  filename: string;
+  contentBytes?: number;
+}): Promise<{
+  filePath: string;
+  fileStat: Awaited<ReturnType<typeof stat>>;
+  resolvedArtifactsDir: string;
+}> {
+  const filename = normalizeArtifactFilename(input.filename);
+  const artifactsDir = getProfileArtifactsDir(input.orgId, input.profileId);
+  const resolvedArtifactsDir = await realpath(artifactsDir);
+  const guarded = await guardFilePath(filename, null, input.contentBytes, {
+    allowedDirs: [resolvedArtifactsDir],
+    cwd: resolvedArtifactsDir,
+  });
+  const filePath = guarded.resolved;
+  const fileStat = await stat(filePath);
+
+  if (!fileStat.isFile()) {
+    throw new Error(`Artifact not found: ${input.filename}`);
+  }
+
+  return { filePath, fileStat, resolvedArtifactsDir };
+}
+
+export async function writeArtifactFile(input: {
+  orgId: string;
+  profileId: string;
+  filename: string;
+  content: string;
+}): Promise<UpdateArtifactFileResponse> {
+  if (isArtifactMetaFile(input.filename)) {
+    throw new Error("Artifact metadata sidecars cannot be edited.");
+  }
+
+  const contentBytes = Buffer.byteLength(input.content, "utf8");
+  const { filePath, fileStat, resolvedArtifactsDir } =
+    await resolveExistingArtifactFile({
+      contentBytes,
+      filename: input.filename,
+      orgId: input.orgId,
+      profileId: input.profileId,
+    });
+  const metadata = await readArtifactMeta(
+    filePath,
+    fileStat.size,
+    fileStat.mtime.toISOString()
+  );
+  const relativePath = path.relative(resolvedArtifactsDir, filePath);
+
+  if (!isEditableArtifact(relativePath, metadata.mimeType)) {
+    throw new Error("This artifact type cannot be edited as text.");
+  }
+
+  const updatedAt = new Date().toISOString();
+  await writeFile(filePath, input.content, "utf8");
+  await writeFile(
+    getArtifactMetaPath(filePath),
+    `${JSON.stringify({
+      mimeType: metadata.mimeType,
+      savedAt: updatedAt,
+      sizeBytes: contentBytes,
+    })}\n`,
+    "utf8"
+  );
+
+  return {
+    filename: relativePath.replaceAll("\\", "/"),
+    mimeType: metadata.mimeType,
+    profileId: input.profileId,
+    sizeBytes: contentBytes,
+    updatedAt,
   };
 }
 

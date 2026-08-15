@@ -1,5 +1,8 @@
 import type { ArtifactFile } from "@nakama/core/contract";
-import type { ChatArtifactRef } from "@/lib/chat-artifacts";
+import {
+  artifactContentWritePath,
+  type ChatArtifactRef,
+} from "@/lib/chat-artifacts";
 import { client } from "@/lib/client";
 
 /** Extend icon-sm (28px) to a 40px hit target without overlapping neighbors at gap-3. */
@@ -10,7 +13,7 @@ export function toChatArtifactRef(artifact: ArtifactFile): ChatArtifactRef {
   return {
     filename: artifact.filename,
     mimeType: artifact.mimeType,
-    path: artifact.path || artifact.filename,
+    path: artifactContentWritePath(artifact.path || artifact.filename),
     savedAt: artifact.updatedAt,
     sizeBytes: artifact.sizeBytes,
   };

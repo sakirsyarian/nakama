@@ -90,16 +90,16 @@ Artifacts are files your agent creates and saves for you — reports, summaries,
 
 They are not a separate builtin. Agents use `write_file` or `write_docx` with the `save-artifact` bundled skill under `artifacts/`. The skill also documents writing a `{filename}.nakama-meta.json` sidecar so the Artifacts tab shows MIME types and timestamps.
 
-On web chat, `write_file` and `write_docx` saves under `artifacts/` appear as attachment chips on the assistant message. Click a chip to open a resizable preview panel with copy, download, and fullscreen:
+On web chat, `write_file` and `write_docx` saves under `artifacts/` appear as attachment chips on the assistant message. Click a chip to open a resizable preview panel. Copy, download, and fullscreen are always available. Markdown and HTML have a Preview / source toggle: source is where you edit, then **Save**. Preview still shows the rendered file, including unsaved edits. JSON and other text files use **Edit** instead — they have no preview toggle. Word previews stay read-only.
 
 On **Telegram** and **Discord**, the same paired saves post a Publish share link after the agent reply; ask to “send the file” when you want a native attachment. See [Telegram](/telegram/chat#saved-artifacts-and-share-links) and [Discord](/discord#saved-artifacts-and-share-links).
 
 | Content type | Preview behavior |
 |--------------|------------------|
-| HTML (`.html`, `text/html`) | Sandboxed iframe render |
-| Markdown (`.md`, `text/markdown`) | Rendered prose |
-| Word (`.docx` from `write_docx`) | Server converts to Markdown for preview |
-| JSON, code, plain text | Syntax highlighting or monospace block |
+| HTML (`.html`, `text/html`) | Sandboxed iframe render; editable as source |
+| Markdown (`.md`, `text/markdown`) | Rendered prose; editable as source |
+| Word (`.docx` from `write_docx`) | Server converts to Markdown for preview (not editable) |
+| JSON, code, plain text | Syntax highlighting or monospace block; editable |
 | Unknown extension | UTF-8 sniff — preview when the bytes look like text |
 
 Legacy `.doc` (Word 97–2003) is not supported for generation or preview. Binary formats outside these paths show a download-only message.

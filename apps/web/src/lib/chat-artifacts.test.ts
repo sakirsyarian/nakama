@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { ChatListItem } from "@/lib/chat-history";
 import {
+  artifactContentWritePath,
   extractArtifactPathsFromText,
   extractTurnArtifacts,
   inferArtifactMimeType,
@@ -481,6 +482,23 @@ describe("toArtifactsRelativePath", () => {
 
   test("supports relative artifacts paths", () => {
     expect(toArtifactsRelativePath("artifacts/weekly/report.md")).toBe(
+      "weekly/report.md"
+    );
+  });
+});
+
+describe("artifactContentWritePath", () => {
+  test("keeps paths that are already relative to the artifacts dir", () => {
+    expect(artifactContentWritePath("weekly/report.md")).toBe(
+      "weekly/report.md"
+    );
+  });
+
+  test("strips an artifacts/ prefix and absolute artifacts roots", () => {
+    expect(artifactContentWritePath("artifacts/weekly/report.md")).toBe(
+      "weekly/report.md"
+    );
+    expect(artifactContentWritePath(`${ARTIFACTS_ROOT}/weekly/report.md`)).toBe(
       "weekly/report.md"
     );
   });

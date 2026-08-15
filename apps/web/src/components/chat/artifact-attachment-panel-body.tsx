@@ -54,7 +54,10 @@ function renderTextContent({
 }) {
   if (format === "markdown") {
     return (
-      <MessageResponse className="text-sm" isAnimating={streaming}>
+      <MessageResponse
+        className="w-full max-w-none text-sm"
+        isAnimating={streaming}
+      >
         {content}
       </MessageResponse>
     );
@@ -215,7 +218,9 @@ function ArtifactAttachmentTextBody({
   return (
     <div
       className={cn(
-        showCodeBlock ? "flex min-h-0 flex-1 flex-col" : "space-y-4"
+        showCodeBlock
+          ? "flex min-h-0 flex-1 flex-col"
+          : "w-full min-w-0 space-y-4"
       )}
     >
       {loading ? <LoadingState compact /> : null}

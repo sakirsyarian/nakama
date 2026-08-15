@@ -1,9 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import {
+  artifactCanEdit,
   artifactCanTogglePreviewSource,
   artifactPanelBodyClassName,
   artifactPanelHeaderMeta,
   artifactPanelHeadingName,
+  artifactPanelShowsEditAction,
+  artifactPanelShowsSourceEditor,
   artifactPanelTypeLabel,
 } from "./artifact-attachment-panel-body.shared";
 
@@ -17,6 +20,82 @@ describe("artifact preview source toggle", () => {
     ).toBe(true);
     expect(
       artifactCanTogglePreviewSource({ isHtml: false, isMarkdown: false })
+    ).toBe(false);
+  });
+});
+
+describe("artifact source editor", () => {
+  test("uses the source toggle as the editor for markdown and html", () => {
+    expect(
+      artifactPanelShowsSourceEditor({
+        canEdit: true,
+        canTogglePreview: true,
+        editing: false,
+        previewMode: "source",
+      })
+    ).toBe(true);
+    expect(
+      artifactPanelShowsSourceEditor({
+        canEdit: true,
+        canTogglePreview: true,
+        editing: false,
+        previewMode: "preview",
+      })
+    ).toBe(false);
+  });
+
+  test("keeps an explicit edit mode for json and plain text", () => {
+    expect(
+      artifactPanelShowsSourceEditor({
+        canEdit: true,
+        canTogglePreview: false,
+        editing: true,
+        previewMode: "preview",
+      })
+    ).toBe(true);
+    expect(
+      artifactPanelShowsEditAction({
+        canEdit: true,
+        canTogglePreview: false,
+      })
+    ).toBe(true);
+    expect(
+      artifactPanelShowsEditAction({
+        canEdit: true,
+        canTogglePreview: true,
+      })
+    ).toBe(false);
+  });
+
+  test("does not open an editor for viewers or Word previews", () => {
+    expect(
+      artifactPanelShowsSourceEditor({
+        canEdit: false,
+        canTogglePreview: true,
+        editing: false,
+        previewMode: "source",
+      })
+    ).toBe(false);
+  });
+});
+
+describe("artifact edit", () => {
+  test("allows markdown and text, not images or Word", () => {
+    expect(
+      artifactCanEdit({ filename: "script.md", mimeType: "text/markdown" })
+    ).toBe(true);
+    expect(
+      artifactCanEdit({ filename: "notes.txt", mimeType: "text/plain" })
+    ).toBe(true);
+    expect(
+      artifactCanEdit({ filename: "photo.png", mimeType: "image/png" })
+    ).toBe(false);
+    expect(
+      artifactCanEdit({
+        filename: "laporan.docx",
+        mimeType:
+          "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      })
     ).toBe(false);
   });
 });
@@ -75,6 +154,15 @@ describe("artifact panel body class", () => {
         isImage: false,
         isMarkdown: true,
         previewMode: "source",
+      })
+    ).toBe("flex flex-col overflow-hidden p-0");
+    expect(
+      artifactPanelBodyClassName({
+        editing: true,
+        isHtml: false,
+        isImage: false,
+        isMarkdown: true,
+        previewMode: "preview",
       })
     ).toBe("flex flex-col overflow-hidden p-0");
   });
