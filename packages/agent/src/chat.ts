@@ -44,6 +44,7 @@ import {
   estimateHistoryTokens,
   usableContextTokens,
 } from "./history-compaction";
+import { omitStaleArtifactWriteBodies } from "./omit-stale-artifact-writes";
 import {
   canRunToolCallsInParallel,
   executeToolCall,
@@ -681,10 +682,11 @@ async function generateReply(
   signal?: AbortSignal
 ) {
   const dateLine = `Today is ${formatCurrentDate()}.`;
-  const messages =
+  const hydrated =
     rehydrateMessagesForProvider === undefined
       ? history
       : await rehydrateMessagesForProvider(history);
+  const messages = omitStaleArtifactWriteBodies(hydrated);
   const input = {
     messages,
     providerOptions,

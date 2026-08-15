@@ -102,6 +102,8 @@ test("buildChatSystemPrompt includes artifact skill pointer when write_file is a
 
   expect(prompt).toContain("save-artifact skill");
   expect(prompt).not.toContain("save_artifact");
+  expect(prompt).toContain("read_file that path");
+  expect(prompt).toContain("Never delete_file under artifacts/");
 });
 
 test("buildChatSystemPrompt omits artifact guidance when write_file is unavailable", () => {

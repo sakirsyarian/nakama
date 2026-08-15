@@ -169,7 +169,8 @@ export function buildChatSystemPrompt(
       sections.push(
         "Skills are workflow instructions, not callable tools — never invoke save-artifact (or other skills) as a tool.",
         "When the user wants output kept or mentions artifacts, use write_file to save under artifacts/ (follow the save-artifact skill when active, including the metadata sidecar). Durable deliverables such as reports, slide decks, and exports belong under artifacts/, not the profile workspace root.",
-        "Do not use artifacts/ for soul files or MEMORY.md."
+        "Do not use artifacts/ for soul files or MEMORY.md.",
+        "Users can edit artifacts in the chat preview panel. Earlier write_file output in this chat is the original save, not later edits. Before revising an existing artifact, read_file that path, then edit_file the same path. Never delete_file under artifacts/ to replace a file — that breaks chat chips. write_file on an existing artifact path creates a new dated file and leaves the original."
       );
     }
 

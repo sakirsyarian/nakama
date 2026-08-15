@@ -133,6 +133,20 @@ function isArtifactPath(relativePath: string): boolean {
   );
 }
 
+function isResolvedUnderArtifacts(
+  resolvedPath: string,
+  workspaceRoot: string
+): boolean {
+  const artifactsRoot = path.resolve(workspaceRoot, "artifacts");
+  const relative = path.relative(artifactsRoot, resolvedPath);
+  return (
+    relative === "" ||
+    (relative !== ".." &&
+      !relative.startsWith(`..${path.sep}`) &&
+      !path.isAbsolute(relative))
+  );
+}
+
 function artifactRemapKey(context: ToolContext, relativePath: string): string {
   return `${context.sessionId ?? "default"}:${normalizeArtifactPath(relativePath)}`;
 }
@@ -263,7 +277,7 @@ function assertAbsoluteWorkspaceRoot(workspaceRoot: string): void {
 
 export const writeFileTool: ToolDefinition<WriteFileInput, WriteFileOutput> = {
   description:
-    "Write text content to a file in the active profile workspace. Creates parent directories if needed. Cannot produce Word documents — use write_docx for .docx.",
+    "Write text content to a file in the active profile workspace. Creates parent directories if needed. Cannot produce Word documents — use write_docx for .docx. Existing files under artifacts/ are not overwritten; a date suffix is added instead.",
   name: "write_file",
   parameters: jsonSchemaFromZod(writeFileInputSchema),
   run(input, context) {
@@ -394,7 +408,7 @@ export async function runWriteDocx(
 export const deleteFileTool: ToolDefinition<DeleteFileInput, DeleteFileOutput> =
   {
     description:
-      "Delete a file from disk. Only files within the profile workspace or custom tools directory can be deleted.",
+      "Delete a file from disk. Only files within the profile workspace or custom tools directory can be deleted. Cannot delete files under artifacts/ — revise with edit_file after read_file, or remove artifacts from the Artifacts tab.",
     name: "delete_file",
     parameters: jsonSchemaFromZod(deleteFileInputSchema),
     run(input, context) {
@@ -418,6 +432,16 @@ export async function runDeleteFile(
   );
   refuseProfileSkillMarkdownWrite(context, guarded.resolved);
   refuseSkillLocalToolFileWrite(guarded.resolved);
+  let workspaceRoot = options.workspaceRoot;
+  if (!workspaceRoot) {
+    const { orgId, profileId } = requireProfileScope(context);
+    workspaceRoot = getProfileSoulDir(orgId, profileId);
+  }
+  if (isResolvedUnderArtifacts(guarded.resolved, workspaceRoot)) {
+    throw new Error(
+      "Cannot delete files under artifacts/. Chat chips keep pointing at the original path. To revise, read_file then edit_file the same path. Remove artifacts from the Artifacts tab instead."
+    );
+  }
   await unlink(guarded.resolved);
 
   return { deleted: true, path: guarded.resolved };
@@ -425,7 +449,7 @@ export async function runDeleteFile(
 
 export const editFileTool: ToolDefinition<EditFileInput, EditFileOutput> = {
   description:
-    "Edit an existing text file with one or more exact replacements. Each oldText must be present once, non-overlapping, and is matched against the original file.",
+    "Edit an existing text file with one or more exact replacements. Each oldText must be present once, non-overlapping, and is matched against the original file. Use this to revise artifacts after read_file — do not delete and rewrite them.",
   name: "edit_file",
   parameters: jsonSchemaFromZod(editFileInputSchema),
   run(input, context) {

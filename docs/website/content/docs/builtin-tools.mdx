@@ -92,6 +92,8 @@ They are not a separate builtin. Agents use `write_file` or `write_docx` with th
 
 On web chat, `write_file` and `write_docx` saves under `artifacts/` appear as attachment chips on the assistant message. Click a chip to open a resizable preview panel. Copy, download, and fullscreen are always available. Markdown and HTML have Preview, source, and **Edit** tabs; **Edit** opens a text editor, then **Save**. Markdown preview replaces the file name with a contents menu when the file has more than one heading. JSON and other text files keep **Edit** in the action bar. Word previews stay read-only.
 
+Ask the agent to revise an artifact after you edit it in the panel — it reads the current file from disk, then updates that same path. It cannot delete files under `artifacts/` from chat; that would break older chips. Remove files from the Artifacts tab instead.
+
 On **Telegram** and **Discord**, the same paired saves post a Publish share link after the agent reply; ask to “send the file” when you want a native attachment. See [Telegram](/telegram/chat#saved-artifacts-and-share-links) and [Discord](/discord#saved-artifacts-and-share-links).
 
 | Content type | Preview behavior |
@@ -124,7 +126,7 @@ Write text to a file in the profile workspace.
 
 **Scope:** `~/.nakama/orgs/{orgId}/profiles/{profileId}/` and `~/.nakama/tools/` (custom JS modules)
 
-**Restrictions:** Rejects `.docx` and `.doc` paths — a `.docx` is a ZIP archive, not UTF-8 text. Use `write_docx` instead.
+**Restrictions:** Rejects `.docx` and `.doc` paths — a `.docx` is a ZIP archive, not UTF-8 text. Use `write_docx` instead. Under `artifacts/`, existing files are not overwritten; a date suffix is added instead.
 
 **Availability:** When assigned to the profile.
 
@@ -156,6 +158,8 @@ Delete a file from the profile workspace or custom tools directory.
 **Returns:** `{ path, deleted: true }`
 
 **Scope:** Profile workspace and custom tools directory only.
+
+**Restrictions:** Refuses paths under `artifacts/` so chat attachment chips keep working. Revise artifacts with `read_file` then `edit_file`. Remove files from the Artifacts tab.
 
 **Availability:** When assigned to the profile.
 

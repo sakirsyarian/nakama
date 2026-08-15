@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import {
+  artifactPreviewErrorMessage,
   type ChatArtifactRef,
   isHtmlArtifactMimeType,
   isImageArtifactMimeType,
@@ -54,7 +55,7 @@ export function useAuthenticatedImagePreview(
       .catch((fetchError) => {
         if (!cancelled) {
           setBlob(null);
-          setError(formatError(fetchError));
+          setError(artifactPreviewErrorMessage(formatError(fetchError)));
         }
       });
 
@@ -194,7 +195,7 @@ export function useArtifactPreviewContent({
       })
       .catch((fetchError) => {
         if (!cancelled) {
-          setError(formatError(fetchError));
+          setError(artifactPreviewErrorMessage(formatError(fetchError)));
         }
       })
       .finally(() => {

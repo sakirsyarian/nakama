@@ -40,6 +40,14 @@ Example for `artifacts/report.md`:
 3. `write_file` the metadata sidecar to `artifacts/{filename}.nakama-meta.json` using the same base filename from step 2.
 4. Confirm both paths in your reply so the user knows where to find the file. On web chat, saved artifacts also appear as attachment chips on the assistant message (with preview) in addition to the profile **Artifacts** tab.
 
+## Revising an existing artifact
+
+The user may have edited the file in the chat preview panel. Chat history shows the original `write_file` content, which can be stale.
+
+1. `read_file` the current path (do not rewrite from memory or earlier tool output).
+2. `edit_file` the **same path** with the requested changes.
+3. Do **not** `delete_file` an artifact to “replace” it. Chat chips keep pointing at the original path; deleting it makes earlier messages unopenable. `write_file` to an existing name creates a new dated file and leaves the original.
+
 ## MIME type guidance
 
 | Content | mimeType |

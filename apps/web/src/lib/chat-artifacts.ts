@@ -490,3 +490,11 @@ export function buildArtifactContentUrl(
 
   return `/v1/profiles/${encodeURIComponent(profileId)}/artifacts/content?${query.toString()}`;
 }
+
+export function artifactPreviewErrorMessage(error: string): string {
+  if (/ENOENT|no such file or directory|Artifact not found/i.test(error)) {
+    return "This file was moved or deleted. Open the latest attachment or Artifacts.";
+  }
+
+  return error;
+}

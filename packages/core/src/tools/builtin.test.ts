@@ -171,6 +171,22 @@ describe("file builtin tools", () => {
     await expect(readFile(targetPath, "utf8")).rejects.toThrow();
   });
 
+  test("delete_file refuses files under artifacts/", async () => {
+    tempDir = await mkdtemp(path.join(os.tmpdir(), "nakama-delete-artifact-"));
+    const artifactsDir = path.join(tempDir, "artifacts");
+    await mkdir(artifactsDir, { recursive: true });
+    const targetPath = path.join(artifactsDir, "script.md");
+    await writeFile(targetPath, "keep me", "utf8");
+
+    await expect(
+      runDeleteFile({ path: "artifacts/script.md" }, PROFILE_CONTEXT, {
+        workspaceRoot: tempDir,
+      })
+    ).rejects.toThrow(/Cannot delete files under artifacts/);
+
+    expect(await readFile(targetPath, "utf8")).toBe("keep me");
+  });
+
   test("edit_file replaces a unique text match", async () => {
     tempDir = await mkdtemp(path.join(os.tmpdir(), "nakama-edit-"));
     const targetPath = path.join(tempDir, "note.txt");
