@@ -95,10 +95,11 @@ export function AttachmentDetailPanel({
     let cancelled = false;
 
     function apply() {
-      if (cancelled) {
+      const panel = bodyRef.current;
+      if (cancelled || !panel) {
         return;
       }
-      writeArtifactPanelScrollRatio(root, ratio);
+      writeArtifactPanelScrollRatio(panel, ratio);
     }
 
     apply();
@@ -122,7 +123,11 @@ export function AttachmentDetailPanel({
     const target = getArtifactPanelScroller(root);
 
     function capture() {
-      scrollRatioRef.current = readArtifactPanelScrollRatio(root);
+      const panel = bodyRef.current;
+      if (!panel) {
+        return;
+      }
+      scrollRatioRef.current = readArtifactPanelScrollRatio(panel);
     }
 
     target.addEventListener("scroll", capture, { passive: true });
