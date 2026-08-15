@@ -13,8 +13,6 @@ import {
   artifactPanelBodyClassName,
   artifactPanelDefaultWidth,
   artifactPanelHeaderMeta,
-  artifactPanelShowsEditAction,
-  artifactPanelShowsSourceEditor,
   downloadActionLabel,
 } from "@/components/chat/artifact-attachment-panel-body.shared";
 import {
@@ -188,6 +186,7 @@ export function ArtifactAttachmentPreview({
     isHtml,
     isMarkdown,
   });
+  const showPreviewToggle = canTogglePreview;
   const header = artifactPanelHeaderMeta({
     filename: artifact.filename,
     mimeType,
@@ -220,19 +219,6 @@ export function ArtifactAttachmentPreview({
     open,
     profileId,
   });
-  const isSourceEditor =
-    !loading &&
-    artifactPanelShowsSourceEditor({
-      canEdit,
-      canTogglePreview,
-      editing,
-      previewMode,
-    });
-  const showEditAction = artifactPanelShowsEditAction({
-    canEdit,
-    canTogglePreview,
-  });
-  const showSaveActions = dirty || (editing && !canTogglePreview);
 
   useEffect(() => {
     if (!copied) {
@@ -242,6 +228,14 @@ export function ArtifactAttachmentPreview({
     const timeout = window.setTimeout(() => setCopied(false), 2000);
     return () => window.clearTimeout(timeout);
   }, [copied]);
+
+  function handlePreviewModeChange(next: ArtifactPreviewMode) {
+    if (editing) {
+      editorMountedRef.current = false;
+      setEditing(false);
+    }
+    setPreviewMode(next);
+  }
 
   function handleDraftChange(next: string) {
     draftRef.current = next;
@@ -253,16 +247,7 @@ export function ArtifactAttachmentPreview({
     loadingOverride?: boolean,
     mode: ArtifactPreviewMode = previewMode
   ) {
-    const sourceEditor =
-      !(loadingOverride ?? loading) &&
-      artifactPanelShowsSourceEditor({
-        canEdit,
-        canTogglePreview,
-        editing,
-        previewMode: mode,
-      });
-
-    if (sourceEditor) {
+    if (editing && !(loadingOverride ?? loading)) {
       const initial = dirty ? draftRef.current : (content ?? "");
       draftRef.current = initial;
       return (
@@ -285,7 +270,7 @@ export function ArtifactAttachmentPreview({
       <ArtifactAttachmentPreviewPanelBody
         artifact={artifact}
         canPreview={canPreview}
-        content={canEdit && dirty ? draftRef.current : content}
+        content={dirty ? draftRef.current : content}
         error={error}
         imagePreviewUrl={imagePreviewUrl}
         kind={panelKind}
@@ -299,16 +284,9 @@ export function ArtifactAttachmentPreview({
   }
 
   function buildPanelConfig(mode: ArtifactPreviewMode = previewMode) {
-    const sourceEditor = artifactPanelShowsSourceEditor({
-      canEdit,
-      canTogglePreview,
-      editing,
-      previewMode: mode,
-    });
-
     return {
       bodyClassName: artifactPanelBodyClassName({
-        editing: sourceEditor,
+        editing,
         isHtml,
         isImage,
         isMarkdown,
@@ -321,13 +299,13 @@ export function ArtifactAttachmentPreview({
         <>
           <ArtifactAttachmentPanelActions
             additionalMenuItems={<ArtifactShareMenuItem share={share} />}
-            canEdit={showEditAction}
+            canEdit={canEdit && !canTogglePreview}
             content={content}
             copied={copied}
             copyDisabled={isImage || isVideo}
             downloadLabel={downloadLabel}
             downloadUrl={downloadUrl}
-            editing={showSaveActions}
+            editing={editing || dirty}
             filename={artifact.filename}
             fullscreen={fullscreen}
             loading={loading}
@@ -345,8 +323,14 @@ export function ArtifactAttachmentPreview({
           />
         </>
       ),
-      leading: canTogglePreview ? (
-        <ArtifactPreviewModeToggle mode={mode} onChange={setPreviewMode} />
+      leading: showPreviewToggle ? (
+        <ArtifactPreviewModeToggle
+          editDisabled={loading && !content}
+          mode={editing ? "edit" : mode}
+          onChange={handlePreviewModeChange}
+          onEdit={startEditing}
+          showEdit={canEdit}
+        />
       ) : null,
       resizable: !fullscreen,
       subtitle: saveError ?? header.subtitle,
@@ -363,7 +347,7 @@ export function ArtifactAttachmentPreview({
     }
 
     const config = buildPanelConfig();
-    if (isSourceEditor) {
+    if (editing && !loading) {
       if (editorMountedRef.current) {
         update(id, {
           bodyClassName: config.bodyClassName,
@@ -411,13 +395,11 @@ export function ArtifactAttachmentPreview({
     share.busy,
     share.publishDialogOpen,
     previewMode,
+    showPreviewToggle,
     header.subtitle,
     header.title,
     header.typeLabel,
     canEdit,
-    isSourceEditor,
-    showEditAction,
-    showSaveActions,
     editing,
     dirty,
     saveError,
@@ -425,8 +407,12 @@ export function ArtifactAttachmentPreview({
   ]);
 
   function startEditing() {
-    draftRef.current = content ?? "";
-    setDirty(false);
+    if (editing) {
+      return;
+    }
+    if (!dirty) {
+      draftRef.current = content ?? "";
+    }
     setSaveError(null);
     editorMountedRef.current = false;
     setEditing(true);
@@ -438,9 +424,6 @@ export function ArtifactAttachmentPreview({
     setSaveError(null);
     editorMountedRef.current = false;
     setEditing(false);
-    if (canTogglePreview) {
-      setPreviewMode("preview");
-    }
   }
 
   function resetEditor() {
@@ -449,9 +432,6 @@ export function ArtifactAttachmentPreview({
     draftRef.current = "";
     setSaveError(null);
     editorMountedRef.current = false;
-    if (canTogglePreview) {
-      setPreviewMode("preview");
-    }
   }
 
   async function saveArtifact() {
@@ -467,6 +447,7 @@ export function ArtifactAttachmentPreview({
         profileId,
       });
       setContent(nextContent);
+      setEditing(false);
       setDirty(false);
       setSaveError(null);
     } catch (saveFailure) {

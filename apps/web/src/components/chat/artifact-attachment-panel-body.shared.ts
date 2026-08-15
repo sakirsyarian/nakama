@@ -48,39 +48,6 @@ export function artifactCanTogglePreviewSource({
   return isHtml || isMarkdown;
 }
 
-/** Markdown/HTML: source view is the editor. JSON/txt: explicit Edit. */
-export function artifactPanelShowsSourceEditor({
-  canEdit,
-  canTogglePreview,
-  previewMode,
-  editing,
-}: {
-  canEdit: boolean;
-  canTogglePreview: boolean;
-  previewMode: ArtifactPreviewMode;
-  editing: boolean;
-}): boolean {
-  if (!canEdit) {
-    return false;
-  }
-
-  if (canTogglePreview) {
-    return previewMode === "source";
-  }
-
-  return editing;
-}
-
-export function artifactPanelShowsEditAction({
-  canEdit,
-  canTogglePreview,
-}: {
-  canEdit: boolean;
-  canTogglePreview: boolean;
-}): boolean {
-  return canEdit && !canTogglePreview;
-}
-
 export function artifactCanEdit({
   filename,
   mimeType,

@@ -1,15 +1,31 @@
-import { CodeSquareIcon, ViewIcon } from "hugeicons-react";
+import { CodeSquareIcon, PencilIcon, ViewIcon } from "hugeicons-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
 export type ArtifactPreviewMode = "preview" | "source";
+export type ArtifactPanelView = ArtifactPreviewMode | "edit";
+
+function tabClass(active: boolean) {
+  return cn(
+    "size-6 rounded-sm",
+    active
+      ? "border-border bg-background text-foreground shadow-sm hover:bg-background"
+      : "text-muted-foreground"
+  );
+}
 
 export function ArtifactPreviewModeToggle({
   mode,
   onChange,
+  onEdit,
+  showEdit = false,
+  editDisabled = false,
 }: {
-  mode: ArtifactPreviewMode;
+  mode: ArtifactPanelView;
   onChange: (mode: ArtifactPreviewMode) => void;
+  onEdit?: () => void;
+  showEdit?: boolean;
+  editDisabled?: boolean;
 }) {
   return (
     <div
@@ -20,12 +36,7 @@ export function ArtifactPreviewModeToggle({
       <Button
         aria-label="Rendered"
         aria-pressed={mode === "preview"}
-        className={cn(
-          "size-6 rounded-sm",
-          mode === "preview"
-            ? "border-border bg-background text-foreground shadow-sm hover:bg-background"
-            : "text-muted-foreground"
-        )}
+        className={tabClass(mode === "preview")}
         onClick={() => onChange("preview")}
         size="icon-xs"
         type="button"
@@ -36,12 +47,7 @@ export function ArtifactPreviewModeToggle({
       <Button
         aria-label="Code"
         aria-pressed={mode === "source"}
-        className={cn(
-          "size-6 rounded-sm",
-          mode === "source"
-            ? "border-border bg-background text-foreground shadow-sm hover:bg-background"
-            : "text-muted-foreground"
-        )}
+        className={tabClass(mode === "source")}
         onClick={() => onChange("source")}
         size="icon-xs"
         type="button"
@@ -49,6 +55,20 @@ export function ArtifactPreviewModeToggle({
       >
         <CodeSquareIcon aria-hidden className="size-3.5" />
       </Button>
+      {showEdit ? (
+        <Button
+          aria-label="Edit"
+          aria-pressed={mode === "edit"}
+          className={tabClass(mode === "edit")}
+          disabled={editDisabled}
+          onClick={() => onEdit?.()}
+          size="icon-xs"
+          type="button"
+          variant="ghost"
+        >
+          <PencilIcon aria-hidden className="size-3.5" />
+        </Button>
+      ) : null}
     </div>
   );
 }
