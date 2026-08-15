@@ -79,6 +79,7 @@ export function PublicArtifactSharePage() {
   }, []);
 
   const downloadUrl = `${client.baseUrl}/v1/public/artifact-shares/${encodeURIComponent(token)}`;
+  const shareColumnClass = "mx-auto w-full max-w-5xl px-4";
 
   return (
     <div
@@ -87,8 +88,13 @@ export function PublicArtifactSharePage() {
         isHtml ? "flex h-svh flex-col overflow-hidden" : "h-svh overflow-y-auto"
       )}
     >
-      <header className="border-border border-b px-3 py-1.5">
-        <div className="flex items-center justify-between gap-3">
+      <header className="border-border border-b">
+        <div
+          className={cn(
+            "flex items-center justify-between gap-3 py-1.5",
+            isHtml ? "px-4" : shareColumnClass
+          )}
+        >
           <p className="truncate font-medium text-xs">
             {metadata?.filename ?? "Shared artifact"}
           </p>
@@ -108,7 +114,7 @@ export function PublicArtifactSharePage() {
         className={cn(
           isHtml
             ? "flex min-h-0 flex-1 flex-col overflow-hidden"
-            : "mx-auto max-w-5xl px-4 py-6"
+            : cn(shareColumnClass, "py-6")
         )}
       >
         {loading ? (
