@@ -131,6 +131,7 @@ export function CodeBlock({
           "overflow-auto bg-muted/20",
           fillHeight ? "min-h-0 flex-1" : maxScrollHeightClass
         )}
+        data-artifact-inner-scroll={fillHeight ? "" : undefined}
         style={gridStyle}
       >
         <div className="relative min-h-full" style={gridStyle}>

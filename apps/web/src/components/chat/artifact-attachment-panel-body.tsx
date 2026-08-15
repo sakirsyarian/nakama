@@ -1,5 +1,5 @@
 import { CodeBlock } from "@/components/ai-elements/code-block";
-import { MessageResponse } from "@/components/ai-elements/message";
+import { ArtifactMarkdownPreview } from "@/components/chat/artifact-markdown-preview";
 import type { ArtifactPreviewMode } from "@/components/chat/artifact-preview-mode-toggle";
 import { Spinner } from "@/components/ui/spinner";
 import {
@@ -53,14 +53,7 @@ function renderTextContent({
   fillHeight?: boolean;
 }) {
   if (format === "markdown") {
-    return (
-      <MessageResponse
-        className="w-full max-w-none text-sm"
-        isAnimating={streaming}
-      >
-        {content}
-      </MessageResponse>
-    );
+    return <ArtifactMarkdownPreview content={content} streaming={streaming} />;
   }
 
   return (

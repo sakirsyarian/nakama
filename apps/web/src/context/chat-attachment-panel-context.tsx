@@ -149,6 +149,7 @@ export function ChatAttachmentPanelProvider({
               onClose={handlePanelClose}
               onWidthChange={setWidth}
               resizable={config.resizable ?? !fullscreen}
+              scrollKey={config.id}
               subtitle={config.subtitle}
               subtitleClassName={config.subtitleClassName}
               title={config.title}

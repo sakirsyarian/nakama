@@ -4,7 +4,7 @@ import {
   Video01Icon,
   ViewIcon,
 } from "hugeicons-react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { ArtifactAttachmentPanelActions } from "@/components/chat/artifact-attachment-panel-actions";
 import { ArtifactAttachmentPanelBody } from "@/components/chat/artifact-attachment-panel-body";
 import {
@@ -15,6 +15,7 @@ import {
   artifactPanelHeaderMeta,
   downloadActionLabel,
 } from "@/components/chat/artifact-attachment-panel-body.shared";
+import { ArtifactMarkdownTocSelect } from "@/components/chat/artifact-markdown-preview";
 import {
   type ArtifactPreviewMode,
   ArtifactPreviewModeToggle,
@@ -51,6 +52,10 @@ import {
 } from "@/lib/chat-artifacts";
 import { client, formatError } from "@/lib/client";
 import { formatBytes } from "@/lib/knowledge-base-files";
+import {
+  extractMarkdownToc,
+  MARKDOWN_TOC_MIN_HEADINGS,
+} from "@/lib/markdown-toc";
 import { cn } from "@/lib/utils";
 
 interface ArtifactAttachmentPreviewProps {
@@ -219,6 +224,8 @@ export function ArtifactAttachmentPreview({
     open,
     profileId,
   });
+  const previewText = dirty ? draftRef.current : (content ?? "");
+  const toc = useMemo(() => extractMarkdownToc(previewText), [previewText]);
 
   useEffect(() => {
     if (!copied) {
@@ -284,6 +291,12 @@ export function ArtifactAttachmentPreview({
   }
 
   function buildPanelConfig(mode: ArtifactPreviewMode = previewMode) {
+    const showTocSelect =
+      isMarkdown &&
+      !editing &&
+      mode === "preview" &&
+      toc.length >= MARKDOWN_TOC_MIN_HEADINGS;
+
     return {
       bodyClassName: artifactPanelBodyClassName({
         editing,
@@ -323,20 +336,26 @@ export function ArtifactAttachmentPreview({
           />
         </>
       ),
-      leading: showPreviewToggle ? (
-        <ArtifactPreviewModeToggle
-          editDisabled={loading && !content}
-          mode={editing ? "edit" : mode}
-          onChange={handlePreviewModeChange}
-          onEdit={startEditing}
-          showEdit={canEdit}
-        />
-      ) : null,
+      leading:
+        showPreviewToggle || showTocSelect ? (
+          <>
+            {showPreviewToggle ? (
+              <ArtifactPreviewModeToggle
+                editDisabled={loading && !content}
+                mode={editing ? "edit" : mode}
+                onChange={handlePreviewModeChange}
+                onEdit={startEditing}
+                showEdit={canEdit}
+              />
+            ) : null}
+            {showTocSelect ? <ArtifactMarkdownTocSelect entries={toc} /> : null}
+          </>
+        ) : null,
       resizable: !fullscreen,
       subtitle: saveError ?? header.subtitle,
       subtitleClassName: saveError ? "text-destructive" : undefined,
-      title: header.title,
-      typeLabel: header.typeLabel,
+      title: showTocSelect ? "" : header.title,
+      typeLabel: null,
     };
   }
 
@@ -398,10 +417,10 @@ export function ArtifactAttachmentPreview({
     showPreviewToggle,
     header.subtitle,
     header.title,
-    header.typeLabel,
     canEdit,
     editing,
     dirty,
+    toc,
     saveError,
     updateArtifact.isPending,
   ]);
@@ -540,6 +559,7 @@ function ArtifactTextEditor({
     <div className="flex min-h-0 flex-1 flex-col">
       <textarea
         className="min-h-0 flex-1 resize-none overflow-y-auto border-0 bg-transparent px-4 py-3 font-mono text-sm leading-relaxed outline-none"
+        data-artifact-inner-scroll=""
         onChange={(event) => {
           const next = event.target.value;
           setValue(next);

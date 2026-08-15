@@ -4,8 +4,14 @@ import {
   type ReactNode,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useRef,
 } from "react";
+import {
+  getArtifactPanelScroller,
+  readArtifactPanelScrollRatio,
+  writeArtifactPanelScrollRatio,
+} from "@/components/chat/attachment-detail-panel-scroll";
 import { clampAttachmentPanelWidth } from "@/components/chat/attachment-panel-width";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
@@ -20,6 +26,7 @@ interface AttachmentDetailPanelProps {
   onClose: () => void;
   onWidthChange: (width: number) => void;
   resizable?: boolean;
+  scrollKey?: string;
   subtitle?: string | null;
   subtitleClassName?: string;
   title: string;
@@ -42,8 +49,12 @@ export function AttachmentDetailPanel({
   onWidthChange,
   onClose,
   className,
+  scrollKey,
 }: AttachmentDetailPanelProps) {
   const draggingRef = useRef(false);
+  const bodyRef = useRef<HTMLDivElement>(null);
+  const scrollKeyRef = useRef(scrollKey);
+  const scrollRatioRef = useRef(0);
 
   const clampWidth = useCallback(
     (nextWidth: number) => clampAttachmentPanelWidth(nextWidth),
@@ -66,6 +77,57 @@ export function AttachmentDetailPanel({
     window.addEventListener("resize", handleResize);
     return () => window.removeEventListener("resize", handleResize);
   }, [clampWidth, fullscreen, onWidthChange, width]);
+
+  useLayoutEffect(() => {
+    const root = bodyRef.current;
+    if (!root) {
+      return;
+    }
+
+    if (scrollKey !== scrollKeyRef.current) {
+      scrollKeyRef.current = scrollKey;
+      scrollRatioRef.current = 0;
+      writeArtifactPanelScrollRatio(root, 0);
+      return;
+    }
+
+    const ratio = scrollRatioRef.current;
+    let cancelled = false;
+
+    function apply() {
+      if (cancelled) {
+        return;
+      }
+      writeArtifactPanelScrollRatio(root, ratio);
+    }
+
+    apply();
+    const frame = requestAnimationFrame(() => {
+      apply();
+      requestAnimationFrame(apply);
+    });
+
+    return () => {
+      cancelled = true;
+      cancelAnimationFrame(frame);
+    };
+  }, [bodyClassName, children, fullscreen, scrollKey]);
+
+  useEffect(() => {
+    const root = bodyRef.current;
+    if (!root) {
+      return;
+    }
+
+    const target = getArtifactPanelScroller(root);
+
+    function capture() {
+      scrollRatioRef.current = readArtifactPanelScrollRatio(root);
+    }
+
+    target.addEventListener("scroll", capture, { passive: true });
+    return () => target.removeEventListener("scroll", capture);
+  }, [bodyClassName, children, fullscreen]);
 
   const updateWidthFromPointer = useCallback(
     (clientX: number) => {
@@ -136,27 +198,31 @@ export function AttachmentDetailPanel({
         <div className="flex items-center justify-between gap-3 border-border border-b px-4 py-3">
           <div className="flex min-w-0 flex-1 items-center gap-2.5">
             {leading}
-            <div className="min-w-0 flex-1">
-              <h2 className="truncate font-medium text-sm">
-                {title}
-                {typeLabel ? (
-                  <span className="font-normal text-muted-foreground">
-                    {" · "}
-                    {typeLabel}
-                  </span>
+            {title || typeLabel || (leading ? null : subtitle) ? (
+              <div className="min-w-0 flex-1">
+                {title || typeLabel ? (
+                  <h2 className="truncate font-medium text-sm">
+                    {title}
+                    {typeLabel ? (
+                      <span className="font-normal text-muted-foreground">
+                        {" · "}
+                        {typeLabel}
+                      </span>
+                    ) : null}
+                  </h2>
                 ) : null}
-              </h2>
-              {leading ? null : subtitle ? (
-                <p
-                  className={cn(
-                    "mt-0.5 truncate text-xs",
-                    subtitleClassName ?? "text-muted-foreground"
-                  )}
-                >
-                  {subtitle}
-                </p>
-              ) : null}
-            </div>
+                {leading ? null : subtitle ? (
+                  <p
+                    className={cn(
+                      "mt-0.5 truncate text-xs",
+                      subtitleClassName ?? "text-muted-foreground"
+                    )}
+                  >
+                    {subtitle}
+                  </p>
+                ) : null}
+              </div>
+            ) : null}
           </div>
           <div className="flex shrink-0 items-center gap-1">
             {headerActions}
@@ -173,6 +239,8 @@ export function AttachmentDetailPanel({
         </div>
         <div
           className={cn("min-h-0 flex-1 overflow-y-auto p-4", bodyClassName)}
+          data-artifact-panel-scroll=""
+          ref={bodyRef}
         >
           {children}
         </div>

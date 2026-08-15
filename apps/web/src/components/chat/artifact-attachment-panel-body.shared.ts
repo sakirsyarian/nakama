@@ -117,7 +117,7 @@ export function artifactPanelHeaderMeta({
     return {
       subtitle: null,
       title: artifactPanelHeadingName(filename),
-      typeLabel: artifactPanelTypeLabel({ filename, mimeType }),
+      typeLabel: null,
     };
   }
 

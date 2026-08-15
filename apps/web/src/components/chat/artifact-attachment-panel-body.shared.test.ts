@@ -65,7 +65,7 @@ describe("artifact panel header", () => {
     ).toBe("Markdown");
   });
 
-  test("replaces mime size subtitle with type when toggle is shown", () => {
+  test("hides mime size and type when the preview toggle is shown", () => {
     expect(
       artifactPanelHeaderMeta({
         filename: "notes.md",
@@ -76,7 +76,7 @@ describe("artifact panel header", () => {
     ).toEqual({
       subtitle: null,
       title: "notes",
-      typeLabel: "Markdown",
+      typeLabel: null,
     });
   });
 });
