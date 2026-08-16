@@ -424,6 +424,39 @@
   .chat-markdown li {
     padding-inline-start: 0.4em;
   }
+
+  /* Beat Streamdown heading utilities (text-3xl / text-2xl / …) in chat + artifacts. */
+  .chat-markdown h1,
+  .chat-markdown [data-streamdown="heading-1"] {
+    margin-block: 0.875rem 0.375rem;
+    font-size: 1.0625rem;
+  }
+
+  .chat-markdown h2,
+  .chat-markdown [data-streamdown="heading-2"] {
+    margin-block: 0.75rem 0.375rem;
+    font-size: 1rem;
+  }
+
+  .chat-markdown h3,
+  .chat-markdown [data-streamdown="heading-3"] {
+    margin-block: 0.625rem 0.25rem;
+    font-size: 0.9375rem;
+  }
+
+  .chat-markdown h4,
+  .chat-markdown [data-streamdown="heading-4"] {
+    margin-block: 0.625rem 0.25rem;
+    font-size: 0.875rem;
+  }
+
+  .chat-markdown h5,
+  .chat-markdown h6,
+  .chat-markdown [data-streamdown="heading-5"],
+  .chat-markdown [data-streamdown="heading-6"] {
+    margin-block: 0.5rem 0.25rem;
+    font-size: 0.875rem;
+  }
 }
 
 @layer components {
@@ -804,32 +837,14 @@
   .chat-markdown h1,
   .chat-markdown h2,
   .chat-markdown h3,
-  .chat-markdown h4 {
+  .chat-markdown h4,
+  .chat-markdown h5,
+  .chat-markdown h6 {
     font-family: var(--font-sans);
     font-weight: 600;
     line-height: 1.35;
     color: var(--foreground);
     letter-spacing: -0.015em;
-  }
-
-  .chat-markdown h1 {
-    margin-block: 0.875rem 0.375rem;
-    font-size: 1.0625rem;
-  }
-
-  .chat-markdown h2 {
-    margin-block: 0.75rem 0.375rem;
-    font-size: 1rem;
-  }
-
-  .chat-markdown h3 {
-    margin-block: 0.625rem 0.25rem;
-    font-size: 0.9375rem;
-  }
-
-  .chat-markdown h4 {
-    margin-block: 0.625rem 0.25rem;
-    font-size: 0.875rem;
   }
 
   .chat-markdown ul,
