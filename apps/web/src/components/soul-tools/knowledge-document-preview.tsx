@@ -64,10 +64,10 @@ export function KnowledgeDocumentPreview({
   document: KnowledgeBaseDocument;
   className?: string;
 }) {
-  const { show, update, activeId } = useChatAttachmentPanel();
+  const { show, update, activeId, isFullscreen } = useChatAttachmentPanel();
   const id = `kb-doc-${document.id}`;
   const open = activeId === id;
-  const [fullscreen, setFullscreen] = useState(false);
+  const fullscreen = open && isFullscreen;
   const [copied, setCopied] = useState(false);
   const [previewMode, setPreviewMode] =
     useState<ArtifactPreviewMode>("preview");
@@ -145,7 +145,12 @@ export function KnowledgeDocumentPreview({
           fullscreen={fullscreen}
           loading={loading}
           onCopy={() => void copyDocument()}
-          onToggleFullscreen={() => setFullscreen((current) => !current)}
+          onToggleFullscreen={() =>
+            update(id, {
+              fullscreen: !fullscreen,
+              resizable: fullscreen,
+            })
+          }
         />
       ),
       leading: showPreviewToggle ? (
@@ -208,7 +213,6 @@ export function KnowledgeDocumentPreview({
   }
 
   function openPanel() {
-    setFullscreen(false);
     setCopied(false);
     setPreviewMode("preview");
     show({
@@ -224,7 +228,6 @@ export function KnowledgeDocumentPreview({
       fullscreen: false,
       id,
       onClose: () => {
-        setFullscreen(false);
         setCopied(false);
         setPreviewMode("preview");
       },

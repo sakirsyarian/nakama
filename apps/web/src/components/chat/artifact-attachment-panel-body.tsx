@@ -105,9 +105,9 @@ function ArtifactAttachmentImageBody({
 }: Extract<ArtifactAttachmentPanelBodyProps, { kind: "image" }>) {
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      {loading ? <LoadingState /> : null}
+      {loading && !imagePreviewUrl ? <LoadingState /> : null}
       {error ? <p className="p-4 text-destructive text-sm">{error}</p> : null}
-      {!(loading || error) && imagePreviewUrl ? (
+      {!error && imagePreviewUrl ? (
         <div className="flex min-h-0 flex-1 items-center justify-center p-4">
           <img
             alt={artifact.filename}
@@ -132,9 +132,9 @@ function ArtifactAttachmentVideoBody({
 }: Extract<ArtifactAttachmentPanelBodyProps, { kind: "video" }>) {
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      {loading ? <LoadingState /> : null}
+      {loading && !videoPreviewUrl ? <LoadingState /> : null}
       {error ? <p className="p-4 text-destructive text-sm">{error}</p> : null}
-      {!(loading || error) && videoPreviewUrl ? (
+      {!error && videoPreviewUrl ? (
         <div className="flex min-h-0 flex-1 items-center justify-center p-4">
           <video
             aria-label={artifact.filename}
@@ -166,9 +166,9 @@ function ArtifactAttachmentHtmlBody({
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      {loading ? <LoadingState /> : null}
+      {loading && !content ? <LoadingState /> : null}
       {error ? <p className="p-4 text-destructive text-sm">{error}</p> : null}
-      {!(loading || error) && showSource && content
+      {!error && showSource && content
         ? renderTextContent({
             content,
             fillHeight: true,
@@ -176,7 +176,7 @@ function ArtifactAttachmentHtmlBody({
             language: "html",
           })
         : null}
-      {!(loading || error || showSource) && content ? (
+      {!(error || showSource) && content ? (
         <iframe
           className="min-h-0 w-full flex-1 border-0 bg-background"
           sandbox={htmlSandbox}
@@ -216,9 +216,9 @@ function ArtifactAttachmentTextBody({
           : "w-full min-w-0 space-y-4"
       )}
     >
-      {loading ? <LoadingState compact /> : null}
+      {loading && !content ? <LoadingState compact /> : null}
       {error ? <p className="text-destructive text-sm">{error}</p> : null}
-      {!(loading || error) && content
+      {!error && content
         ? renderTextContent({
             content,
             fillHeight: showCodeBlock,

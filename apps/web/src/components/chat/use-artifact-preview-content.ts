@@ -11,6 +11,33 @@ import {
 } from "@/lib/chat-artifacts";
 import { client, formatError } from "@/lib/client";
 
+type ArtifactPreviewCacheEntry = {
+  content: string | null;
+  mediaBlob: Blob | null;
+};
+
+const previewCache = new Map<string, ArtifactPreviewCacheEntry>();
+
+export function artifactPreviewCacheKey(profileId: string, path: string) {
+  return `${profileId}:${path}`;
+}
+
+export function clearArtifactPreviewCache() {
+  previewCache.clear();
+}
+
+function readPreviewCache(key: string): ArtifactPreviewCacheEntry | undefined {
+  return previewCache.get(key);
+}
+
+function writePreviewCache(
+  key: string,
+  patch: Partial<ArtifactPreviewCacheEntry>
+) {
+  const current = previewCache.get(key) ?? { content: null, mediaBlob: null };
+  previewCache.set(key, { ...current, ...patch });
+}
+
 export function useAuthenticatedImagePreview(
   profileId: string | null | undefined,
   artifactPath: string | null | undefined
@@ -103,25 +130,52 @@ export function useArtifactPreviewContent({
   profileId: string;
   artifact: ChatArtifactRef;
 }) {
+  const cacheKey = artifactPreviewCacheKey(profileId, artifact.path);
+  const cached = readPreviewCache(cacheKey);
+  const isBinaryMedia = isImage || isVideo;
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [content, setContent] = useState<string | null>(null);
-  const [mediaBlob, setMediaBlob] = useState<Blob | null>(null);
+  const [content, setContentState] = useState<string | null>(
+    cached?.content ?? null
+  );
+  const [mediaBlob, setMediaBlob] = useState<Blob | null>(
+    cached?.mediaBlob ?? null
+  );
+  const [activeCacheKey, setActiveCacheKey] = useState(cacheKey);
   const mediaPreviewUrl = useBlobObjectUrl(mediaBlob);
-  const isBinaryMedia = isImage || isVideo;
   // Load image bytes eagerly so chat chips can show a real thumbnail before the panel opens.
   const shouldLoad = open || isImage;
+
+  if (activeCacheKey !== cacheKey) {
+    const next = readPreviewCache(cacheKey);
+    setActiveCacheKey(cacheKey);
+    setContentState(next?.content ?? null);
+    setMediaBlob(next?.mediaBlob ?? null);
+    setError(null);
+    setLoading(false);
+  }
+
+  function setContent(next: string) {
+    setContentState(next);
+    writePreviewCache(cacheKey, { content: next });
+  }
 
   useEffect(() => {
     if (!(shouldLoad && canPreview)) {
       return;
     }
 
+    const cachedEntry = readPreviewCache(cacheKey);
     if (isBinaryMedia) {
-      if (mediaBlob !== null) {
+      const cachedBlob = cachedEntry?.mediaBlob ?? null;
+      if (cachedBlob) {
+        setMediaBlob(cachedBlob);
+        setLoading(false);
         return;
       }
-    } else if (content !== null) {
+    } else if (cachedEntry?.content != null) {
+      setContentState(cachedEntry.content);
+      setLoading(false);
       return;
     }
 
@@ -155,7 +209,9 @@ export function useArtifactPreviewContent({
             return;
           }
 
-          setMediaBlob(new Blob([result.data], { type: contentType }));
+          const blob = new Blob([result.data], { type: contentType });
+          writePreviewCache(cacheKey, { mediaBlob: blob });
+          setMediaBlob(blob);
           return;
         }
 
@@ -167,7 +223,9 @@ export function useArtifactPreviewContent({
             return;
           }
 
-          setMediaBlob(new Blob([result.data], { type: contentType }));
+          const blob = new Blob([result.data], { type: contentType });
+          writePreviewCache(cacheKey, { mediaBlob: blob });
+          setMediaBlob(blob);
           return;
         }
 
@@ -191,7 +249,9 @@ export function useArtifactPreviewContent({
           return;
         }
 
-        setContent(new TextDecoder().decode(result.data));
+        const text = new TextDecoder().decode(result.data);
+        writePreviewCache(cacheKey, { content: text });
+        setContentState(text);
       })
       .catch((fetchError) => {
         if (!cancelled) {
@@ -210,8 +270,7 @@ export function useArtifactPreviewContent({
   }, [
     shouldLoad,
     canPreview,
-    content,
-    mediaBlob,
+    cacheKey,
     isBinaryMedia,
     isHtml,
     isImage,

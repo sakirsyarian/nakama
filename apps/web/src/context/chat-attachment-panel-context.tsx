@@ -141,7 +141,9 @@ export function ChatAttachmentPanelProvider({
                   "absolute inset-y-0 right-0 z-30 h-full max-h-full overflow-hidden shadow-xl",
                 overlay &&
                   enterSlide &&
-                  "slide-in-from-right animate-in transition-none duration-200"
+                  "slide-in-from-right animate-in transition-none duration-200",
+                fullscreen &&
+                  "absolute inset-0 z-30 h-full w-full max-w-none shadow-none"
               )}
               fullscreen={fullscreen}
               headerActions={config.headerActions}

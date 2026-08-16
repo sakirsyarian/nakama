@@ -17,7 +17,7 @@ export function ChatPageColumn({
       className={cn(
         "flex min-h-0 min-w-0 flex-col transition-[width,opacity,padding] duration-200 ease-out motion-reduce:transition-none",
         attachmentPanel.isFullscreen
-          ? "pointer-events-none w-0 flex-none overflow-hidden px-0 opacity-0"
+          ? "pointer-events-none flex-1 overflow-hidden px-6 opacity-0"
           : "flex-1 px-6",
         centered && "justify-center"
       )}

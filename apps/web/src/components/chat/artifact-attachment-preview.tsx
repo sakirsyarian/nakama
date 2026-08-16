@@ -154,13 +154,13 @@ export function ArtifactAttachmentPreview({
   className,
   variant = "chip",
 }: ArtifactAttachmentPreviewProps) {
-  const { show, update, activeId } = useChatAttachmentPanel();
+  const { show, update, activeId, isFullscreen } = useChatAttachmentPanel();
   const share = useArtifactShareControls({
     artifactPath: artifact.path,
     profileId,
   });
   const open = activeId === id;
-  const [fullscreen, setFullscreen] = useState(false);
+  const fullscreen = open && isFullscreen;
   const [copied, setCopied] = useState(false);
   const [previewMode, setPreviewMode] =
     useState<ArtifactPreviewMode>("preview");
@@ -326,7 +326,12 @@ export function ArtifactAttachmentPreview({
             onCopy={() => void copyArtifact()}
             onEdit={startEditing}
             onSave={() => void saveArtifactRef.current()}
-            onToggleFullscreen={() => setFullscreen((current) => !current)}
+            onToggleFullscreen={() =>
+              update(id, {
+                fullscreen: !fullscreen,
+                resizable: fullscreen,
+              })
+            }
             saveDisabled={!dirty}
             saving={updateArtifact.isPending}
           />
@@ -394,7 +399,10 @@ export function ArtifactAttachmentPreview({
     open,
     update,
     id,
-    artifact,
+    artifact.filename,
+    artifact.mimeType,
+    artifact.path,
+    artifact.sizeBytes,
     fullscreen,
     isHtml,
     isImage,
@@ -504,7 +512,6 @@ export function ArtifactAttachmentPreview({
   }
 
   function openPanel() {
-    setFullscreen(false);
     setCopied(false);
     setPreviewMode("preview");
     resetEditor();
@@ -522,7 +529,6 @@ export function ArtifactAttachmentPreview({
       fullscreen: false,
       id,
       onClose: () => {
-        setFullscreen(false);
         setCopied(false);
         setPreviewMode("preview");
         resetEditor();

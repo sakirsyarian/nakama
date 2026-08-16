@@ -429,19 +429,19 @@
   .chat-markdown h1,
   .chat-markdown [data-streamdown="heading-1"] {
     margin-block: 0.875rem 0.375rem;
-    font-size: 1.0625rem;
+    font-size: 1.219rem;
   }
 
   .chat-markdown h2,
   .chat-markdown [data-streamdown="heading-2"] {
     margin-block: 0.75rem 0.375rem;
-    font-size: 1rem;
+    font-size: 1.125rem;
   }
 
   .chat-markdown h3,
   .chat-markdown [data-streamdown="heading-3"] {
     margin-block: 0.625rem 0.25rem;
-    font-size: 0.9375rem;
+    font-size: 1rem;
   }
 
   .chat-markdown h4,
@@ -689,7 +689,7 @@
     max-width: 68ch;
     font-family: var(--font-sans);
     font-size: 0.875rem;
-    line-height: 1.55;
+    line-height: 1.6;
     letter-spacing: 0.01em;
   }
 
@@ -823,7 +823,7 @@
   }
 
   .chat-markdown p {
-    margin-block: 0.625rem;
+    margin-block: 0.75rem;
   }
 
   .chat-markdown p:first-child {
@@ -849,7 +849,7 @@
 
   .chat-markdown ul,
   .chat-markdown ol {
-    margin-block: 0.5rem;
+    margin-block: 0.625rem;
   }
 
   .chat-markdown ul {
@@ -870,7 +870,7 @@
 
   .chat-markdown li {
     display: list-item;
-    margin-block: 0.3rem;
+    margin-block: 0.4rem;
   }
 
   .chat-markdown li::marker {
