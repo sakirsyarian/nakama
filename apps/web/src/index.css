@@ -813,23 +813,23 @@
   }
 
   .chat-markdown h1 {
-    margin-block: 1.125rem 0.5rem;
-    font-size: 1.25rem;
+    margin-block: 0.875rem 0.375rem;
+    font-size: 1.0625rem;
   }
 
   .chat-markdown h2 {
-    margin-block: 1rem 0.5rem;
-    font-size: 1.125rem;
-  }
-
-  .chat-markdown h3 {
-    margin-block: 0.875rem 0.375rem;
+    margin-block: 0.75rem 0.375rem;
     font-size: 1rem;
   }
 
-  .chat-markdown h4 {
-    margin-block: 0.75rem 0.375rem;
+  .chat-markdown h3 {
+    margin-block: 0.625rem 0.25rem;
     font-size: 0.9375rem;
+  }
+
+  .chat-markdown h4 {
+    margin-block: 0.625rem 0.25rem;
+    font-size: 0.875rem;
   }
 
   .chat-markdown ul,
