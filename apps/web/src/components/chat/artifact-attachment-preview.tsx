@@ -228,20 +228,16 @@ export function ArtifactAttachmentPreview({
     return () => window.clearTimeout(timeout);
   }, [copied]);
 
-  async function saveDraft() {
-    if (draft === null) {
-      return;
-    }
-
+  async function saveDraft(nextDraft: string) {
     setSaveError(null);
 
     try {
       await writeArtifact.mutateAsync({
         artifactPath: artifact.path,
-        content: draft,
+        content: nextDraft,
         profileId,
       });
-      setContent(draft);
+      setContent(nextDraft);
       setDraft(null);
     } catch (mutationError) {
       setSaveError(formatError(mutationError));
@@ -256,14 +252,13 @@ export function ArtifactAttachmentPreview({
       return (
         <ArtifactMarkdownEditor
           busy={writeArtifact.isPending}
-          draft={draft}
           error={saveError}
+          initialDraft={draft}
           onCancel={() => {
             setDraft(null);
             setSaveError(null);
           }}
-          onChange={setDraft}
-          onSave={() => void saveDraft()}
+          onSave={(nextDraft) => void saveDraft(nextDraft)}
         />
       );
     }

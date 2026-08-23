@@ -1,22 +1,30 @@
+import { useLayoutEffect, useRef, useState } from "react";
+import { restoreArtifactEditorScrollTop } from "@/components/chat/artifact-markdown-editor-scroll";
 import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
 import { Textarea } from "@/components/ui/textarea";
 
 export function ArtifactMarkdownEditor({
   busy,
-  draft,
   error,
+  initialDraft,
   onCancel,
-  onChange,
   onSave,
 }: {
   busy: boolean;
-  draft: string;
   error: string | null;
+  initialDraft: string;
   onCancel: () => void;
-  onChange: (value: string) => void;
-  onSave: () => void;
+  onSave: (value: string) => void;
 }) {
+  const [draft, setDraft] = useState(initialDraft);
+  const editorRef = useRef<HTMLTextAreaElement>(null);
+  const scrollTopRef = useRef(0);
+
+  useLayoutEffect(() => {
+    restoreArtifactEditorScrollTop(editorRef.current, scrollTopRef.current);
+  }, [draft]);
+
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-3 p-4">
       {error ? (
@@ -27,8 +35,16 @@ export function ArtifactMarkdownEditor({
 
       <Textarea
         className="field-sizing-fixed min-h-[16rem] flex-1 resize-none overflow-y-auto font-mono text-xs leading-relaxed"
+        data-artifact-inner-scroll=""
         disabled={busy}
-        onChange={(event) => onChange(event.target.value)}
+        onChange={(event) => {
+          scrollTopRef.current = event.currentTarget.scrollTop;
+          setDraft(event.currentTarget.value);
+        }}
+        onScroll={(event) => {
+          scrollTopRef.current = event.currentTarget.scrollTop;
+        }}
+        ref={editorRef}
         value={draft}
       />
 
@@ -42,7 +58,12 @@ export function ArtifactMarkdownEditor({
         >
           Cancel
         </Button>
-        <Button disabled={busy} onClick={onSave} size="sm" type="button">
+        <Button
+          disabled={busy}
+          onClick={() => onSave(draft)}
+          size="sm"
+          type="button"
+        >
           {busy ? <Spinner className="size-4" /> : "Save"}
         </Button>
       </div>

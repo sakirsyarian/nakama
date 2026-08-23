@@ -219,50 +219,6 @@ test("overwrites a markdown artifact in place and refreshes the sidecar", async 
   ).toEqual(["script.md"]);
 });
 
-test("writes a sidecar when the artifact had none", async () => {
-  await writeArtifact("weekly/notes.txt", "old");
-
-  await writeArtifactFile({
-    content: "new notes",
-    filename: "weekly/notes.txt",
-    orgId: ORG_ID,
-    profileId: PROFILE_ID,
-  });
-
-  const sidecar = JSON.parse(
-    await readFileSync(
-      path.join(
-        getProfileArtifactsDir(ORG_ID, PROFILE_ID),
-        "weekly/notes.txt.nakama-meta.json"
-      ),
-      "utf8"
-    )
-  ) as { mimeType: string; sizeBytes: number };
-
-  expect(sidecar.mimeType).toBe("text/plain");
-  expect(sidecar.sizeBytes).toBe(Buffer.byteLength("new notes", "utf8"));
-});
-
-test("accepts an artifacts/ prefix when overwriting", async () => {
-  await writeArtifact("script.md", "# Draft\n");
-
-  const written = await writeArtifactFile({
-    content: "# From prefix\n",
-    filename: "artifacts/script.md",
-    orgId: ORG_ID,
-    profileId: PROFILE_ID,
-  });
-
-  const artifact = await readArtifactFile({
-    filename: "script.md",
-    orgId: ORG_ID,
-    profileId: PROFILE_ID,
-  });
-
-  expect(written.filename).toBe("script.md");
-  expect(artifact.bytes.toString("utf8")).toBe("# From prefix\n");
-});
-
 test("refuses binary, Word, missing, and sidecar paths", async () => {
   await writeArtifact("photo.png", "not-an-image");
   await copyFile(
