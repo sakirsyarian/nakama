@@ -5,7 +5,7 @@ import { ensureProcessPath } from "./lib/ensure-process-path";
 
 ensureProcessPath();
 
-import { mergeOrgMemoryWithApprovedBullet } from "@nakama/agent";
+import { generateSkillConsolidateMarkdown } from "@nakama/agent";
 import {
   clearRuntimeServerUrl,
   DEFAULT_SERVER_HOST,
@@ -28,6 +28,7 @@ import {
   disableBunIdleTimeoutForLongHeldRequest,
   disableBunIdleTimeoutForSse,
 } from "./http/sse-idle-timeout";
+import { createProviderForInstance } from "./providers/create";
 import { runFirstBootSeed } from "./seed";
 import { AgentService } from "./services/agent-service";
 import { AuthService } from "./services/auth-service";
@@ -44,6 +45,8 @@ import {
 import { McpService } from "./services/mcp-service";
 import { OrgMemoryService } from "./services/org-memory-service";
 import { OrgService } from "./services/org-service";
+import { resolveProfileProviderSelection } from "./services/provider-instance-helpers";
+import { SkillCuratorService } from "./services/skill-curator-service";
 import { SkillProposalService } from "./services/skill-proposal-service";
 import { SkillSuggestionService } from "./services/skill-suggestion-service";
 import { SkillsService } from "./services/skills-service";
@@ -52,6 +55,7 @@ import { TaskRunner } from "./services/task-runner";
 import { TaskService } from "./services/task-service";
 import {
   registerGenerateImageTool,
+  registerSessionTools,
   registerSubAgentTool,
 } from "./services/tool-resolver";
 import { WorkerManagerService } from "./services/worker-manager-service";
@@ -62,6 +66,7 @@ import {
   createAutomationTools,
 } from "./tools/automation-tools";
 import { createGenerateImageTool } from "./tools/generate-image-tool";
+import { createSessionTools } from "./tools/session-tools";
 import { createSubAgentTool } from "./tools/sub-agent-tool";
 
 const projectRoot = join(dirname(fileURLToPath(import.meta.url)), "../../..");
@@ -100,6 +105,7 @@ const agent = new AgentService(
   llmUsageTracker
 );
 registerSubAgentTool(createSubAgentTool(agent));
+registerSessionTools(createSessionTools(agent));
 registerGenerateImageTool(
   createGenerateImageTool({
     db: database.adapter,
@@ -159,20 +165,45 @@ agent.setTaskRunner(taskRunner);
 const workerManager = new WorkerManagerService(projectRoot);
 
 const orgService = new OrgService(database.adapter, authService);
-const orgMemoryService = new OrgMemoryService(database.adapter, {
-  approvedBulletMerger: {
-    merge(content, bullet, options) {
-      return mergeOrgMemoryWithApprovedBullet(content, bullet, {
-        dateUtc: options.dateUtc,
-        pin: options.pin,
-        provider,
-      });
-    },
-  },
-});
+const orgMemoryService = new OrgMemoryService(database.adapter);
 const skillProposalService = new SkillProposalService(
   database.adapter,
   skillsService
+);
+const skillCuratorService = new SkillCuratorService(
+  database.adapter,
+  skillsService,
+  skillProposalService,
+  {
+    generateMarkdown: async (input) => {
+      const userConfig = agent.getUserConfig();
+      if (!userConfig) {
+        return null;
+      }
+      const profile = await database.adapter.getProfile(input.profileId);
+      if (!profile) {
+        return null;
+      }
+      const selection = resolveProfileProviderSelection({
+        defaultProviderId: userConfig.defaultProviderId,
+        profileModel: profile.model,
+        providers: userConfig.providers,
+      });
+      if (!selection) {
+        return null;
+      }
+      const provider = createProviderForInstance(
+        selection.instance,
+        selection.model
+      );
+      return generateSkillConsolidateMarkdown({
+        losers: input.losers,
+        mode: input.mode,
+        provider,
+        winner: input.winner,
+      });
+    },
+  }
 );
 agent.setSkillProposalService(skillProposalService);
 const skillSuggestionService = new SkillSuggestionService(
@@ -215,6 +246,7 @@ const app = createHonoApp({
   },
   orgMemoryService,
   orgService,
+  skillCuratorService,
   skillProposalService,
   skillSuggestionService,
   systemStatus,

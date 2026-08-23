@@ -6,6 +6,7 @@ import {
   createOrgMemoryChangeId,
   detectOrgMemoryInjectionWarnings,
   getOrgMemoryArchiveDir,
+  getOrgMemoryArchiveFilePath,
   getOrgMemoryDir,
   getOrgMemoryFilePath,
   getOrgMemoryHistoryEntry,
@@ -23,7 +24,7 @@ import {
   readDirectoryEntries,
   readText,
   readTextIfExists,
-  writePrivateTextFile,
+  writeTextFile,
 } from "@nakama/core/fs";
 import type { DatabaseAdapter, StoredOrgMemoryProposal } from "@nakama/db";
 
@@ -68,16 +69,7 @@ export interface ProposeOrgMemoryInput {
   sessionId?: string | null;
 }
 
-export interface OrgMemoryApprovedBulletMerger {
-  merge(
-    content: string,
-    bullet: string,
-    options: { pin: boolean; dateUtc: string }
-  ): Promise<string | null>;
-}
-
 export interface OrgMemoryServiceOptions {
-  approvedBulletMerger?: OrgMemoryApprovedBulletMerger;
   configDir?: string;
 }
 
@@ -365,7 +357,11 @@ export class OrgMemoryService {
     const archivedAt = options.archivedAt ?? new Date();
     const yearMonth = `${archivedAt.getFullYear()}-${String(archivedAt.getMonth() + 1).padStart(2, "0")}`;
     const archiveDir = getOrgMemoryArchiveDir(orgId, this.options.configDir);
-    const archivePath = join(archiveDir, `${yearMonth}.md`);
+    const archivePath = getOrgMemoryArchiveFilePath(
+      orgId,
+      yearMonth,
+      this.options.configDir
+    );
     const appendLines = [`<!-- archived: ${archivedAt.toISOString()} -->`];
     if (options.reason?.trim()) {
       appendLines.push(
@@ -388,7 +384,7 @@ export class OrgMemoryService {
       preamble: parsed.preamble,
       sections: parsed.sections,
     });
-    await writePrivateTextFile(archivePath, archiveContent, {
+    await writeTextFile(archivePath, archiveContent, {
       ensureDir: archiveDir,
     });
     await this.commitMemory(
@@ -522,23 +518,10 @@ export class OrgMemoryService {
     const dateUtc = utcDateString();
     const content = await this.getMemory(orgId);
 
-    let next = applyApprovedOrgMemoryBullet(content, proposal.bullet, {
+    const next = applyApprovedOrgMemoryBullet(content, proposal.bullet, {
       dateUtc,
       pin,
     });
-    if (this.options.approvedBulletMerger) {
-      const merged = await this.options.approvedBulletMerger.merge(
-        content,
-        proposal.bullet,
-        {
-          dateUtc,
-          pin,
-        }
-      );
-      if (merged) {
-        next = merged;
-      }
-    }
 
     await this.commitMemory(orgId, next, {
       action: "approve",
@@ -725,7 +708,7 @@ export class OrgMemoryService {
       return;
     }
 
-    await writePrivateTextFile(
+    await writeTextFile(
       getOrgMemoryFilePath(orgId, this.options.configDir),
       content,
       {

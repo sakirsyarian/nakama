@@ -1,188 +1,85 @@
-export const MARKDOWN_TOC_MIN_HEADINGS = 2;
-export const MARKDOWN_HEADING_ATTR = "data-artifact-heading";
-
-export interface MarkdownTocEntry {
-  id: string;
-  level: 1 | 2 | 3 | 4;
+export type MarkdownHeading = {
+  level: number;
+  /**
+   * Nth heading carrying this exact text. Scripts repeat titles ("Hook", "CTA"),
+   * so the jump target is resolved by text plus occurrence, not by text alone.
+   */
   occurrence: number;
-  slug: string;
   text: string;
-}
+};
 
-const ATX_HEADING = /^(#{1,4})\s+(.+?)\s*#*\s*$/;
-const FENCE_OPEN = /^(```|~~~)/;
-const SETEXT_H1 = /^=+$/;
-const SETEXT_H2 = /^-{3,}$/;
+/** A single heading is the document title, not an outline worth its own chrome. */
+export const MARKDOWN_TOC_MIN_HEADINGS = 2;
 
-export function slugifyMarkdownHeading(text: string): string {
-  const slug = text
-    .trim()
-    .toLowerCase()
-    .normalize("NFKD")
-    .replace(/\p{M}/gu, "")
-    .replace(/[^\p{L}\p{N}]+/gu, "-")
-    .replace(/^-+|-+$/g, "");
+const FENCE_PATTERN = /^ {0,3}(`{3,}|~{3,})/;
+/** 4+ leading spaces is an indented code block, so the hash is not a heading. */
+const HEADING_PATTERN = /^ {0,3}(#{1,3}) +(.*)$/;
 
-  return slug || "section";
-}
-
-export function uniqueMarkdownHeadingId(
-  text: string,
-  used: Map<string, number>
-): string {
-  const base = slugifyMarkdownHeading(text);
-  const count = used.get(base) ?? 0;
-  used.set(base, count + 1);
-
-  if (count === 0) {
-    return base;
-  }
-
-  return `${base}-${count + 1}`;
-}
-
-export function stripMarkdownInline(value: string): string {
-  return value
-    .replace(/!\[[^\]]*]\([^)]*\)/g, "")
-    .replace(/\[([^\]]*)]\([^)]*\)/g, "$1")
-    .replace(/[*_~`]+/g, "")
-    .replace(/\\([\\`*_[\]()#+.!-])/g, "$1")
+function plainMarkdownText(raw: string): string {
+  return raw
+    .replace(/\s+#+\s*$/, "")
+    .replace(/!\[([^\]]*)\]\([^)]*\)/g, "$1")
+    .replace(/\[([^\]]*)\]\([^)]*\)/g, "$1")
+    .replace(/[*_~`]/g, "")
+    .replace(/\s+/g, " ")
     .trim();
 }
 
-export function normalizeMarkdownHeadingText(value: string): string {
-  return stripMarkdownInline(value).replace(/\s+/g, " ").trim();
-}
+export function extractMarkdownHeadings(markdown: string): MarkdownHeading[] {
+  const headings: MarkdownHeading[] = [];
+  const seen = new Map<string, number>();
+  let openFence: string | null = null;
 
-function pushTocEntry(
-  entries: MarkdownTocEntry[],
-  used: Map<string, number>,
-  level: MarkdownTocEntry["level"],
-  rawText: string
-) {
-  const text = normalizeMarkdownHeadingText(rawText);
-  if (!text) {
-    return;
-  }
+  for (const line of markdown.split("\n")) {
+    const fence = FENCE_PATTERN.exec(line);
 
-  const slug = slugifyMarkdownHeading(text);
-  const occurrence = used.get(slug) ?? 0;
-  used.set(slug, occurrence + 1);
-  entries.push({
-    id: occurrence === 0 ? slug : `${slug}-${occurrence + 1}`,
-    level,
-    occurrence,
-    slug,
-    text,
-  });
-}
-
-export function extractMarkdownToc(markdown: string): MarkdownTocEntry[] {
-  const used = new Map<string, number>();
-  const entries: MarkdownTocEntry[] = [];
-  let inFence = false;
-  const lines = markdown.split(/\r?\n/);
-
-  for (let index = 0; index < lines.length; index += 1) {
-    const line = lines[index] ?? "";
-    const trimmed = line.trim();
-
-    if (FENCE_OPEN.test(trimmed)) {
-      inFence = !inFence;
-      continue;
-    }
-
-    if (inFence) {
-      continue;
-    }
-
-    const atx = ATX_HEADING.exec(trimmed);
-    if (atx) {
-      const hashes = atx[1];
-      const rawText = atx[2];
-      if (hashes && rawText != null) {
-        pushTocEntry(
-          entries,
-          used,
-          hashes.length as MarkdownTocEntry["level"],
-          rawText
-        );
+    if (fence) {
+      const marker = fence[1][0];
+      if (openFence === null) {
+        openFence = marker;
+      } else if (openFence === marker) {
+        openFence = null;
       }
       continue;
     }
 
-    const next = lines[index + 1]?.trim() ?? "";
-    if (!(trimmed && next) || trimmed.startsWith("#")) {
+    if (openFence !== null) {
       continue;
     }
 
-    if (SETEXT_H1.test(next)) {
-      pushTocEntry(entries, used, 1, trimmed);
-      index += 1;
+    const heading = HEADING_PATTERN.exec(line);
+    if (!heading) {
       continue;
     }
 
-    if (SETEXT_H2.test(next)) {
-      pushTocEntry(entries, used, 2, trimmed);
-      index += 1;
+    const text = plainMarkdownText(heading[2]);
+    if (!text) {
+      continue;
     }
+
+    const occurrence = seen.get(text) ?? 0;
+    seen.set(text, occurrence + 1);
+    headings.push({ level: heading[1].length, occurrence, text });
   }
 
-  return entries;
+  return headings;
 }
 
-export function headingTextFromChildren(children: unknown): string {
-  if (typeof children === "string" || typeof children === "number") {
-    return String(children);
-  }
-
-  if (Array.isArray(children)) {
-    return children.map((child) => headingTextFromChildren(child)).join("");
-  }
-
-  if (
-    children &&
-    typeof children === "object" &&
-    "props" in children &&
-    children.props &&
-    typeof children.props === "object" &&
-    "children" in children.props
-  ) {
-    return headingTextFromChildren(children.props.children);
-  }
-
-  return "";
-}
-
-export function queryMarkdownHeading(
-  root: ParentNode,
-  entry: Pick<MarkdownTocEntry, "occurrence" | "slug">
+/**
+ * The rendered markdown is the source of truth for where a heading landed, so the
+ * entry is matched back to its element by text rather than an injected anchor id.
+ */
+export function findHeadingElement(
+  root: HTMLElement | null,
+  heading: MarkdownHeading
 ): HTMLElement | null {
-  const nodes = root.querySelectorAll(
-    `[${MARKDOWN_HEADING_ATTR}="${CSS.escape(entry.slug)}"]`
-  );
-  const node = nodes[entry.occurrence];
-  return node instanceof HTMLElement ? node : null;
-}
-
-export function scrollMarkdownHeadingIntoView(
-  entry: Pick<MarkdownTocEntry, "occurrence" | "slug">
-) {
-  const panel = document.querySelector("[data-slot='attachment-detail-panel']");
-  const heading = queryMarkdownHeading(panel ?? document, entry);
-  if (!heading) {
-    return;
+  if (!root) {
+    return null;
   }
 
-  const scroller = heading.closest("[data-artifact-panel-scroll]");
-  if (scroller instanceof HTMLElement) {
-    const offset =
-      heading.getBoundingClientRect().top -
-      scroller.getBoundingClientRect().top +
-      scroller.scrollTop;
-    scroller.scrollTo({ behavior: "smooth", top: Math.max(0, offset - 12) });
-    return;
-  }
+  const matches = Array.from(
+    root.querySelectorAll<HTMLElement>("h1, h2, h3")
+  ).filter((element) => element.textContent?.trim() === heading.text);
 
-  heading.scrollIntoView({ behavior: "smooth", block: "start" });
+  return matches[heading.occurrence] ?? null;
 }

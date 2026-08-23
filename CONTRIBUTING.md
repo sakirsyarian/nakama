@@ -29,7 +29,7 @@ bun run dev:web      # web dashboard (starts the server if needed)
 bun run dev:cli      # terminal client
 ```
 
-- Local Bun web dashboard: http://localhost:3000
+- Local Bun web dashboard: http://localhost:3003
 - Docker single-container dashboard (API + web + workers): http://localhost:4310
 
 See [AGENTS.md](./AGENTS.md) for Docker run/build scripts and deeper layout notes.
@@ -60,9 +60,10 @@ Lint and format with Biome via [Ultracite](https://www.ultracite.ai/). Config: `
 ```bash
 bun run check   # ultracite check
 bun run fix     # ultracite fix
+bun run knip    # unused files, dependencies, and exports
 ```
 
-Husky runs `bun x ultracite fix` on staged files in `.husky/pre-commit` and re-stages them. Fix issues locally before pushing; CI expects a clean check.
+Husky runs `bun x ultracite fix` on staged files in `.husky/pre-commit` and re-stages them. Fix issues locally before pushing. CI fails on Knip findings (`bun run knip`).
 
 ## Testing
 
@@ -100,6 +101,16 @@ When adding or changing a page:
 
 ## Workflow
 
+**Claim the issue before you build.** Comment on it and wait to be assigned. An
+assignee is the only signal other contributors have: a branch on your fork is
+invisible from this repo, so two people can spend a day on the same feature
+without either one seeing the other. Before starting, check the open PRs for that
+issue number too, not just the issue:
+
+```bash
+gh pr list --repo ahmadrosid/nakama --search "<issue-number>"
+```
+
 1. Branch from `main` (or fork, then branch)
 2. One concern per PR
 3. Push and open a PR:
@@ -109,7 +120,7 @@ git push -u origin HEAD
 gh pr create
 ```
 
-4. PR body should state what changed, what you verified, and remaining risks
+4. PR body uses the ADHD PR format in [`.agents/skills/adhd-pr-description/SKILL.md`](./.agents/skills/adhd-pr-description/SKILL.md) — outcome lead, Before/After, Why safe (≤3), residual risk, tight test plan. Agents opening PRs via `ce-commit-push-pr` must follow that skill.
 5. CI must pass before merge
 
 Do not rewrite `AGENTS.md`, `README.md`, or `ARCHITECTURE.md` unless the change is specifically about those files.

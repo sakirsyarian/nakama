@@ -6,12 +6,14 @@ import {
   findProviderInstance,
   isOllamaCloudInstance,
   isValidBaseUrl,
+  NakamaApiError,
   normalizeBaseUrl,
   normalizeProviderInstanceLabel,
   type OllamaHostMode,
   ollamaRequiresApiKey,
   type ProviderInstance,
   resolveOllamaHostMode,
+  type UserConfig,
   validateCustomModels,
   validateDisplayName,
   validateProviderInstanceLabel,
@@ -30,6 +32,7 @@ import {
   isOpenRouterModelSlug,
   resolveModel,
   validateCerebrasCustomModels,
+  validateCloudflareCustomModels,
   validateFireworksCustomModels,
   validateOllamaCustomModels,
   validateOpenCodeGoCustomModels,
@@ -235,6 +238,8 @@ export function applyProviderInstanceUpdate(
       next.customModels = validateFireworksCustomModels(request.customModels);
     } else if (instance.type === "ollama") {
       next.customModels = validateOllamaCustomModels(request.customModels);
+    } else if (instance.type === "cloudflare") {
+      next.customModels = validateCloudflareCustomModels(request.customModels);
     } else if (instance.type === "opencode_go") {
       next.customModels = validateOpenCodeGoCustomModels(request.customModels);
     } else if (
@@ -444,6 +449,36 @@ export function extractStoredModelId(
   return decodeStoredModelSelection(trimmed)?.modelId ?? trimmed;
 }
 
+/** Decode `providerId::modelId` and resolve the provider, or null if unset. */
+export function resolveConfiguredModelInstance(
+  userConfig: UserConfig | null | undefined,
+  storedModel: string | null | undefined,
+  errors: { invalid: string; missingProvider: string }
+): { instance: ProviderInstance; modelId: string } | null {
+  const trimmed = storedModel?.trim();
+
+  if (!trimmed) {
+    return null;
+  }
+
+  const decoded = decodeStoredModelSelection(trimmed);
+
+  if (!decoded || decoded.providerId === "__unknown__") {
+    throw new NakamaApiError(errors.invalid, 400);
+  }
+
+  const instance = findProviderInstance(
+    { providers: userConfig?.providers ?? [] },
+    decoded.providerId
+  );
+
+  if (!instance) {
+    throw new NakamaApiError(errors.missingProvider, 400);
+  }
+
+  return { instance, modelId: decoded.modelId.trim() };
+}
+
 export function resolveProfileProviderSelection(options: {
   providers: ProviderInstance[];
   defaultProviderId: string | null | undefined;
@@ -464,7 +499,7 @@ export function resolveProfileProviderSelection(options: {
   if (decoded && decoded.providerId !== "__unknown__") {
     const explicit = findProviderInstance({ providers }, decoded.providerId);
 
-    if (explicit && modelExistsOnInstance(explicit, decoded.modelId)) {
+    if (explicit) {
       return {
         instance: explicit,
         model: resolveModel(
@@ -483,23 +518,13 @@ export function resolveProfileProviderSelection(options: {
       modelExistsOnInstance(instance, selectedModel)
     );
 
-    if (
-      active &&
-      matchingProviders.some((instance) => instance.id === active.id)
-    ) {
-      return {
-        instance: active,
-        model: resolveModel(active.type, selectedModel, active.customModels),
-      };
-    }
-
     const catalogProvider = getModelById(selectedModel)?.provider;
     const preferred =
-      (catalogProvider
-        ? matchingProviders.find(
-            (instance) => instance.type === catalogProvider
-          )
-        : null) ?? matchingProviders[0];
+      matchingProviders.find((instance) => instance.type === catalogProvider) ??
+      (active && matchingProviders.some((instance) => instance.id === active.id)
+        ? active
+        : undefined) ??
+      matchingProviders[0];
 
     if (preferred) {
       return {

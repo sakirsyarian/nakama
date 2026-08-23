@@ -14,13 +14,13 @@ import type {
 } from "@nakama/core";
 import { resolveRequestClientOrigin } from "../../services/composio-callback-url";
 import { sessionTurnRegistry } from "../../services/session-turn-registry";
+import type { ServerOptions } from "../context";
 import {
   requireActiveOrgIdFromContext,
   requireNotViewerFromContext,
 } from "../org-guards";
 import {
   errorResponse,
-  getRequestAuth,
   json,
   parseChannel,
   readJson,
@@ -340,7 +340,7 @@ export function registerSessionRoutes(
   );
 
   app.post("/v1/sessions", async (c) => {
-    const auth = getRequestAuth(c);
+    const auth = requireNotViewerFromContext(c);
     const orgId = requireActiveOrgIdFromContext(c);
     const body = await readJson<CreateSessionRequest>(c.req.raw);
     const channel = parseChannel(body.channel);
@@ -373,11 +373,13 @@ export function registerSessionRoutes(
   });
 
   app.delete("/v1/sessions/:sessionId", async (c) => {
+    requireNotViewerFromContext(c);
+    const orgId = requireActiveOrgIdFromContext(c);
     const sessionId = decodeURIComponent(c.req.param("sessionId"));
     const purge = c.req.query("purge") === "true";
     const cleared = purge
-      ? await agent.purgeSession(sessionId)
-      : await agent.clearSession(sessionId);
+      ? await agent.purgeSession(sessionId, orgId)
+      : await agent.clearSession(sessionId, orgId);
 
     if (!cleared) {
       return errorResponse("Session not found", 404);
@@ -387,13 +389,19 @@ export function registerSessionRoutes(
   });
 
   app.post("/v1/sessions/:sessionId/compact", async (c) => {
+    requireNotViewerFromContext(c);
+    const orgId = requireActiveOrgIdFromContext(c);
     const sessionId = decodeURIComponent(c.req.param("sessionId"));
     const body = await readJson<CompactSessionRequest>(c.req.raw).catch(
       () => ({})
     );
-    const result = await agent.compactSession(sessionId, {
-      force: body.force ?? false,
-    });
+    const result = await agent.compactSession(
+      sessionId,
+      {
+        force: body.force ?? false,
+      },
+      orgId
+    );
 
     if (!result) {
       return errorResponse("Session not found", 404);
@@ -403,16 +411,17 @@ export function registerSessionRoutes(
   });
 
   app.get("/v1/sessions/:sessionId/messages", async (c) => {
+    const orgId = requireActiveOrgIdFromContext(c);
     const sessionId = decodeURIComponent(c.req.param("sessionId"));
-    const result = await agent.getSessionMessages(sessionId);
+    const result = await agent.getSessionMessages(sessionId, orgId);
 
     if (!result) {
       return errorResponse("Session not found", 404);
     }
 
-    const todos = (await agent.getSessionTodos(sessionId)) ?? [];
+    const todos = (await agent.getSessionTodos(sessionId, orgId)) ?? [];
     const questionnaire =
-      (await agent.getSessionQuestionnaire(sessionId)) ?? null;
+      (await agent.getSessionQuestionnaire(sessionId, orgId)) ?? null;
     return json<SessionMessagesResponse>({
       channel: result.channel,
       contextUsage: result.contextUsage,
@@ -424,8 +433,9 @@ export function registerSessionRoutes(
   });
 
   app.get("/v1/sessions/:sessionId/status", async (c) => {
+    const orgId = requireActiveOrgIdFromContext(c);
     const sessionId = decodeURIComponent(c.req.param("sessionId"));
-    const result = await agent.getSessionMessages(sessionId);
+    const result = await agent.getSessionMessages(sessionId, orgId);
 
     if (!result) {
       return errorResponse("Session not found", 404);
@@ -439,8 +449,9 @@ export function registerSessionRoutes(
   });
 
   app.get("/v1/sessions/:sessionId/stream", async (c) => {
+    const orgId = requireActiveOrgIdFromContext(c);
     const sessionId = decodeURIComponent(c.req.param("sessionId"));
-    const result = await agent.getSessionMessages(sessionId);
+    const result = await agent.getSessionMessages(sessionId, orgId);
 
     if (!result) {
       return errorResponse("Session not found", 404);
@@ -456,10 +467,16 @@ export function registerSessionRoutes(
   });
 
   app.post("/v1/sessions/:sessionId/branch", async (c) => {
+    requireNotViewerFromContext(c);
     try {
+      const orgId = requireActiveOrgIdFromContext(c);
       const sessionId = decodeURIComponent(c.req.param("sessionId"));
       const body = await readJson<BranchSessionRequest>(c.req.raw);
-      const result = await agent.branchSession(sessionId, body.messageIndex);
+      const result = await agent.branchSession(
+        sessionId,
+        body.messageIndex,
+        orgId
+      );
 
       if (!result) {
         return errorResponse("Session not found", 404);
@@ -474,8 +491,9 @@ export function registerSessionRoutes(
 
   app.post("/v1/sessions/:sessionId/messages", async (c) => {
     requireNotViewerFromContext(c);
+    const orgId = requireActiveOrgIdFromContext(c);
     const sessionId = decodeURIComponent(c.req.param("sessionId"));
-    const session = await agent.resolveSession(sessionId);
+    const session = await agent.resolveSession(sessionId, orgId);
 
     if (!session) {
       return errorResponse("Session not found", 404);

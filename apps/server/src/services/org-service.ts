@@ -38,6 +38,10 @@ import {
 } from "@nakama/db";
 import type { AuthService } from "./auth-service";
 
+const LAST_MEMBERSHIP_MESSAGE =
+  "Cannot archive your last remaining organization.";
+const LAST_ORGANIZATION_MESSAGE =
+  "Cannot archive the last remaining organization.";
 const SLUG_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const PHONE_PATTERN = /^[+0-9()\-\s]{6,32}$/;
@@ -53,14 +57,62 @@ export class OrgService {
     return organizations.map(toOrganizationSummary);
   }
 
+  async getOrganization(orgId: string): Promise<OrganizationSummary | null> {
+    const org = await this.databaseAdapter.getOrganizationById(orgId);
+    return org ? toOrganizationSummary(org) : null;
+  }
+
+  private async requireActiveOrganization(
+    orgId: string
+  ): Promise<StoredOrganizationRecord> {
+    const org = await this.databaseAdapter.getOrganizationById(orgId);
+    if (!org || org.archivedAt) {
+      throw new NakamaApiError("Not found", 404);
+    }
+    return org;
+  }
+
+  async archiveOrganization(
+    orgId: string,
+    actorUserId?: string
+  ): Promise<OrganizationSummary> {
+    const org = await this.requireActiveOrganization(orgId);
+
+    if (actorUserId) {
+      const memberships =
+        await this.databaseAdapter.listUserOrganizations(actorUserId);
+      const onlyMembership =
+        memberships.length === 1 && memberships[0]?.organization.id === orgId;
+      if (onlyMembership) {
+        throw new NakamaApiError(LAST_MEMBERSHIP_MESSAGE, 409);
+      }
+    }
+
+    const now = new Date().toISOString();
+    const archived = await this.databaseAdapter.tryMarkOrganizationArchived(
+      orgId,
+      now
+    );
+    if (!archived) {
+      const current = await this.databaseAdapter.getOrganizationById(orgId);
+      if (!current || current.archivedAt) {
+        throw new NakamaApiError("Not found", 404);
+      }
+      throw new NakamaApiError(LAST_ORGANIZATION_MESSAGE, 409);
+    }
+
+    return toOrganizationSummary({
+      ...org,
+      archivedAt: now,
+      updatedAt: now,
+    });
+  }
+
   async updateOrganization(
     orgId: string,
     request: UpdateOrganizationRequest
   ): Promise<OrganizationSummary> {
-    const org = await this.databaseAdapter.getOrganizationById(orgId);
-    if (!org) {
-      throw new NakamaApiError("Not found", 404);
-    }
+    const org = await this.requireActiveOrganization(orgId);
 
     const name = request.name === undefined ? org.name : request.name.trim();
     if (request.name !== undefined && !name) {
@@ -71,6 +123,15 @@ export class OrgService {
     const updated: StoredOrganizationRecord = {
       ...org,
       name,
+      skillsCuratorConsolidateEnabled:
+        request.skillsCuratorConsolidateEnabled === undefined
+          ? (org.skillsCuratorConsolidateEnabled ?? false)
+          : request.skillsCuratorConsolidateEnabled,
+      skillsCuratorEnabled:
+        request.skillsCuratorEnabled === undefined
+          ? (org.skillsCuratorEnabled ?? false)
+          : request.skillsCuratorEnabled,
+      skillsCuratorLastRunAt: org.skillsCuratorLastRunAt ?? null,
       skillsPostTurnReview:
         request.skillsPostTurnReview === undefined
           ? (org.skillsPostTurnReview ?? false)
@@ -84,6 +145,36 @@ export class OrgService {
 
     await this.databaseAdapter.upsertOrganization(updated);
     return toOrganizationSummary(updated);
+  }
+
+  async markSkillsCuratorRan(orgId: string, ranAt: string): Promise<void> {
+    const org = await this.databaseAdapter.getOrganizationById(orgId);
+    if (!org) {
+      throw new NakamaApiError("Not found", 404);
+    }
+
+    await this.databaseAdapter.upsertOrganization({
+      ...org,
+      skillsCuratorLastRunAt: ranAt,
+      updatedAt: ranAt,
+    });
+  }
+
+  async listSkillCuratorOrgs(): Promise<
+    Array<{
+      id: string;
+      skillsCuratorEnabled: boolean;
+      skillsCuratorLastRunAt: string | null;
+    }>
+  > {
+    const organizations = await this.databaseAdapter.listOrganizations();
+    return organizations
+      .filter((org) => org.skillsCuratorEnabled && !org.archivedAt)
+      .map((org) => ({
+        id: org.id,
+        skillsCuratorEnabled: true,
+        skillsCuratorLastRunAt: org.skillsCuratorLastRunAt ?? null,
+      }));
   }
 
   async createOrganization(
@@ -147,6 +238,12 @@ export class OrgService {
     const memberships =
       await this.databaseAdapter.listUserOrganizations(userId);
     if (memberships.length === 0) {
+      if (sessionId) {
+        await this.databaseAdapter.updateBrowserSessionActiveOrgId(
+          sessionId,
+          null
+        );
+      }
       return null;
     }
 
@@ -155,7 +252,7 @@ export class OrgService {
       ? memberships.find((membership) => membership.organization.id === trimmed)
       : undefined;
     const activeOrgId =
-      matched?.organization.id ?? memberships[0]!.organization.id;
+      matched?.organization.id ?? memberships[0].organization.id;
 
     if (sessionId && activeOrgId !== (trimmed ?? null)) {
       await this.databaseAdapter.updateBrowserSessionActiveOrgId(
@@ -506,10 +603,7 @@ export class OrgService {
     role: OrgRole;
     invitedByUserId: string;
   }): Promise<OrgInviteCreatedResponse> {
-    const org = await this.databaseAdapter.getOrganizationById(input.orgId);
-    if (!org) {
-      throw new NakamaApiError("Not found", 404);
-    }
+    await this.requireActiveOrganization(input.orgId);
 
     const email = normalizeEmail(input.email);
     if (!EMAIL_PATTERN.test(email)) {
@@ -588,6 +682,8 @@ export class OrgService {
     }
 
     assertInviteUsable(invite);
+
+    await this.requireActiveOrganization(invite.orgId);
 
     const password = request.password?.trim();
     if (!password) {
@@ -675,6 +771,7 @@ export class OrgService {
       await this.authService.hashPassword(newPassword),
       now
     );
+    await this.databaseAdapter.revokeBrowserSessionsForUser(user.id, now);
   }
 
   private async assertCanChangeAdminMembership(
@@ -827,9 +924,14 @@ function toOrganizationSummary(
   record: StoredOrganizationRecord
 ): OrganizationSummary {
   return {
+    archivedAt: record.archivedAt ?? null,
     createdAt: record.createdAt,
     id: record.id,
     name: record.name,
+    skillsCuratorConsolidateEnabled:
+      record.skillsCuratorConsolidateEnabled ?? false,
+    skillsCuratorEnabled: record.skillsCuratorEnabled ?? false,
+    skillsCuratorLastRunAt: record.skillsCuratorLastRunAt ?? null,
     skillsPostTurnReview: record.skillsPostTurnReview ?? false,
     skillsWriteApproval: record.skillsWriteApproval ?? false,
     slug: record.slug,

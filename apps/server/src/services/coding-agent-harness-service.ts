@@ -8,12 +8,23 @@ import type {
   StoredCodingAgentHarnessProbeCache,
   StoredCodingAgentHarnessRecord,
 } from "@nakama/db";
-import { WORKSPACE_SETTINGS_ID } from "@nakama/db";
+import {
+  isCodingAgentProviderPassthroughEnabled,
+  mergeWorkspaceSettings,
+} from "@nakama/db";
 import {
   ensureBunGlobalInstallDirs,
   ensureProcessPath,
   getToolExecutionEnv,
 } from "../lib/ensure-process-path";
+import {
+  buildGlobalPackageInstallPlan,
+  CLI_SIGTERM_GRACE_MS,
+  detectNpmOrBun,
+  probeCliVersion,
+  runTimedInstallCommand,
+  summarizeInstallOutput,
+} from "./cli-package-install";
 import { buildHarnessNonInteractiveArgs } from "./coding-agent-command";
 import {
   formatModelForHarness,
@@ -23,7 +34,7 @@ import {
 } from "./coding-agent-spawn-env";
 
 /** How long a timed-out child gets to honour SIGTERM before it is killed. */
-const SIGTERM_GRACE_MS = 2000;
+const SIGTERM_GRACE_MS = CLI_SIGTERM_GRACE_MS;
 
 export interface CodingAgentHarnessStatus
   extends StoredCodingAgentHarnessRecord {
@@ -35,12 +46,6 @@ export interface CodingAgentHarnessStatus
   version: string | null;
 }
 
-interface CodingAgentInstallPlan {
-  args: string[];
-  command: string;
-  displayCommand: string;
-}
-
 const HARNESS_PACKAGES: Partial<Record<StoredCodingAgentHarnessKind, string>> =
   {
     claude_code: "@anthropic-ai/claude-code",
@@ -49,22 +54,10 @@ const HARNESS_PACKAGES: Partial<Record<StoredCodingAgentHarnessKind, string>> =
     pi: "@earendil-works/pi-coding-agent",
   };
 
-function detectCodingHarnessPackageManager(): "npm" | "bun" {
-  if (Bun.which("npm")) {
-    return "npm";
-  }
-
-  if (Bun.which("bun")) {
-    return "bun";
-  }
-
-  return "npm";
-}
-
 export function buildCodingHarnessInstallPlan(
   kind: StoredCodingAgentHarnessKind,
-  packageManager: "npm" | "bun" = detectCodingHarnessPackageManager()
-): CodingAgentInstallPlan {
+  packageManager: "npm" | "bun" = detectNpmOrBun()
+) {
   const pkg = HARNESS_PACKAGES[kind];
 
   if (!pkg) {
@@ -75,23 +68,12 @@ export function buildCodingHarnessInstallPlan(
     );
   }
 
-  if (packageManager === "bun") {
-    return {
-      args: ["install", "-g", "--trust", pkg],
-      command: "bun",
-      displayCommand: `bun install -g --trust ${pkg}`,
-    };
-  }
-
-  return {
-    args: ["install", "-g", pkg],
-    command: "npm",
-    displayCommand: `npm install -g ${pkg}`,
-  };
+  return buildGlobalPackageInstallPlan(pkg, packageManager);
 }
 
 export interface CodingAgentWorkspaceSettings {
   harnesses: StoredCodingAgentHarnessRecord[];
+  providerPassthroughEnabled: boolean;
   selectedHarnessId: string | null;
 }
 
@@ -99,6 +81,7 @@ const PROBE_CACHE_TTL_MS = 5 * 60 * 1000;
 
 export interface CodingAgentHarnessProbeContext {
   profileModel?: string | null;
+  providerPassthroughEnabled?: boolean;
   userConfig?: UserConfig | null;
 }
 
@@ -166,6 +149,9 @@ export async function loadCodingAgentWorkspaceSettings(
 
   return {
     harnesses: mergeHarnesses(stored?.codingAgentHarnesses ?? []),
+    providerPassthroughEnabled: isCodingAgentProviderPassthroughEnabled(
+      stored ?? null
+    ),
     selectedHarnessId: stored?.selectedCodingAgentHarness ?? null,
   };
 }
@@ -193,6 +179,11 @@ export async function listCodingAgentHarnessStatuses(
         };
       }
 
+      const probeContext = withPassthroughProbeContext(
+        options.probeContext,
+        settings.providerPassthroughEnabled
+      );
+
       const shouldProbe =
         probe && (probeHarnessId === null || probeHarnessId === harness.id);
 
@@ -201,7 +192,7 @@ export async function listCodingAgentHarnessStatuses(
           return buildHarnessStatusFromCache(harness, runtime);
         }
 
-        const light = await probeHarnessLight(harness, options.probeContext);
+        const light = await probeHarnessLight(harness, probeContext);
 
         return {
           ...harness,
@@ -222,7 +213,7 @@ export async function listCodingAgentHarnessStatuses(
           ready: false,
           statusMessage: null,
         },
-        options.probeContext
+        probeContext
       );
 
       return {
@@ -273,7 +264,10 @@ export async function refreshCodingAgentHarnessProbe(
       ready: false,
       statusMessage: null,
     },
-    probeContext
+    withPassthroughProbeContext(
+      probeContext,
+      settings.providerPassthroughEnabled
+    )
   );
 
   const checkedAt = new Date().toISOString();
@@ -302,6 +296,7 @@ export async function saveCodingAgentWorkspaceSettings(
   db: DatabaseAdapter,
   input: {
     selectedHarnessId?: string | null;
+    providerPassthroughEnabled?: boolean;
     harnesses?: Array<{
       id: string;
       command?: string;
@@ -337,19 +332,21 @@ export async function saveCodingAgentWorkspaceSettings(
       : input.selectedHarnessId && byId.has(input.selectedHarnessId)
         ? input.selectedHarnessId
         : null;
+  const providerPassthroughEnabled =
+    input.providerPassthroughEnabled ?? settings.providerPassthroughEnabled;
 
-  await db.upsertWorkspaceSettings({
-    codingAgentHarnesses: nextHarnesses,
-    id: stored?.id ?? WORKSPACE_SETTINGS_ID,
-    imageModel: stored?.imageModel ?? null,
-    selectedCodingAgentHarness: selectedHarnessId,
-    transcriptionModel: stored?.transcriptionModel ?? null,
-    updatedAt: new Date().toISOString(),
-    visionModel: stored?.visionModel ?? null,
-  });
+  await db.upsertWorkspaceSettings(
+    mergeWorkspaceSettings(stored, {
+      codingAgentHarnesses: nextHarnesses,
+      codingAgentProviderPassthrough: providerPassthroughEnabled,
+      selectedCodingAgentHarness: selectedHarnessId,
+      updatedAt: new Date().toISOString(),
+    })
+  );
 
   return {
     harnesses: nextHarnesses,
+    providerPassthroughEnabled,
     selectedHarnessId,
   };
 }
@@ -637,15 +634,13 @@ async function saveHarnessProbeCache(
     harness.id === harnessId ? { ...harness, probeCache } : harness
   );
 
-  await db.upsertWorkspaceSettings({
-    codingAgentHarnesses: nextHarnesses,
-    id: stored?.id ?? WORKSPACE_SETTINGS_ID,
-    imageModel: stored?.imageModel ?? null,
-    selectedCodingAgentHarness: settings.selectedHarnessId,
-    transcriptionModel: stored?.transcriptionModel ?? null,
-    updatedAt: new Date().toISOString(),
-    visionModel: stored?.visionModel ?? null,
-  });
+  await db.upsertWorkspaceSettings(
+    mergeWorkspaceSettings(stored, {
+      codingAgentHarnesses: nextHarnesses,
+      selectedCodingAgentHarness: settings.selectedHarnessId,
+      updatedAt: new Date().toISOString(),
+    })
+  );
 }
 
 async function clearHarnessProbeCache(
@@ -658,21 +653,19 @@ async function clearHarnessProbeCache(
     harness.id === harnessId ? { ...harness, probeCache: null } : harness
   );
 
-  await db.upsertWorkspaceSettings({
-    codingAgentHarnesses: nextHarnesses,
-    id: stored?.id ?? WORKSPACE_SETTINGS_ID,
-    imageModel: stored?.imageModel ?? null,
-    selectedCodingAgentHarness: settings.selectedHarnessId,
-    transcriptionModel: stored?.transcriptionModel ?? null,
-    updatedAt: new Date().toISOString(),
-    visionModel: stored?.visionModel ?? null,
-  });
+  await db.upsertWorkspaceSettings(
+    mergeWorkspaceSettings(stored, {
+      codingAgentHarnesses: nextHarnesses,
+      selectedCodingAgentHarness: settings.selectedHarnessId,
+      updatedAt: new Date().toISOString(),
+    })
+  );
 }
 
 async function getHarnessRuntimeStatus(
   command: string
 ): Promise<Pick<CodingAgentHarnessStatus, "installed" | "version">> {
-  const initial = await probeHarnessVersion(command);
+  const initial = await probeCliVersion(command);
 
   if (initial.installed || !initial.missing) {
     return {
@@ -682,7 +675,7 @@ async function getHarnessRuntimeStatus(
   }
 
   ensureProcessPath();
-  const retried = await probeHarnessVersion(command);
+  const retried = await probeCliVersion(command);
 
   return {
     installed: retried.installed,
@@ -690,64 +683,59 @@ async function getHarnessRuntimeStatus(
   };
 }
 
-async function probeHarnessVersion(command: string): Promise<{
-  installed: boolean;
-  version: string | null;
-  missing: boolean;
+export function getCodingHarnessLoginCommand(
+  kind: StoredCodingAgentHarnessKind
+): string | null {
+  if (kind === "codex") {
+    return "codex login";
+  }
+
+  if (kind === "claude_code") {
+    return "claude auth login";
+  }
+
+  if (kind === "opencode") {
+    return "opencode auth login";
+  }
+
+  if (kind === "pi") {
+    return "pi login";
+  }
+
+  return null;
+}
+
+export function listCodingHarnessLoginCommands(): Array<{
+  command: string;
+  name: string;
 }> {
-  const { spawn } = await import("node:child_process");
-  const timeoutMs = 5000;
-
-  return new Promise((resolve) => {
-    const child = spawn(command, ["--version"], {
-      env: getToolExecutionEnv(),
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    let stdout = "";
-    let stderr = "";
-
-    // The bash tool awaits this probe, so a CLI that never answers --version
-    // would otherwise hold the turn open forever. Resolve on the timer instead
-    // of waiting for close, because a child that ignores SIGTERM never emits
-    // one. `missing: false` keeps getHarnessRuntimeStatus from paying the
-    // timeout a second time on its PATH retry.
-    const timeoutId = setTimeout(() => {
-      child.kill("SIGTERM");
-      resolve({ installed: false, missing: false, version: null });
-    }, timeoutMs);
-
-    child.stdout?.on("data", (chunk) => {
-      stdout += chunk.toString();
-    });
-    child.stderr?.on("data", (chunk) => {
-      stderr += chunk.toString();
-    });
-    child.once("error", (error) => {
-      clearTimeout(timeoutId);
-      resolve({
-        installed: false,
-        missing: (error as NodeJS.ErrnoException).code === "ENOENT",
-        version: null,
-      });
-    });
-    child.once("close", (code) => {
-      clearTimeout(timeoutId);
-      resolve({
-        installed: code === 0,
-        missing: false,
-        version: code === 0 ? extractVersion(stdout, stderr) : null,
-      });
-    });
+  return DEFAULT_HARNESSES.flatMap((harness) => {
+    const command = getCodingHarnessLoginCommand(harness.kind);
+    return command ? [{ command, name: harness.name }] : [];
   });
 }
 
-function extractVersion(stdout: string, stderr: string): string | null {
-  const output = `${stdout}\n${stderr}`.trim();
-  if (!output) {
-    return null;
+function withPassthroughProbeContext(
+  probeContext: CodingAgentHarnessProbeContext | undefined,
+  providerPassthroughEnabled: boolean
+): CodingAgentHarnessProbeContext {
+  return {
+    ...probeContext,
+    providerPassthroughEnabled:
+      probeContext?.providerPassthroughEnabled ?? providerPassthroughEnabled,
+  };
+}
+
+function harnessNativeLoginMessage(
+  harness: Pick<CodingAgentHarnessStatus, "kind" | "name">
+): string {
+  const login = getCodingHarnessLoginCommand(harness.kind);
+
+  if (login) {
+    return `${harness.name} is installed. Uses harness login on this server (\`${login}\`).`;
   }
 
-  return output.split(/\r?\n/, 1)[0]?.trim() || null;
+  return `${harness.name} is installed. Uses host Cursor auth (no Nakama provider passthrough).`;
 }
 
 export function getCodingHarnessInstallCommand(
@@ -805,7 +793,7 @@ export async function installCodingAgentHarness(
   emitProgress(`Starting ${harness.name} install.`);
   emitProgress(installPlan.displayCommand);
 
-  const result = await runInstallCommand(installPlan, emitProgress);
+  const result = await runTimedInstallCommand(installPlan, emitProgress);
   const combinedOutput = [result.stdout, result.stderr]
     .filter(Boolean)
     .join("\n")
@@ -839,12 +827,15 @@ async function probeHarnessLight(
   nextStep: "retry" | null;
   statusMessage: string | null;
 }> {
-  if (harness.kind === "cursor_agent") {
+  if (
+    harness.kind === "cursor_agent" ||
+    probeContext?.providerPassthroughEnabled === false
+  ) {
     return {
       authenticated: null,
       nextStep: null,
       ready: true,
-      statusMessage: `${harness.name} is installed. Uses host Cursor auth (no Nakama provider passthrough).`,
+      statusMessage: harnessNativeLoginMessage(harness),
     };
   }
 
@@ -887,15 +878,31 @@ async function probeHarnessExec(
       authenticated: null,
       nextStep: null,
       ready: true,
-      statusMessage: `${harness.name} is installed. Uses host Cursor auth (no Nakama provider passthrough).`,
+      statusMessage: harnessNativeLoginMessage(harness),
     };
   }
 
-  const { spawn, routing } = await resolveCodingAgentSpawnBundle({
-    harnessKind: harness.kind,
-    profileModel: probeContext?.profileModel ?? null,
-    userConfig: probeContext?.userConfig,
-  });
+  const passthrough = probeContext?.providerPassthroughEnabled !== false;
+  const { spawn, routing } = passthrough
+    ? await resolveCodingAgentSpawnBundle({
+        harnessKind: harness.kind,
+        profileModel: probeContext?.profileModel ?? null,
+        userConfig: probeContext?.userConfig,
+      })
+    : {
+        routing: {
+          active: false,
+          apiKey: null,
+          baseUrl: null,
+          compatible: false,
+          configured: false,
+          error: null,
+          model: null,
+          providerLabel: null,
+          providerType: null,
+        },
+        spawn: { env: {} as Record<string, string> },
+      };
   const tempDir = await mkdtemp(
     path.join(tmpdir(), "nakama-coding-agent-probe-")
   );
@@ -934,20 +941,30 @@ async function probeHarnessExec(
         authenticated: true,
         nextStep: null,
         ready: true,
-        statusMessage: `${harness.name} is installed and ready via Nakama provider passthrough.`,
+        statusMessage: passthrough
+          ? `${harness.name} is installed and ready via Nakama provider passthrough.`
+          : harnessNativeLoginMessage(harness),
       };
     }
 
     if (looksLikeAuthenticationFailure(combinedOutput)) {
+      const login = getCodingHarnessLoginCommand(harness.kind);
+      const nativeHint = login
+        ? `Run \`${login}\` on this server.`
+        : "Authenticate the CLI on this server.";
+
       return {
         authenticated: false,
         nextStep: "retry",
         ready: false,
-        statusMessage:
-          routing.error ??
-          (combinedOutput
-            ? `${harness.name} could not authenticate with the configured Nakama provider. ${summarizeProbeOutput(combinedOutput)} Check Settings → Provider.`
-            : `${harness.name} could not authenticate with the configured Nakama provider. Check Settings → Provider.`),
+        statusMessage: passthrough
+          ? (routing.error ??
+            (combinedOutput
+              ? `${harness.name} could not authenticate with the configured Nakama provider. ${summarizeProbeOutput(combinedOutput)} Check Settings → Provider.`
+              : `${harness.name} could not authenticate with the configured Nakama provider. Check Settings → Provider.`))
+          : combinedOutput
+            ? `${harness.name} could not authenticate with harness login. ${summarizeProbeOutput(combinedOutput)} ${nativeHint}`
+            : `${harness.name} could not authenticate with harness login. ${nativeHint}`,
       };
     }
 
@@ -1053,142 +1070,6 @@ function looksLikeAuthenticationFailure(output: string): boolean {
   return /log\s?in|login|sign\s?in|authenticate|authentication|not authenticated|api key|token|credential/i.test(
     output
   );
-}
-
-async function runInstallCommand(
-  plan: CodingAgentInstallPlan,
-  onProgress?: (message: string) => void
-): Promise<{
-  exitCode: number | null;
-  stdout: string;
-  stderr: string;
-  timedOut: boolean;
-}> {
-  const { spawn } = await import("node:child_process");
-  const timeoutMs = 120_000;
-
-  return new Promise((resolve) => {
-    const child = spawn(plan.command, plan.args, {
-      env: getToolExecutionEnv(),
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    let stdout = "";
-    let stderr = "";
-    let timedOut = false;
-    let stdoutBuffer = "";
-    let stderrBuffer = "";
-    let killTimeoutId: ReturnType<typeof setTimeout> | undefined;
-
-    const timeoutId = setTimeout(() => {
-      timedOut = true;
-      child.kill("SIGTERM");
-      killTimeoutId = setTimeout(() => child.kill("SIGKILL"), SIGTERM_GRACE_MS);
-      // Same reason as runProbeCommand: `close` never arrives from a child that
-      // ignores SIGTERM, and an install left running keeps writing to the global
-      // package dir.
-      resolve({
-        exitCode: null,
-        stderr: stderr.trim(),
-        stdout: stdout.trim(),
-        timedOut,
-      });
-    }, timeoutMs);
-
-    const emitLine = (prefix: "stdout" | "stderr", line: string) => {
-      onProgress?.(`${prefix}: ${line}`);
-    };
-
-    const flushBuffer = (buffer: string, prefix: "stdout" | "stderr") => {
-      let nextBuffer = buffer;
-
-      while (true) {
-        const newlineIndex = nextBuffer.search(/\r?\n/);
-
-        if (newlineIndex < 0) {
-          break;
-        }
-
-        const newlineLength = nextBuffer[newlineIndex] === "\r" ? 2 : 1;
-        const line = nextBuffer.slice(0, newlineIndex).trim();
-        nextBuffer = nextBuffer.slice(newlineIndex + newlineLength);
-
-        if (line) {
-          emitLine(prefix, line);
-        }
-      }
-
-      return nextBuffer;
-    };
-
-    child.stdout?.on("data", (chunk) => {
-      const text = chunk.toString();
-      stdout += text;
-      stdoutBuffer += text;
-      stdoutBuffer = flushBuffer(stdoutBuffer, "stdout");
-    });
-    child.stderr?.on("data", (chunk) => {
-      const text = chunk.toString();
-      stderr += text;
-      stderrBuffer += text;
-      stderrBuffer = flushBuffer(stderrBuffer, "stderr");
-    });
-
-    child.once("error", (error) => {
-      clearTimeout(timeoutId);
-      clearTimeout(killTimeoutId);
-
-      if (stdoutBuffer.trim()) {
-        emitLine("stdout", stdoutBuffer.trim());
-      }
-      if (stderrBuffer.trim()) {
-        emitLine("stderr", stderrBuffer.trim());
-      }
-
-      resolve({
-        exitCode: null,
-        stderr: `${stderr}\n${String(error)}`.trim(),
-        stdout,
-        timedOut,
-      });
-    });
-
-    child.once("close", (exitCode) => {
-      clearTimeout(timeoutId);
-      clearTimeout(killTimeoutId);
-
-      if (stdoutBuffer.trim()) {
-        emitLine("stdout", stdoutBuffer.trim());
-      }
-      if (stderrBuffer.trim()) {
-        emitLine("stderr", stderrBuffer.trim());
-      }
-
-      resolve({
-        exitCode,
-        stderr: stderr.trim(),
-        stdout: stdout.trim(),
-        timedOut,
-      });
-    });
-  });
-}
-
-function summarizeInstallOutput(output: string): string {
-  const lines = output
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter(Boolean);
-  const meaningful =
-    lines.find((line) => /^error:/i.test(line)) ??
-    lines.find((line) =>
-      /(?:EACCES|ENOENT|EPERM|failed|permission denied)/i.test(line)
-    ) ??
-    lines.find((line) => !/^bun (?:add|install) v/i.test(line)) ??
-    lines[0] ??
-    output.trim();
-  return meaningful.length > 180
-    ? `${meaningful.slice(0, 177)}...`
-    : meaningful;
 }
 
 function summarizeProbeOutput(output: string): string {

@@ -54,10 +54,16 @@ export function formatProviderLabel(
     provider === "gemini" ||
     provider === "deepseek" ||
     provider === "cerebras" ||
+    provider === "cloudflare" ||
     provider === "fireworks" ||
     provider === "ollama" ||
     provider === "openai_compatible" ||
-    provider === "opencode_go"
+    provider === "opencode_go" ||
+    provider === "minimax" ||
+    provider === "minimax_cn" ||
+    provider === "zhipu" ||
+    provider === "zhipu_cn" ||
+    provider === "xai"
   ) {
     return formatConfiguredProviderLabel(provider, displayName);
   }
@@ -73,9 +79,15 @@ export const PROVIDER_OPTIONS: Array<{ id: SelectedProvider; label: string }> =
     { id: "gemini", label: "Gemini" },
     { id: "deepseek", label: "DeepSeek" },
     { id: "cerebras", label: "Cerebras" },
+    { id: "cloudflare", label: "Cloudflare Worker AI" },
     { id: "fireworks", label: "Fireworks" },
     { id: "ollama", label: "Ollama" },
     { id: "opencode_go", label: "OpenCode Go" },
+    { id: "minimax", label: "MiniMax" },
+    { id: "xai", label: "xAI Grok" },
+    { id: "minimax_cn", label: "MiniMax (CN)" },
+    { id: "zhipu", label: "GLM (Z.ai)" },
+    { id: "zhipu_cn", label: "GLM (CN)" },
     { id: "openai_compatible", label: "Custom (OpenAI-compatible)" },
   ];
 
@@ -737,7 +749,7 @@ export function profileModelSelectionValue(
       (entry) => entry.providerId === decoded.providerId
     );
 
-    if (group?.models.some((model) => model.id === decoded.modelId)) {
+    if (group) {
       return modelId;
     }
   }

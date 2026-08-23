@@ -47,6 +47,8 @@ export interface StoredProfileRecord {
   model: string | null;
   name: string;
   orgId?: string | null;
+  /** null = inherit org default; true/false = force consolidate on/off for this profile */
+  skillsCuratorConsolidateEnabled?: boolean | null;
   /** null = inherit org default; true/false = force post-turn review on/off for this profile */
   skillsPostTurnReview?: boolean | null;
   /** null = inherit org default; true/false = force gate on/off for this profile */
@@ -166,6 +168,11 @@ export interface StoredLlmUsageModelStatsRecord {
 
 export interface StoredWorkspaceSettingsRecord {
   codingAgentHarnesses: StoredCodingAgentHarnessRecord[];
+  /**
+   * When true (default), coding CLIs get Nakama provider credentials at spawn.
+   * When false, harness-native vendor login on the host is used instead.
+   */
+  codingAgentProviderPassthrough: boolean;
   id: string;
   imageModel: string | null;
   orgId?: string | null;
@@ -380,9 +387,13 @@ export interface StoredUserRecord {
 }
 
 export interface StoredOrganizationRecord {
+  archivedAt?: string | null;
   createdAt: string;
   id: string;
   name: string;
+  skillsCuratorConsolidateEnabled?: boolean;
+  skillsCuratorEnabled?: boolean;
+  skillsCuratorLastRunAt?: string | null;
   skillsPostTurnReview?: boolean;
   skillsWriteApproval?: boolean;
   slug: string;
@@ -443,6 +454,7 @@ export type SkillProposalAction =
 
 export interface StoredSkillProposal {
   action: SkillProposalAction;
+  consolidateLoserSkillNames?: string[] | null;
   content: string | null;
   createdAt: string;
   id: string;
@@ -833,12 +845,21 @@ export interface DatabaseAdapter {
     sessionTokenHash: string,
     revokedAt: string
   ): Promise<boolean>;
+  revokeBrowserSessionsForUser(
+    userId: string,
+    revokedAt: string
+  ): Promise<number>;
   setUserContext(
     orgId: string,
     userId: string,
     content: string,
     updatedAt: string
   ): Promise<void>;
+
+  tryMarkOrganizationArchived(
+    orgId: string,
+    archivedAt: string
+  ): Promise<boolean>;
   unassignMcpServerFromProfile(
     profileId: string,
     serverId: string
@@ -912,7 +933,6 @@ export interface DatabaseAdapter {
   upsertNotificationDestination(
     record: StoredNotificationDestinationRecord
   ): Promise<void>;
-
   upsertOrganization(record: StoredOrganizationRecord): Promise<void>;
   upsertOrgMember(record: StoredOrgMemberRecord): Promise<void>;
   upsertProfile(record: StoredProfileRecord): Promise<void>;

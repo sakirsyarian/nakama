@@ -50,24 +50,16 @@ import type {
   StoredSkillRecord,
   StoredSkillUsageRecord,
 } from "@nakama/db";
-import {
-  type SkillUsageRecordingContext,
-  SkillUsageService,
-} from "./skill-usage-service";
 
-export type { SkillUsageRecordingContext };
+export interface SkillUsageRecordingContext {
+  seenCatalogSkillIds: Set<string>;
+  sessionId: string;
+}
 
 const bundledSkillNames = new Set<string>(BUNDLED_SKILL_NAMES);
 
 export class SkillsService {
-  private readonly skillUsageService: SkillUsageService;
-
-  constructor(
-    private readonly db: DatabaseAdapter,
-    skillUsageService?: SkillUsageService
-  ) {
-    this.skillUsageService = skillUsageService ?? new SkillUsageService(db);
-  }
+  constructor(private readonly db: DatabaseAdapter) {}
 
   async syncDiscoveredSkills(): Promise<SyncSkillsResponse> {
     const discovered = await discoverSkills();
@@ -216,7 +208,7 @@ export class SkillsService {
 
     const profileId = options?.profileId?.trim();
     if (profileId) {
-      await this.skillUsageService.recordPatch(orgId, profileId, synced.id);
+      await this.recordPatch(orgId, profileId, synced.id);
     }
 
     return this.getSkill(synced.id);
@@ -349,18 +341,14 @@ export class SkillsService {
       profileId,
     });
 
+    // written.directory came from resolveProfileSkillDirectory (containment already
+    // enforced); syncSkillRecordFromDirectory keys off that same path.
     const record = await this.syncSkillRecordFromDirectory(
       written.directory,
       written.name,
       "written",
       createdBy
     );
-
-    if (!isPathWithinProfileSkillsDir(orgId, profileId, record.sourcePath)) {
-      throw new Error(
-        `Skill "${written.name}" resolved outside this profile skills directory.`
-      );
-    }
 
     await this.db.assignSkillToProfile(profileId, record.id);
     const response = await this.getSkill(record.id);
@@ -407,7 +395,7 @@ export class SkillsService {
       "patched"
     );
 
-    await this.skillUsageService.recordPatch(orgId, profileId, record.id);
+    await this.recordPatch(orgId, profileId, record.id);
 
     return this.getSkill(record.id);
   }
@@ -473,7 +461,7 @@ export class SkillsService {
       "patched"
     );
 
-    await this.skillUsageService.recordPatch(orgId, profileId, record.id);
+    await this.recordPatch(orgId, profileId, record.id);
 
     return this.getSkill(record.id);
   }
@@ -509,6 +497,38 @@ export class SkillsService {
     }
 
     await deleteSkillDirectory(record.sourcePath);
+  }
+
+  async unassignArchivedProfileSkill(
+    orgId: string,
+    profileId: string,
+    skillId: string,
+    archivedDirectory: string
+  ): Promise<void> {
+    const record = await this.requireSkill(skillId);
+
+    if (isGlobalSkillSourcePath(record.sourcePath)) {
+      throw new Error("Global skills cannot be archived by the curator.");
+    }
+
+    if (!isPathWithinProfileSkillsDir(orgId, profileId, archivedDirectory)) {
+      throw new Error(
+        "Archived skill path is outside the profile skills directory."
+      );
+    }
+
+    await this.db.upsertSkill({
+      ...record,
+      sourcePath: archivedDirectory,
+      updatedAt: new Date().toISOString(),
+    });
+
+    try {
+      await this.db.unassignSkillFromProfile(profileId, skillId);
+    } catch (error) {
+      await this.db.upsertSkill(record);
+      throw error;
+    }
   }
 
   async deleteSkill(skillId: string): Promise<void> {
@@ -556,12 +576,7 @@ export class SkillsService {
       )
       .filter((skillId): skillId is string => Boolean(skillId));
 
-    void this.skillUsageService.recordCatalogViews(
-      orgId,
-      profileId,
-      skillIds,
-      usageContext
-    );
+    void this.recordCatalogViews(orgId, profileId, skillIds, usageContext);
 
     return composeSkillsCatalog(assigned);
   }
@@ -596,11 +611,7 @@ export class SkillsService {
         )
         .filter((skillId): skillId is string => Boolean(skillId));
 
-      void this.skillUsageService.recordMatches(
-        orgId,
-        profileId,
-        matchedSkillIds
-      );
+      void this.recordMatches(orgId, profileId, matchedSkillIds);
     }
 
     const prompt = composeMatchedSkillsPrompt(matched, {
@@ -617,7 +628,7 @@ export class SkillsService {
     profileId: string
   ): Promise<SkillSummary[]> {
     const records = await this.db.listSkillsForProfile(profileId);
-    const usage = await this.skillUsageService.listForProfile(profileId);
+    const usage = await this.listSkillUsageForProfile(profileId);
     return toSkillSummaries(records, usage);
   }
 
@@ -634,8 +645,100 @@ export class SkillsService {
     return skills.map((record) => toSkillSummary(record));
   }
 
-  getSkillUsageService(): SkillUsageService {
-    return this.skillUsageService;
+  async recordCatalogViews(
+    orgId: string,
+    profileId: string,
+    skillIds: string[],
+    context?: SkillUsageRecordingContext
+  ): Promise<void> {
+    if (skillIds.length === 0) {
+      return;
+    }
+
+    const now = new Date().toISOString();
+
+    for (const skillId of skillIds) {
+      if (context) {
+        const dedupeKey = `${context.sessionId}:${skillId}`;
+        if (context.seenCatalogSkillIds.has(dedupeKey)) {
+          continue;
+        }
+
+        context.seenCatalogSkillIds.add(dedupeKey);
+      }
+
+      await this.safeIncrementSkillUsage({
+        orgId,
+        profileId,
+        skillId,
+        viewDelta: 1,
+        viewedAt: now,
+      });
+    }
+  }
+
+  async recordMatches(
+    orgId: string,
+    profileId: string,
+    skillIds: string[]
+  ): Promise<void> {
+    if (skillIds.length === 0) {
+      return;
+    }
+
+    const now = new Date().toISOString();
+
+    for (const skillId of skillIds) {
+      await this.safeIncrementSkillUsage({
+        orgId,
+        profileId,
+        skillId,
+        useDelta: 1,
+        usedAt: now,
+      });
+    }
+  }
+
+  async recordPatch(
+    orgId: string,
+    profileId: string,
+    skillId: string
+  ): Promise<void> {
+    const now = new Date().toISOString();
+    await this.safeIncrementSkillUsage({
+      orgId,
+      patchDelta: 1,
+      patchedAt: now,
+      profileId,
+      skillId,
+    });
+  }
+
+  async listSkillUsageForProfile(profileId: string) {
+    return this.db.listSkillUsageForProfile(profileId);
+  }
+
+  private async safeIncrementSkillUsage(input: {
+    orgId: string;
+    profileId: string;
+    skillId: string;
+    viewDelta?: number;
+    useDelta?: number;
+    patchDelta?: number;
+    viewedAt?: string;
+    usedAt?: string;
+    patchedAt?: string;
+  }): Promise<void> {
+    try {
+      const assigned = await this.db.listSkillsForProfile(input.profileId);
+      if (!assigned.some((skill) => skill.id === input.skillId)) {
+        return;
+      }
+
+      await this.db.incrementSkillUsage(input);
+    } catch (error) {
+      console.error("Failed to record skill usage:", error);
+    }
   }
 
   private async getAssignedDiscoveredSkills(

@@ -1,102 +1,51 @@
 import { describe, expect, test } from "bun:test";
-import {
-  extractMarkdownToc,
-  headingTextFromChildren,
-  slugifyMarkdownHeading,
-  stripMarkdownInline,
-  uniqueMarkdownHeadingId,
-} from "./markdown-toc";
+import { extractMarkdownHeadings } from "./markdown-toc";
 
-describe("extractMarkdownToc", () => {
-  test("collects atx headings and skips fenced code", () => {
-    const toc = extractMarkdownToc(`# Script
+describe("extractMarkdownHeadings", () => {
+  test("lists h1 to h3 in document order", () => {
+    const headings = extractMarkdownHeadings(
+      ["# Script", "intro", "## Hook", "### Beat one", "#### Detail"].join("\n")
+    );
 
-Intro.
-
-## BAGIAN 1 — HOOK
-
-Body.
-
-\`\`\`
-## not a heading
-\`\`\`
-
-### Visual
-
-## BAGIAN 2
-`);
-
-    expect(toc.map((entry) => entry.text)).toEqual([
-      "Script",
-      "BAGIAN 1 — HOOK",
-      "Visual",
-      "BAGIAN 2",
+    expect(headings).toEqual([
+      { level: 1, occurrence: 0, text: "Script" },
+      { level: 2, occurrence: 0, text: "Hook" },
+      { level: 3, occurrence: 0, text: "Beat one" },
     ]);
-    expect(toc.map((entry) => entry.level)).toEqual([1, 2, 3, 2]);
   });
 
-  test("returns nothing when there are no headings", () => {
-    expect(extractMarkdownToc("Just a paragraph.\n\n**Bold line**")).toEqual(
-      []
+  test("numbers repeated titles so each entry keeps its own target", () => {
+    const headings = extractMarkdownHeadings(
+      ["## Hook", "a", "## Body", "b", "## Hook", "c"].join("\n")
     );
+
+    expect(headings.map((heading) => heading.occurrence)).toEqual([0, 0, 1]);
   });
 
-  test("makes duplicate heading ids unique", () => {
-    const toc = extractMarkdownToc("## Hook\n\n## Hook\n");
-    expect(toc.map((entry) => entry.id)).toEqual(["hook", "hook-2"]);
-    expect(toc.map((entry) => entry.slug)).toEqual(["hook", "hook"]);
-    expect(toc.map((entry) => entry.occurrence)).toEqual([0, 1]);
-  });
+  test("ignores hashes inside fenced code", () => {
+    const headings = extractMarkdownHeadings(
+      ["# Real", "```sh", "# not a heading", "```", "## Also real"].join("\n")
+    );
 
-  test("includes h4 subtitles and setext headings", () => {
-    const toc = extractMarkdownToc(`Script
-=====
-
-## BAGIAN 1
-
-### Visual
-
-#### Notes
-`);
-
-    expect(toc.map((entry) => entry.text)).toEqual([
-      "Script",
-      "BAGIAN 1",
-      "Visual",
-      "Notes",
+    expect(headings.map((heading) => heading.text)).toEqual([
+      "Real",
+      "Also real",
     ]);
-    expect(toc.map((entry) => entry.level)).toEqual([1, 2, 3, 4]);
   });
-});
 
-describe("slugifyMarkdownHeading", () => {
-  test("keeps indonesian letters and strips punctuation", () => {
-    expect(slugifyMarkdownHeading("BAGIAN 1 — HOOK (0:00–0:45)")).toBe(
-      "bagian-1-hook-0-00-0-45"
+  test("ignores an indented code block and a bare hash", () => {
+    const headings = extractMarkdownHeadings(
+      ["    # indented code", "#no space", " ### Kept"].join("\n")
     );
-  });
-});
 
-describe("uniqueMarkdownHeadingId", () => {
-  test("increments the suffix after the first use", () => {
-    const used = new Map<string, number>();
-    expect(uniqueMarkdownHeadingId("Intro", used)).toBe("intro");
-    expect(uniqueMarkdownHeadingId("Intro", used)).toBe("intro-2");
+    expect(headings.map((heading) => heading.text)).toEqual(["Kept"]);
   });
-});
 
-describe("stripMarkdownInline", () => {
-  test("drops emphasis and link markup", () => {
-    expect(stripMarkdownInline("**HOOK** and [VO](https://x.test)")).toBe(
-      "HOOK and VO"
+  test("reduces inline markup to the text the DOM will render", () => {
+    const headings = extractMarkdownHeadings(
+      "## **Hook** with [a link](https://example.com) and `code` ##"
     );
-  });
-});
 
-describe("headingTextFromChildren", () => {
-  test("flattens nested react children", () => {
-    expect(
-      headingTextFromChildren(["BAGIAN 1 — ", { props: { children: "HOOK" } }])
-    ).toBe("BAGIAN 1 — HOOK");
+    expect(headings[0].text).toBe("Hook with a link and code");
   });
 });

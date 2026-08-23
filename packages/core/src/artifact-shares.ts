@@ -2,7 +2,7 @@ import crypto from "node:crypto";
 import { mkdir, readFile, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { pathExists } from "./fs";
-import { getArtifactSharesDir } from "./soul/resolve";
+import { assertConfigPathSegment, getArtifactSharesDir } from "./soul/resolve";
 
 export function generateArtifactShareToken(): string {
   // No underscores: plain-text markdown strippers treat `_word_` as italic and can
@@ -11,7 +11,7 @@ export function generateArtifactShareToken(): string {
 }
 
 export function buildArtifactSharePath(token: string): string {
-  return `/s/${token}`;
+  return `/s/${assertConfigPathSegment(token, "shareToken")}`;
 }
 
 export async function writeArtifactShareSnapshot(input: {
@@ -21,7 +21,10 @@ export async function writeArtifactShareSnapshot(input: {
   bytes: Buffer;
 }): Promise<string> {
   const sharesDir = getArtifactSharesDir(input.orgId);
-  const shareDir = path.join(sharesDir, input.shareId);
+  const shareDir = path.join(
+    sharesDir,
+    assertConfigPathSegment(input.shareId, "shareId")
+  );
   await mkdir(shareDir, { recursive: true });
 
   const safeName =
@@ -31,9 +34,31 @@ export async function writeArtifactShareSnapshot(input: {
   return storagePath;
 }
 
+function assertArtifactShareStoragePath(
+  orgId: string,
+  storagePath: string
+): void {
+  if (!path.isAbsolute(storagePath)) {
+    throw new Error(
+      "Artifact share storage path must be absolute; relative paths resolve against process.cwd()."
+    );
+  }
+
+  const root = path.resolve(getArtifactSharesDir(orgId));
+  const resolved = path.resolve(storagePath);
+  if (resolved !== root && !resolved.startsWith(`${root}${path.sep}`)) {
+    throw new Error(
+      "Artifact share storage path escapes the org artifact-shares directory."
+    );
+  }
+}
+
 export async function readArtifactShareSnapshot(
+  orgId: string,
   storagePath: string
 ): Promise<Buffer> {
+  assertArtifactShareStoragePath(orgId, storagePath);
+
   if (!(await pathExists(storagePath))) {
     throw new Error(`Artifact share snapshot not found: ${storagePath}`);
   }
@@ -42,8 +67,11 @@ export async function readArtifactShareSnapshot(
 }
 
 export async function deleteArtifactShareSnapshot(
+  orgId: string,
   storagePath: string
 ): Promise<void> {
+  assertArtifactShareStoragePath(orgId, storagePath);
+
   try {
     await unlink(storagePath);
   } catch (error) {

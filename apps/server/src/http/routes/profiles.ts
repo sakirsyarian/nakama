@@ -12,8 +12,8 @@ import type {
   ProfileResponse,
   SoulStackResponse,
   SoulStatusResponse,
-  UpdateArtifactFileRequest,
-  UpdateArtifactFileResponse,
+  UpdateArtifactRequest,
+  UpdateArtifactResponse,
   UpdateProfileRequest,
   UpdateSoulFileRequest,
   UploadKnowledgeBaseRequest,
@@ -21,6 +21,7 @@ import type {
 } from "@nakama/core";
 import { NakamaApiError } from "@nakama/core";
 import { filterProfilesForChatAccess } from "@nakama/core/profiles";
+import { ArtifactShareService } from "../../services/artifact-share-service";
 import type { ServerOptions } from "../context";
 import {
   requireActiveOrgIdFromContext,
@@ -53,6 +54,10 @@ export function registerProfileRoutes(
   options: ServerOptions
 ): void {
   const { agent } = options;
+  const artifactShares =
+    options.databaseAdapter && options.authService
+      ? new ArtifactShareService(options.databaseAdapter, options.authService)
+      : null;
   const errorSchema = z
     .object({ error: z.string() })
     .openapi("ApiErrorResponse");
@@ -108,17 +113,18 @@ export function registerProfileRoutes(
     .object({})
     .passthrough()
     .openapi("ListArtifactsResponse");
+  const updateArtifactSchema = z
+    .object({})
+    .passthrough()
+    .openapi("UpdateArtifactRequest");
+  const updateArtifactResultSchema = z
+    .object({})
+    .passthrough()
+    .openapi("UpdateArtifactResponse");
   const deleteArtifactSchema = z
     .object({})
     .passthrough()
     .openapi("DeleteArtifactResponse");
-  const updateArtifactFileSchema = z
-    .object({ content: z.string() })
-    .openapi("UpdateArtifactFileRequest");
-  const updateArtifactFileResponseSchema = z
-    .object({})
-    .passthrough()
-    .openapi("UpdateArtifactFileResponse");
   const listKnowledgeBaseSchema = z
     .object({})
     .passthrough()
@@ -388,7 +394,7 @@ export function registerProfileRoutes(
       path: "/v1/profiles/{profileId}/artifacts/content",
       request: {
         body: {
-          content: { "application/json": { schema: updateArtifactFileSchema } },
+          content: { "application/json": { schema: updateArtifactSchema } },
           required: true,
         },
         params: profileIdParam,
@@ -397,25 +403,16 @@ export function registerProfileRoutes(
       responses: {
         200: {
           content: {
-            "application/json": { schema: updateArtifactFileResponseSchema },
+            "application/json": { schema: updateArtifactResultSchema },
           },
-          description: "Updated artifact",
-        },
-        400: {
-          content: { "application/json": { schema: errorSchema } },
-          description: "Invalid path or content",
-        },
-        403: {
-          content: { "application/json": { schema: errorSchema } },
-          description: "Forbidden",
+          description: "Saved artifact",
         },
         500: {
           content: { "application/json": { schema: errorSchema } },
           description: "Error",
         },
       },
-      summary:
-        "Overwrite a text artifact for a profile (org members; viewers cannot write)",
+      summary: "Save markdown artifact content (org members except viewers)",
       tags: ["Profiles"],
     })
   );
@@ -772,14 +769,26 @@ export function registerProfileRoutes(
       return json({ error: "path is required" }, 400);
     }
 
-    const body = await readJson<UpdateArtifactFileRequest>(c.req.raw);
+    const body = await readJson<UpdateArtifactRequest>(c.req.raw);
+
     if (typeof body.content !== "string") {
       return json({ error: "content is required" }, 400);
     }
 
-    return json<UpdateArtifactFileResponse>(
-      await agent.writeProfileArtifact(orgId, profileId, artifactPath, body)
+    const saved = await agent.writeProfileArtifact(
+      orgId,
+      profileId,
+      artifactPath,
+      body.content
     );
+
+    await artifactShares?.refreshArtifactShareSnapshot({
+      orgId,
+      profileId,
+      sourcePaths: [artifactPath, saved.filename],
+    });
+
+    return json<UpdateArtifactResponse>(saved);
   });
 
   app.delete("/v1/profiles/:profileId/artifacts", async (c) => {

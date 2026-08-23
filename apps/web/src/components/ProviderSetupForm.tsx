@@ -2,17 +2,17 @@ import type { CreateProviderResponse } from "@nakama/core/contract";
 import { ollamaRequiresApiKey } from "@nakama/core/ollama-provider-config";
 import { ViewIcon, ViewOffIcon } from "hugeicons-react";
 import { useState } from "react";
-import { BrowsableModelFields } from "@/components/BrowsableModelFields";
 import { CustomProviderFields } from "@/components/CustomProviderFields";
 import { ModelsBrowseList } from "@/components/ModelsBrowseList";
+import { OllamaProviderModelFields } from "@/components/OllamaProviderModelFields";
 import { OllamaProviderSetupFields } from "@/components/OllamaProviderSetupFields";
 import { OpenRouterProviderModelFields } from "@/components/OpenRouterProviderModelFields";
 import { ProviderSelect } from "@/components/ProviderSelect";
-import { RemoteModelsBrowseList } from "@/components/RemoteModelsBrowseList";
 import { ShortlistBrowseProviderModelFields } from "@/components/ShortlistBrowseProviderModelFields";
 import { isShortlistBrowseProvider } from "@/components/shortlist-browse-providers.shared";
 import { Button } from "@/components/ui/button";
 import { FormField } from "@/components/ui/form-field";
+import { Input } from "@/components/ui/input";
 import {
   InputGroup,
   InputGroupAddon,
@@ -54,6 +54,7 @@ export function ProviderSetupForm({
   const apiKeyOptional =
     form.selectedProvider === "openai_compatible" ||
     (form.selectedProvider === "ollama" && !ollamaKeyRequired);
+  const canPickModels = apiKeyOptional || form.apiKey.trim().length > 0;
 
   const formSpacing = density === "compact" ? "space-y-4" : "space-y-5";
 
@@ -162,6 +163,34 @@ export function ProviderSetupForm({
             </InputGroup>
           </FormField>
 
+          {form.selectedProvider === "cloudflare" ? (
+            <FormField
+              density={density}
+              footer={
+                form.baseUrlError ? (
+                  <p
+                    className="text-destructive text-sm"
+                    id="cloudflare-account-id-error"
+                    role="alert"
+                  >
+                    {form.baseUrlError}
+                  </p>
+                ) : null
+              }
+              id="cloudflare-account-id"
+              label="Account ID"
+            >
+              <Input
+                aria-invalid={form.baseUrlError != null}
+                autoComplete="off"
+                disabled={form.busy}
+                id="cloudflare-account-id"
+                onChange={(event) => form.setBaseUrl(event.target.value)}
+                value={form.baseUrl}
+              />
+            </FormField>
+          ) : null}
+
           {form.selectedProvider === "openai_compatible" ? (
             <CustomProviderFields
               apiKey={form.apiKey}
@@ -176,10 +205,11 @@ export function ProviderSetupForm({
               onBaseUrlChange={form.setBaseUrl}
               onCustomModelsChange={form.setCustomModels}
               onDisplayNameChange={form.setDisplayName}
+              showModelsEditor={canPickModels}
             />
           ) : null}
 
-          {form.selectedProvider === "openrouter" ? (
+          {form.selectedProvider === "openrouter" && canPickModels ? (
             <OpenRouterProviderModelFields
               customModels={form.openRouterModels}
               density={density}
@@ -200,50 +230,22 @@ export function ProviderSetupForm({
                 onBaseUrlChange={form.setBaseUrl}
                 onHostModeChange={form.handleOllamaHostModeChange}
               />
-              <BrowsableModelFields
-                browseLabel="Browse Ollama"
-                customModels={form.customModels}
-                density={density}
-                disabled={form.busy}
-                fieldId="ollama-models"
-                footerHint={
-                  <>
-                    Add models by ID or browse live models from your Ollama host
-                    (for example <span className="font-mono">llama3.2</span>).
-                  </>
-                }
-                modelsError={form.modelsError}
-                onCustomModelsChange={form.setCustomModels}
-                renderBrowse={(onSelect) => (
-                  <RemoteModelsBrowseList
-                    apiKey={form.apiKey}
-                    baseUrl={form.baseUrl}
-                    browseLabel="Ollama"
-                    className="h-72 rounded-md border border-border"
-                    hostMode={form.ollamaHostMode}
-                    onSelect={onSelect}
-                    provider="ollama"
-                  />
-                )}
-                showPricing={false}
-                showThinking
-                showVision
-                toModelRow={(row: {
-                  id: string;
-                  name: string;
-                  supportsVision?: boolean;
-                }) => ({
-                  id: row.id,
-                  name: row.name,
-                  ...(row.supportsVision === undefined
-                    ? {}
-                    : { supportsVision: row.supportsVision }),
-                })}
-              />
+              {canPickModels ? (
+                <OllamaProviderModelFields
+                  apiKey={form.apiKey}
+                  baseUrl={form.baseUrl}
+                  customModels={form.customModels}
+                  density={density}
+                  disabled={form.busy}
+                  hostMode={form.ollamaHostMode}
+                  modelsError={form.modelsError}
+                  onCustomModelsChange={form.setCustomModels}
+                />
+              ) : null}
             </>
           ) : null}
 
-          {isShortlistBrowseProvider(form.selectedProvider) ? (
+          {isShortlistBrowseProvider(form.selectedProvider) && canPickModels ? (
             <ShortlistBrowseProviderModelFields
               apiKey={
                 form.selectedProvider === "fireworks" ? form.apiKey : undefined

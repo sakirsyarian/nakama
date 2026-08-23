@@ -5,6 +5,7 @@ import {
   createAgentHarness,
   draftTaskPromptFromFields,
   executeToolCall,
+  expandLearnInLastUserMessage,
   suggestToolParamsFromPrompt,
 } from "@nakama/agent";
 import type {
@@ -72,8 +73,7 @@ import type {
   TranscribeAudioResponse,
   TranscriptionSettings,
   TranscriptionSettingsResponse,
-  UpdateArtifactFileRequest,
-  UpdateArtifactFileResponse,
+  UpdateArtifactResponse,
   UpdateComposioSettingsRequest,
   UpdateDiscordSettingsRequest,
   UpdateEmailSettingsRequest,
@@ -137,7 +137,6 @@ import {
   normalizeUserContextContent,
   type OrgRole,
   ollamaRequiresApiKey,
-  PathGuardError,
   persistInlineAttachmentsInContent,
   readArtifactFile,
   readBundledSkillBody,
@@ -165,10 +164,11 @@ import {
 import { canAccessSuperBotProfile } from "@nakama/core/profiles";
 import {
   type DatabaseAdapter,
+  mergeWorkspaceSettings,
   type StoredProfileRecord,
+  type StoredSessionRecord,
   type StoredTaskRunRecord,
   SUPER_BOT_TOOL_AUTHORING_RULES,
-  WORKSPACE_SETTINGS_ID,
 } from "@nakama/db";
 import {
   AVAILABLE_MODELS,
@@ -232,6 +232,10 @@ import {
   buildComposioToolDefinitions,
 } from "./composio-tool-bridge";
 import {
+  customToolTypesLabel,
+  getCustomToolHandler,
+} from "./custom-tool-handlers";
+import {
   generateImageWithOpenAI,
   IMAGE_MODEL_REQUIRED_MESSAGE,
   resolveImageGenerationSelection,
@@ -245,7 +249,6 @@ import {
 } from "./image-vision-fallback";
 import {
   invalidateJavascriptModuleCache,
-  loadJavascriptTool,
   resolveJavascriptModulePath,
 } from "./javascript-tool-loader";
 import type { LlmUsageTracker } from "./llm-usage-tracker";
@@ -634,18 +637,17 @@ export class AgentService {
 
     const vision: VisionSettings = { model };
     const existing = await this.db.getWorkspaceSettings();
-    await this.db.upsertWorkspaceSettings({
-      codingAgentHarnesses: existing?.codingAgentHarnesses ?? [],
-      id: WORKSPACE_SETTINGS_ID,
-      imageModel: existing?.imageModel ?? this.userConfig?.imageModel ?? null,
-      selectedCodingAgentHarness: existing?.selectedCodingAgentHarness ?? null,
-      transcriptionModel:
-        existing?.transcriptionModel ??
-        this.userConfig?.transcriptionModel ??
-        null,
-      updatedAt: new Date().toISOString(),
-      visionModel: model,
-    });
+    await this.db.upsertWorkspaceSettings(
+      mergeWorkspaceSettings(existing, {
+        imageModel: existing?.imageModel ?? this.userConfig?.imageModel ?? null,
+        transcriptionModel:
+          existing?.transcriptionModel ??
+          this.userConfig?.transcriptionModel ??
+          null,
+        updatedAt: new Date().toISOString(),
+        visionModel: model,
+      })
+    );
 
     if (this.userConfig) {
       this.userConfig = {
@@ -689,16 +691,15 @@ export class AgentService {
 
     const transcription: TranscriptionSettings = { model };
     const existing = await this.db.getWorkspaceSettings();
-    await this.db.upsertWorkspaceSettings({
-      codingAgentHarnesses: existing?.codingAgentHarnesses ?? [],
-      id: WORKSPACE_SETTINGS_ID,
-      imageModel: existing?.imageModel ?? this.userConfig?.imageModel ?? null,
-      selectedCodingAgentHarness: existing?.selectedCodingAgentHarness ?? null,
-      transcriptionModel: model,
-      updatedAt: new Date().toISOString(),
-      visionModel:
-        existing?.visionModel ?? this.userConfig?.visionModel ?? null,
-    });
+    await this.db.upsertWorkspaceSettings(
+      mergeWorkspaceSettings(existing, {
+        imageModel: existing?.imageModel ?? this.userConfig?.imageModel ?? null,
+        transcriptionModel: model,
+        updatedAt: new Date().toISOString(),
+        visionModel:
+          existing?.visionModel ?? this.userConfig?.visionModel ?? null,
+      })
+    );
 
     if (this.userConfig) {
       this.userConfig = {
@@ -783,15 +784,14 @@ export class AgentService {
       (await loadUserTranscriptionSettings()).model ??
       null;
 
-    await this.db.upsertWorkspaceSettings({
-      codingAgentHarnesses: stored?.codingAgentHarnesses ?? [],
-      id: WORKSPACE_SETTINGS_ID,
-      imageModel: this.userConfig?.imageModel ?? null,
-      selectedCodingAgentHarness: stored?.selectedCodingAgentHarness ?? null,
-      transcriptionModel: legacyModel,
-      updatedAt: new Date().toISOString(),
-      visionModel: this.userConfig?.visionModel ?? null,
-    });
+    await this.db.upsertWorkspaceSettings(
+      mergeWorkspaceSettings(stored, {
+        imageModel: this.userConfig?.imageModel ?? null,
+        transcriptionModel: legacyModel,
+        updatedAt: new Date().toISOString(),
+        visionModel: this.userConfig?.visionModel ?? null,
+      })
+    );
 
     if (this.userConfig) {
       this.userConfig = { ...this.userConfig, transcriptionModel: legacyModel };
@@ -823,19 +823,18 @@ export class AgentService {
 
     const imageGeneration: ImageGenerationSettings = { model };
     const existing = await this.db.getWorkspaceSettings();
-    await this.db.upsertWorkspaceSettings({
-      codingAgentHarnesses: existing?.codingAgentHarnesses ?? [],
-      id: WORKSPACE_SETTINGS_ID,
-      imageModel: model,
-      selectedCodingAgentHarness: existing?.selectedCodingAgentHarness ?? null,
-      transcriptionModel:
-        existing?.transcriptionModel ??
-        this.userConfig?.transcriptionModel ??
-        null,
-      updatedAt: new Date().toISOString(),
-      visionModel:
-        existing?.visionModel ?? this.userConfig?.visionModel ?? null,
-    });
+    await this.db.upsertWorkspaceSettings(
+      mergeWorkspaceSettings(existing, {
+        imageModel: model,
+        transcriptionModel:
+          existing?.transcriptionModel ??
+          this.userConfig?.transcriptionModel ??
+          null,
+        updatedAt: new Date().toISOString(),
+        visionModel:
+          existing?.visionModel ?? this.userConfig?.visionModel ?? null,
+      })
+    );
 
     if (this.userConfig) {
       this.userConfig = {
@@ -917,15 +916,14 @@ export class AgentService {
 
     const legacyModel = this.userConfig?.imageModel ?? null;
 
-    await this.db.upsertWorkspaceSettings({
-      codingAgentHarnesses: [],
-      id: WORKSPACE_SETTINGS_ID,
-      imageModel: legacyModel,
-      selectedCodingAgentHarness: null,
-      transcriptionModel: this.userConfig?.transcriptionModel ?? null,
-      updatedAt: new Date().toISOString(),
-      visionModel: this.userConfig?.visionModel ?? null,
-    });
+    await this.db.upsertWorkspaceSettings(
+      mergeWorkspaceSettings(null, {
+        imageModel: legacyModel,
+        transcriptionModel: this.userConfig?.transcriptionModel ?? null,
+        updatedAt: new Date().toISOString(),
+        visionModel: this.userConfig?.visionModel ?? null,
+      })
+    );
 
     if (this.userConfig) {
       this.userConfig = { ...this.userConfig, imageModel: legacyModel };
@@ -969,15 +967,14 @@ export class AgentService {
       null;
     const legacyImageModel = this.userConfig?.imageModel ?? null;
 
-    await this.db.upsertWorkspaceSettings({
-      codingAgentHarnesses: stored?.codingAgentHarnesses ?? [],
-      id: WORKSPACE_SETTINGS_ID,
-      imageModel: legacyImageModel,
-      selectedCodingAgentHarness: stored?.selectedCodingAgentHarness ?? null,
-      transcriptionModel: legacyTranscriptionModel,
-      updatedAt: new Date().toISOString(),
-      visionModel: legacyVisionModel,
-    });
+    await this.db.upsertWorkspaceSettings(
+      mergeWorkspaceSettings(stored, {
+        imageModel: legacyImageModel,
+        transcriptionModel: legacyTranscriptionModel,
+        updatedAt: new Date().toISOString(),
+        visionModel: legacyVisionModel,
+      })
+    );
 
     if (this.userConfig) {
       this.userConfig = {
@@ -1148,7 +1145,7 @@ export class AgentService {
       throw new Error("Recipient email is required.");
     }
 
-    const sender = createSmtpSender(emailConfigToMailboxConfig(config!));
+    const sender = createSmtpSender(emailConfigToMailboxConfig(config));
     const result = await sender.send({
       subject: "Nakama test email",
       text: "This is a test email from your Nakama deployment.",
@@ -1387,7 +1384,7 @@ export class AgentService {
       profileId,
       task.orgId
     );
-    const session = await this.resolveSession(sessionId);
+    const session = await this.resolveSession(sessionId, task.orgId);
 
     if (!session) {
       throw new Error("Session not found.");
@@ -1579,8 +1576,11 @@ export class AgentService {
     return sessionId;
   }
 
-  async getSessionTodos(sessionId: string): Promise<AgentTodo[] | null> {
-    const record = await this.db.getSession(sessionId);
+  async getSessionTodos(
+    sessionId: string,
+    orgId: string
+  ): Promise<AgentTodo[] | null> {
+    const record = await this.getSessionRecordForOrg(sessionId, orgId);
 
     if (!record) {
       return null;
@@ -1590,9 +1590,10 @@ export class AgentService {
   }
 
   async getSessionQuestionnaire(
-    sessionId: string
+    sessionId: string,
+    orgId: string
   ): Promise<AgentQuestionnaire | null> {
-    const record = await this.db.getSession(sessionId);
+    const record = await this.getSessionRecordForOrg(sessionId, orgId);
 
     if (!record) {
       return null;
@@ -1601,13 +1602,18 @@ export class AgentService {
     return this.agentQuestionnaireState.get(sessionId);
   }
 
-  async getSessionMessages(sessionId: string): Promise<{
+  async getSessionMessages(
+    sessionId: string,
+    orgId: string,
+    options?: { persistedOnly?: boolean }
+  ): Promise<{
     channel: AgentChannel;
     messages: ChatMessage[];
     messageMeta: Array<{ id: string; seq: number; createdAt: string }>;
     contextUsage: ChatContextUsage | null;
+    profileId: string;
   } | null> {
-    const record = await this.db.getSession(sessionId);
+    const record = await this.getSessionRecordForOrg(sessionId, orgId);
 
     if (!record) {
       return null;
@@ -1619,8 +1625,8 @@ export class AgentService {
       return null;
     }
 
-    if (sessionTurnRegistry.isActive(sessionId)) {
-      const liveSession = await this.resolveSession(sessionId);
+    if (!options?.persistedOnly && sessionTurnRegistry.isActive(sessionId)) {
+      const liveSession = await this.resolveSession(sessionId, orgId);
 
       if (liveSession) {
         const history = liveSession.getHistory();
@@ -1637,15 +1643,19 @@ export class AgentService {
             seq: index,
           })),
           messages: [...history],
+          profileId: record.profileId,
         };
       }
     }
 
     const storedMessages = await this.db.listMessagesForSession(sessionId);
     const cached = this.sessions.get(sessionId)?.session;
-    const contextUsage = cached
-      ? cached.getContextUsage()
-      : ((await this.resolveSession(sessionId))?.getContextUsage() ?? null);
+    const contextUsage = options?.persistedOnly
+      ? null
+      : cached
+        ? cached.getContextUsage()
+        : ((await this.resolveSession(sessionId, orgId))?.getContextUsage() ??
+          null);
 
     return {
       channel,
@@ -1656,14 +1666,16 @@ export class AgentService {
         seq: message.seq,
       })),
       messages: storedMessages.map((message) => message.payload as ChatMessage),
+      profileId: record.profileId,
     };
   }
 
   async branchSession(
     sessionId: string,
-    messageIndex: number
+    messageIndex: number,
+    orgId: string
   ): Promise<BranchSessionResponse | null> {
-    const record = await this.db.getSession(sessionId);
+    const record = await this.getSessionRecordForOrg(sessionId, orgId);
 
     if (!record) {
       return null;
@@ -1709,12 +1721,17 @@ export class AgentService {
       throw new Error("Session channel is invalid.");
     }
 
-    const { orgId } = await this.requireProfileRecord(record.profileId);
+    const { orgId: profileOrgId } = await this.requireProfileRecord(
+      record.profileId
+    );
 
-    const branchOrgRole = await this.resolveOrgRole(orgId, record.userId);
+    const branchOrgRole = await this.resolveOrgRole(
+      profileOrgId,
+      record.userId
+    );
     const session = await this.buildChatSession(
       channel,
-      orgId,
+      profileOrgId,
       record.profileId,
       nextSessionId,
       record.userId ?? null,
@@ -1764,8 +1781,8 @@ export class AgentService {
     return this.skillPostTurnReviewService;
   }
 
-  async purgeSession(sessionId: string): Promise<boolean> {
-    const record = await this.db.getSession(sessionId);
+  async purgeSession(sessionId: string, orgId: string): Promise<boolean> {
+    const record = await this.getSessionRecordForOrg(sessionId, orgId);
 
     if (!record) {
       return false;
@@ -1779,17 +1796,20 @@ export class AgentService {
     return true;
   }
 
-  async resolveSession(sessionId: string): Promise<AgentChatSession | null> {
+  async resolveSession(
+    sessionId: string,
+    orgId: string
+  ): Promise<AgentChatSession | null> {
+    const record = await this.getSessionRecordForOrg(sessionId, orgId);
+
+    if (!record) {
+      return null;
+    }
+
     const stored = this.sessions.get(sessionId);
 
     if (stored) {
       return stored.session;
-    }
-
-    const record = await this.db.getSession(sessionId);
-
-    if (!record) {
-      return null;
     }
 
     const channel = parseAgentChannel(record.channel);
@@ -1798,12 +1818,17 @@ export class AgentService {
       return null;
     }
 
-    const { orgId } = await this.requireProfileRecord(record.profileId);
+    const { orgId: profileOrgId } = await this.requireProfileRecord(
+      record.profileId
+    );
 
-    const resumeOrgRole = await this.resolveOrgRole(orgId, record.userId);
+    const resumeOrgRole = await this.resolveOrgRole(
+      profileOrgId,
+      record.userId
+    );
     const session = await this.buildChatSession(
       channel,
-      orgId,
+      profileOrgId,
       record.profileId,
       sessionId,
       record.userId ?? null,
@@ -1819,8 +1844,8 @@ export class AgentService {
     return session;
   }
 
-  async clearSession(sessionId: string): Promise<boolean> {
-    const record = await this.db.getSession(sessionId);
+  async clearSession(sessionId: string, orgId: string): Promise<boolean> {
+    const record = await this.getSessionRecordForOrg(sessionId, orgId);
 
     if (!record) {
       return false;
@@ -1839,27 +1864,16 @@ export class AgentService {
 
   async compactSession(
     sessionId: string,
-    options: { force?: boolean } = {}
+    options: { force?: boolean } = {},
+    orgId: string
   ): Promise<CompactionResponse | null> {
-    const session = await this.resolveSession(sessionId);
+    const session = await this.resolveSession(sessionId, orgId);
 
     if (!session) {
       return null;
     }
 
     return session.compact(options);
-  }
-
-  async deleteSession(sessionId: string): Promise<boolean> {
-    const deleted = this.sessions.delete(sessionId);
-
-    if (deleted) {
-      this.agentTodoState.clearSession(sessionId);
-      this.agentQuestionnaireState.clearSession(sessionId);
-      await this.db.deleteSession(sessionId);
-    }
-
-    return deleted;
   }
 
   async draftAutomation(prompt: string, channel: AgentChannel) {
@@ -2429,10 +2443,11 @@ export class AgentService {
     context: { orgId: string; userId: string }
   ): Promise<RunToolResponse> {
     const { tool } = await this.profileService.getTool(toolId);
+    const handler = getCustomToolHandler(tool.handlerType);
 
-    if (tool.handlerType !== "javascript") {
+    if (!handler) {
       throw new Error(
-        "Only custom JavaScript tools can be run in the playground."
+        `Only custom ${customToolTypesLabel()} tools can be run in the playground.`
       );
     }
 
@@ -2447,22 +2462,25 @@ export class AgentService {
       toolId
     );
 
-    const handlerConfig =
-      typeof record.handlerConfig === "object" && record.handlerConfig !== null
-        ? (record.handlerConfig as { modulePath?: string })
-        : null;
+    if (tool.handlerType === "javascript") {
+      const handlerConfig =
+        typeof record.handlerConfig === "object" &&
+        record.handlerConfig !== null
+          ? (record.handlerConfig as { modulePath?: string })
+          : null;
 
-    if (handlerConfig?.modulePath) {
-      try {
-        invalidateJavascriptModuleCache(
-          resolveJavascriptModulePath(handlerConfig.modulePath)
-        );
-      } catch {
-        // Invalid module paths fail when loading the tool.
+      if (handlerConfig?.modulePath) {
+        try {
+          invalidateJavascriptModuleCache(
+            resolveJavascriptModulePath(handlerConfig.modulePath)
+          );
+        } catch {
+          // Invalid module paths fail when loading the tool.
+        }
       }
     }
 
-    const loaded = await loadJavascriptTool(record);
+    const loaded = await handler.load(record);
 
     if (!loaded) {
       throw new Error(`Failed to load tool "${tool.name}".`);
@@ -2497,10 +2515,11 @@ export class AgentService {
     prompt: string
   ): Promise<SuggestToolParamsResponse> {
     const { tool } = await this.profileService.getTool(toolId);
+    const handler = getCustomToolHandler(tool.handlerType);
 
-    if (tool.handlerType !== "javascript") {
+    if (!handler) {
       throw new Error(
-        "Only custom JavaScript tools support parameter suggestions."
+        `Only custom ${customToolTypesLabel()} tools support parameter suggestions.`
       );
     }
 
@@ -2510,7 +2529,7 @@ export class AgentService {
       throw new Error("Tool not found.");
     }
 
-    const loaded = await loadJavascriptTool(record);
+    const loaded = await handler.load(record);
     const provider = createProviderFromSources(process.env, this.userConfig);
     const parameters = await suggestToolParamsFromPrompt(
       {
@@ -2799,41 +2818,10 @@ export class AgentService {
     orgId: string,
     profileId: string,
     filename: string,
-    request: UpdateArtifactFileRequest
-  ): Promise<UpdateArtifactFileResponse> {
+    content: string
+  ): Promise<UpdateArtifactResponse> {
     await this.requireProfile(orgId, profileId);
-
-    if (typeof request.content !== "string") {
-      throw new NakamaApiError("content is required.", 400);
-    }
-
-    try {
-      return await writeArtifactFile({
-        content: request.content,
-        filename,
-        orgId,
-        profileId,
-      });
-    } catch (error) {
-      if (error instanceof PathGuardError) {
-        throw new NakamaApiError(error.message, 400);
-      }
-
-      const code = (error as NodeJS.ErrnoException).code;
-      const message = error instanceof Error ? error.message : "";
-      if (code === "ENOENT" || message.startsWith("Artifact not found")) {
-        throw new NakamaApiError(`Artifact not found: ${filename}`, 404);
-      }
-
-      if (
-        message.includes("cannot be edited") ||
-        message.includes("sidecars cannot be edited")
-      ) {
-        throw new NakamaApiError(message, 400);
-      }
-
-      throw error;
-    }
+    return writeArtifactFile({ content, filename, orgId, profileId });
   }
 
   async deleteProfileArtifact(
@@ -2955,6 +2943,26 @@ export class AgentService {
       displayName:
         active?.type === "openai_compatible" ? (active.label ?? null) : null,
     };
+  }
+
+  /**
+   * Sessions carry no org column; the org is only reachable through their
+   * profile. Every by-id session operation resolves scope here so a caller in
+   * one org cannot name a session id belonging to another.
+   */
+  private async getSessionRecordForOrg(
+    sessionId: string,
+    orgId: string
+  ): Promise<StoredSessionRecord | null> {
+    const record = await this.db.getSession(sessionId);
+
+    if (!record) {
+      return null;
+    }
+
+    const profile = await this.db.getProfileForOrg(record.profileId, orgId);
+
+    return profile ? record : null;
   }
 
   private async requireProfile(
@@ -3238,8 +3246,20 @@ export class AgentService {
 
         return replaceImagePartsWithDescriptions(forVision, descriptions);
       },
-      rehydrateMessagesForProvider: (messages) =>
-        rehydrateAttachmentMessages(messages, loadAttachment),
+      rehydrateMessagesForProvider: async (messages) => {
+        const rehydrated = await rehydrateAttachmentMessages(
+          messages,
+          loadAttachment
+        );
+
+        // Expand /learn only for the provider. History stays raw so skill
+        // matching, the web UI, and later turns keep the short command.
+        if (includeSkillManageTools && hasSkillManage) {
+          return expandLearnInLastUserMessage(rehydrated);
+        }
+
+        return rehydrated;
+      },
       resolvePromptContext: async (context) => {
         const parts: string[] = [];
         const todoContext =

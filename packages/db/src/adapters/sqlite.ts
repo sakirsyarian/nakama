@@ -78,6 +78,7 @@ interface ProfileRow {
   model: string | null;
   name: string;
   org_id: string | null;
+  skills_curator_consolidate_enabled: number | null;
   skills_post_turn_review: number | null;
   skills_write_approval: number | null;
   system_prompt: string;
@@ -186,6 +187,7 @@ interface LlmUsageModelStatsRow {
 
 interface WorkspaceSettingsRow {
   coding_agent_harnesses: string;
+  coding_agent_provider_passthrough: number | null;
   id: string;
   image_model: string | null;
   selected_coding_agent_harness: string | null;
@@ -307,9 +309,13 @@ interface BrowserSessionRow {
 }
 
 interface OrganizationRow {
+  archived_at: string | null;
   created_at: string;
   id: string;
   name: string;
+  skills_curator_consolidate_enabled: number;
+  skills_curator_enabled: number;
+  skills_curator_last_run_at: string | null;
   skills_post_turn_review: number;
   skills_write_approval: number;
   slug: string;
@@ -345,6 +351,7 @@ interface OrgMemoryProposalRow {
 
 interface SkillProposalRow {
   action: string;
+  consolidate_loser_skill_names: string | null;
   content: string | null;
   created_at: string;
   id: string;
@@ -534,10 +541,11 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
       is_default,
       skills_write_approval,
       skills_post_turn_review,
+      skills_curator_consolidate_enabled,
       created_at,
       updated_at
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(id) DO UPDATE SET
       name = excluded.name,
       system_prompt = excluded.system_prompt,
@@ -549,6 +557,7 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
       is_default = excluded.is_default,
       skills_write_approval = excluded.skills_write_approval,
       skills_post_turn_review = excluded.skills_post_turn_review,
+      skills_curator_consolidate_enabled = excluded.skills_curator_consolidate_enabled,
       updated_at = excluded.updated_at
   `);
   const deleteProfileStmt = db.prepare("DELETE FROM profiles WHERE id = ?");
@@ -921,9 +930,10 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
       coding_agent_harnesses,
       selected_coding_agent_harness,
       token_optimizer_enabled,
+      coding_agent_provider_passthrough,
       updated_at
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(id) DO UPDATE SET
       vision_model = excluded.vision_model,
       transcription_model = excluded.transcription_model,
@@ -931,6 +941,7 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
       coding_agent_harnesses = excluded.coding_agent_harnesses,
       selected_coding_agent_harness = excluded.selected_coding_agent_harness,
       token_optimizer_enabled = excluded.token_optimizer_enabled,
+      coding_agent_provider_passthrough = excluded.coding_agent_provider_passthrough,
       updated_at = excluded.updated_at
   `);
   const listNotificationDestinationsForOrgStmt = db.prepare(`
@@ -1202,6 +1213,11 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
     SET revoked_at = ?
     WHERE session_token_hash = ? AND revoked_at IS NULL
   `);
+  const revokeBrowserSessionsForUserStmt = db.prepare(`
+    UPDATE browser_sessions
+    SET revoked_at = ?
+    WHERE user_id = ? AND revoked_at IS NULL
+  `);
   const updateBrowserSessionLastUsedAtStmt = db.prepare(`
     UPDATE browser_sessions
     SET last_used_at = ?
@@ -1212,29 +1228,40 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
     SET active_org_id = ?
     WHERE id = ?
   `);
+  const tryMarkOrganizationArchivedStmt = db.prepare(`
+    UPDATE organizations
+    SET archived_at = ?, updated_at = ?
+    WHERE id = ?
+      AND archived_at IS NULL
+      AND (SELECT COUNT(*) FROM organizations WHERE archived_at IS NULL) > 1
+  `);
   const upsertOrganizationStmt = db.prepare(`
-    INSERT INTO organizations (id, name, slug, skills_write_approval, skills_post_turn_review, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO organizations (id, name, slug, skills_write_approval, skills_post_turn_review, skills_curator_enabled, skills_curator_consolidate_enabled, skills_curator_last_run_at, archived_at, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(id) DO UPDATE SET
       name = excluded.name,
       slug = excluded.slug,
       skills_write_approval = excluded.skills_write_approval,
       skills_post_turn_review = excluded.skills_post_turn_review,
+      skills_curator_enabled = excluded.skills_curator_enabled,
+      skills_curator_consolidate_enabled = excluded.skills_curator_consolidate_enabled,
+      skills_curator_last_run_at = excluded.skills_curator_last_run_at,
+      archived_at = excluded.archived_at,
       updated_at = excluded.updated_at
   `);
   const listOrganizationsStmt = db.prepare(`
-    SELECT id, name, slug, skills_write_approval, skills_post_turn_review, created_at, updated_at
+    SELECT id, name, slug, skills_write_approval, skills_post_turn_review, skills_curator_enabled, skills_curator_consolidate_enabled, skills_curator_last_run_at, archived_at, created_at, updated_at
     FROM organizations
     ORDER BY name ASC
   `);
   const getOrganizationBySlugStmt = db.prepare(`
-    SELECT id, name, slug, skills_write_approval, skills_post_turn_review, created_at, updated_at
+    SELECT id, name, slug, skills_write_approval, skills_post_turn_review, skills_curator_enabled, skills_curator_consolidate_enabled, skills_curator_last_run_at, archived_at, created_at, updated_at
     FROM organizations
     WHERE slug = ?
     LIMIT 1
   `);
   const getOrganizationByIdStmt = db.prepare(`
-    SELECT id, name, slug, skills_write_approval, skills_post_turn_review, created_at, updated_at
+    SELECT id, name, slug, skills_write_approval, skills_post_turn_review, skills_curator_enabled, skills_curator_consolidate_enabled, skills_curator_last_run_at, archived_at, created_at, updated_at
     FROM organizations
     WHERE id = ?
     LIMIT 1
@@ -1318,13 +1345,15 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
     INSERT INTO skill_proposals (
       id, org_id, profile_id, session_id, proposed_by_user_id,
       action, skill_name, content, patch_old_string, patch_new_string, relative_path,
+      consolidate_loser_skill_names,
       status, reviewer_user_id, reviewed_at, created_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
   const listSkillProposalsByStatusStmt = db.prepare(`
     SELECT
       id, org_id, profile_id, session_id, proposed_by_user_id,
       action, skill_name, content, patch_old_string, patch_new_string, relative_path,
+      consolidate_loser_skill_names,
       status, reviewer_user_id, reviewed_at, created_at
     FROM skill_proposals
     WHERE org_id = ? AND status = ?
@@ -1334,6 +1363,7 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
     SELECT
       id, org_id, profile_id, session_id, proposed_by_user_id,
       action, skill_name, content, patch_old_string, patch_new_string, relative_path,
+      consolidate_loser_skill_names,
       status, reviewer_user_id, reviewed_at, created_at
     FROM skill_proposals
     WHERE org_id = ? AND status = ? AND profile_id = ?
@@ -1343,6 +1373,7 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
     SELECT
       id, org_id, profile_id, session_id, proposed_by_user_id,
       action, skill_name, content, patch_old_string, patch_new_string, relative_path,
+      consolidate_loser_skill_names,
       status, reviewer_user_id, reviewed_at, created_at
     FROM skill_proposals
     WHERE org_id = ?
@@ -1352,6 +1383,7 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
     SELECT
       id, org_id, profile_id, session_id, proposed_by_user_id,
       action, skill_name, content, patch_old_string, patch_new_string, relative_path,
+      consolidate_loser_skill_names,
       status, reviewer_user_id, reviewed_at, created_at
     FROM skill_proposals
     WHERE org_id = ? AND profile_id = ?
@@ -1361,6 +1393,7 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
     SELECT
       id, org_id, profile_id, session_id, proposed_by_user_id,
       action, skill_name, content, patch_old_string, patch_new_string, relative_path,
+      consolidate_loser_skill_names,
       status, reviewer_user_id, reviewed_at, created_at
     FROM skill_proposals
     WHERE org_id = ? AND id = ?
@@ -1370,6 +1403,7 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
     SELECT
       id, org_id, profile_id, session_id, proposed_by_user_id,
       action, skill_name, content, patch_old_string, patch_new_string, relative_path,
+      consolidate_loser_skill_names,
       status, reviewer_user_id, reviewed_at, created_at
     FROM skill_proposals
     WHERE org_id = ? AND profile_id = ? AND skill_name = ? AND action = 'create' AND status = 'pending'
@@ -1379,6 +1413,7 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
     SELECT
       id, org_id, profile_id, session_id, proposed_by_user_id,
       action, skill_name, content, patch_old_string, patch_new_string, relative_path,
+      consolidate_loser_skill_names,
       status, reviewer_user_id, reviewed_at, created_at
     FROM skill_proposals
     WHERE org_id = ? AND profile_id = ? AND skill_name = ? AND status = 'pending'
@@ -1388,6 +1423,7 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
     SELECT
       id, org_id, profile_id, session_id, proposed_by_user_id,
       action, skill_name, content, patch_old_string, patch_new_string, relative_path,
+      consolidate_loser_skill_names,
       status, reviewer_user_id, reviewed_at, created_at
     FROM skill_proposals
     WHERE org_id = ? AND profile_id = ? AND skill_name = ? AND action = 'patch'
@@ -1495,6 +1531,10 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
       o.slug,
       o.skills_write_approval,
       o.skills_post_turn_review,
+      o.skills_curator_enabled,
+      o.skills_curator_consolidate_enabled,
+      o.skills_curator_last_run_at,
+      o.archived_at,
       o.created_at,
       o.updated_at,
       om.role,
@@ -1502,6 +1542,7 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
     FROM org_members om
     INNER JOIN organizations o ON o.id = om.org_id
     WHERE om.user_id = ?
+      AND o.archived_at IS NULL
     ORDER BY o.name ASC
   `);
   const deleteOrgMemberStmt = db.prepare(`
@@ -1651,6 +1692,9 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
         record.patchOldString,
         record.patchNewString,
         record.relativePath,
+        record.consolidateLoserSkillNames
+          ? JSON.stringify(record.consolidateLoserSkillNames)
+          : null,
         record.status,
         record.reviewerUserId,
         record.reviewedAt,
@@ -2501,29 +2545,14 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
 
     async listUserOrganizations(userId) {
       return listUserOrganizationsStmt.all(userId).map((row) => {
-        const record = row as {
-          id: string;
-          name: string;
-          slug: string;
-          skills_write_approval: number;
-          skills_post_turn_review: number;
-          created_at: string;
-          updated_at: string;
-          role: string;
+        const record = row as OrganizationRow & {
           joined_at: string;
+          role: string;
         };
 
         return {
           joinedAt: record.joined_at,
-          organization: {
-            createdAt: record.created_at,
-            id: record.id,
-            name: record.name,
-            skillsPostTurnReview: record.skills_post_turn_review !== 0,
-            skillsWriteApproval: record.skills_write_approval !== 0,
-            slug: record.slug,
-            updatedAt: record.updated_at,
-          },
+          organization: toOrganizationRecord(record),
           role: record.role as StoredUserOrganizationRecord["role"],
         };
       });
@@ -2579,8 +2608,22 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
       return result.changes > 0;
     },
 
+    async revokeBrowserSessionsForUser(userId, revokedAt) {
+      const result = revokeBrowserSessionsForUserStmt.run(revokedAt, userId);
+      return result.changes;
+    },
+
     async setUserContext(orgId, userId, content, _updatedAt) {
       setUserContextStmt.run(content, orgId, userId);
+    },
+
+    async tryMarkOrganizationArchived(orgId, archivedAt) {
+      const result = tryMarkOrganizationArchivedStmt.run(
+        archivedAt,
+        archivedAt,
+        orgId
+      );
+      return result.changes > 0;
     },
 
     async unassignMcpServerFromProfile(profileId, serverId) {
@@ -2789,6 +2832,10 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
         record.slug,
         record.skillsWriteApproval ? 1 : 0,
         record.skillsPostTurnReview ? 1 : 0,
+        record.skillsCuratorEnabled ? 1 : 0,
+        record.skillsCuratorConsolidateEnabled ? 1 : 0,
+        record.skillsCuratorLastRunAt ?? null,
+        record.archivedAt ?? null,
         record.createdAt,
         record.updatedAt
       );
@@ -2827,6 +2874,11 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
         record.skillsPostTurnReview == null
           ? null
           : record.skillsPostTurnReview
+            ? 1
+            : 0,
+        record.skillsCuratorConsolidateEnabled == null
+          ? null
+          : record.skillsCuratorConsolidateEnabled
             ? 1
             : 0,
         record.createdAt,
@@ -2902,6 +2954,7 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
           record.tokenOptimizerEnabled === undefined
           ? null
           : Number(record.tokenOptimizerEnabled),
+        record.codingAgentProviderPassthrough === false ? 0 : 1,
         record.updatedAt
       );
     },
@@ -2947,6 +3000,10 @@ function toProfileRecord(row: ProfileRow): StoredProfileRecord {
     model: row.model,
     name: row.name,
     orgId: row.org_id ?? null,
+    skillsCuratorConsolidateEnabled:
+      row.skills_curator_consolidate_enabled == null
+        ? null
+        : row.skills_curator_consolidate_enabled !== 0,
     skillsPostTurnReview:
       row.skills_post_turn_review == null
         ? null
@@ -3259,6 +3316,7 @@ function toWorkspaceSettingsRecord(
 ): StoredWorkspaceSettingsRecord {
   return {
     codingAgentHarnesses: parseCodingAgentHarnesses(row.coding_agent_harnesses),
+    codingAgentProviderPassthrough: row.coding_agent_provider_passthrough !== 0,
     id: row.id,
     imageModel: row.image_model?.trim() || null,
     selectedCodingAgentHarness:
@@ -3470,9 +3528,14 @@ function toUserRecord(row: UserRow): StoredUserRecord {
 
 function toOrganizationRecord(row: OrganizationRow): StoredOrganizationRecord {
   return {
+    archivedAt: row.archived_at,
     createdAt: row.created_at,
     id: row.id,
     name: row.name,
+    skillsCuratorConsolidateEnabled:
+      row.skills_curator_consolidate_enabled !== 0,
+    skillsCuratorEnabled: row.skills_curator_enabled !== 0,
+    skillsCuratorLastRunAt: row.skills_curator_last_run_at,
     skillsPostTurnReview: row.skills_post_turn_review !== 0,
     skillsWriteApproval: row.skills_write_approval !== 0,
     slug: row.slug,
@@ -3514,8 +3577,24 @@ function toOrgMemoryProposalRecord(
 }
 
 function toSkillProposalRecord(row: SkillProposalRow): StoredSkillProposal {
+  let consolidateLoserSkillNames: string[] | null = null;
+  if (row.consolidate_loser_skill_names) {
+    try {
+      const parsed = JSON.parse(row.consolidate_loser_skill_names) as unknown;
+      if (
+        Array.isArray(parsed) &&
+        parsed.every((item) => typeof item === "string")
+      ) {
+        consolidateLoserSkillNames = parsed;
+      }
+    } catch {
+      consolidateLoserSkillNames = null;
+    }
+  }
+
   return {
     action: row.action as StoredSkillProposal["action"],
+    consolidateLoserSkillNames,
     content: row.content,
     createdAt: row.created_at,
     id: row.id,

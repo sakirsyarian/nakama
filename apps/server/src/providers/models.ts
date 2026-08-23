@@ -2,6 +2,7 @@ import type { ProviderName } from "@nakama/core";
 import {
   type CustomModelEntry,
   findCustomModel,
+  isDiscoveryModelProvider,
   validateCustomModels,
 } from "@nakama/core";
 import type { ProviderModelOption as ContractProviderModelOption } from "@nakama/core/contract";
@@ -53,6 +54,15 @@ export const AVAILABLE_MODELS: ProviderModelOption[] = withVisionDefaults([
     name: "Opus 4.6",
     outputPerMillionUsd: 75,
     provider: "anthropic",
+  },
+  {
+    contextWindow: 1_050_000,
+    id: "gpt-5.6-luna",
+    inputPerMillionUsd: 0.2,
+    maxOutputTokens: 128_000,
+    name: "GPT-5.6 Luna",
+    outputPerMillionUsd: 1.2,
+    provider: "openai",
   },
   {
     contextWindow: 128_000,
@@ -347,6 +357,73 @@ export const AVAILABLE_MODELS: ProviderModelOption[] = withVisionDefaults([
     outputPerMillionUsd: 1.2,
     provider: "opencode_go",
   },
+  {
+    contextWindow: 131_072,
+    default: true,
+    id: "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+    inputPerMillionUsd: 0.38,
+    maxOutputTokens: 40_960,
+    name: "Llama 3.3 70B (FP8)",
+    outputPerMillionUsd: 0.38,
+    provider: "cloudflare",
+    supportsThinking: false,
+    supportsVision: false,
+  },
+  {
+    contextWindow: 7968,
+    id: "@cf/meta/llama-3.1-8b-instruct",
+    inputPerMillionUsd: 0.28,
+    maxOutputTokens: 4096,
+    name: "Llama 3.1 8B",
+    outputPerMillionUsd: 0.83,
+    provider: "cloudflare",
+    supportsThinking: false,
+    supportsVision: false,
+  },
+  {
+    contextWindow: 128_000,
+    id: "@cf/meta/llama-3.1-8b-instruct-fast",
+    inputPerMillionUsd: 0.14,
+    maxOutputTokens: 40_960,
+    name: "Llama 3.1 8B (Fast)",
+    outputPerMillionUsd: 0.14,
+    provider: "cloudflare",
+    supportsThinking: false,
+    supportsVision: false,
+  },
+  {
+    contextWindow: 131_072,
+    id: "@cf/meta/llama-4-scout-17b-16e-instruct",
+    inputPerMillionUsd: 0.3,
+    maxOutputTokens: 40_960,
+    name: "Llama 4 Scout 17B",
+    outputPerMillionUsd: 0.3,
+    provider: "cloudflare",
+    supportsThinking: false,
+    supportsVision: false,
+  },
+  {
+    contextWindow: 131_072,
+    id: "@cf/qwen/qwen2.5-coder-32b-instruct",
+    inputPerMillionUsd: 0.38,
+    maxOutputTokens: 40_960,
+    name: "Qwen 2.5 Coder 32B",
+    outputPerMillionUsd: 0.38,
+    provider: "cloudflare",
+    supportsThinking: false,
+    supportsVision: false,
+  },
+  {
+    contextWindow: 131_072,
+    id: "@cf/deepseek-ai/deepseek-r1-distill-qwen-32b",
+    inputPerMillionUsd: 0.35,
+    maxOutputTokens: 40_960,
+    name: "DeepSeek R1 Distill Qwen 32B",
+    outputPerMillionUsd: 0.7,
+    provider: "cloudflare",
+    supportsThinking: false,
+    supportsVision: false,
+  },
 ]);
 
 const OPENROUTER_MODEL_SLUG_PATTERN = /^[\w.-]+\/[\w.:-]+$/;
@@ -401,6 +478,26 @@ export function validateOllamaCustomModels(
   return models;
 }
 
+export function isCloudflareModelId(model: string): boolean {
+  return model.trim().startsWith("@cf/") || model.trim().startsWith("@hf/");
+}
+
+export function validateCloudflareCustomModels(
+  entries: unknown
+): CustomModelEntry[] {
+  const models = validateCustomModels(entries);
+
+  for (const model of models) {
+    if (!isCloudflareModelId(model.id)) {
+      throw new Error(
+        `Invalid Cloudflare model id "${model.id}". Use @cf/ or @hf/ format.`
+      );
+    }
+  }
+
+  return models;
+}
+
 export function isOpenCodeGoModelId(model: string): boolean {
   return model.trim().startsWith("opencode-go/");
 }
@@ -439,7 +536,10 @@ export function getDefaultModel(
   provider: ProviderName,
   customModels?: CustomModelEntry[]
 ): string {
-  if (provider === "openai_compatible") {
+  if (isDiscoveryModelProvider(provider)) {
+    // Discovery providers fetch model lists live from the platform
+    // (/models) and store them as instance custom models — no hardcoded
+    // catalog.
     return resolveCompatibleDefaultModel(customModels);
   }
 
@@ -486,12 +586,10 @@ export function getDefaultModel(
                 ? "accounts/fireworks/models/kimi-k2p6"
                 : provider === "opencode_go"
                   ? "opencode-go/kimi-k2.7-code"
-                  : "gpt-5.4";
+                  : provider === "cloudflare"
+                    ? "@cf/meta/llama-3.3-70b-instruct-fp8-fast"
+                    : "gpt-5.4";
   return models.find((model) => model.default)?.id ?? models[0]?.id ?? fallback;
-}
-
-export function isValidModel(model: string): boolean {
-  return AVAILABLE_MODELS.some((option) => option.id === model);
 }
 
 export function resolveModel(
@@ -529,7 +627,18 @@ export function resolveModel(
     return resolveOllamaDefaultModel(customModels, trimmed);
   }
 
-  if (trimmed && provider === "openai_compatible") {
+  if (trimmed && provider === "cloudflare" && customModels?.length) {
+    if (findCustomModel(customModels, trimmed)) {
+      return trimmed;
+    }
+
+    return resolveCompatibleDefaultModel(customModels, trimmed);
+  }
+
+  if (trimmed && isDiscoveryModelProvider(provider)) {
+    // Dynamic catalog: accept ids discovered from the platform's /models
+    // endpoint (stored as instance custom models); otherwise resolve the
+    // instance default.
     if (findCustomModel(customModels, trimmed)) {
       return trimmed;
     }
@@ -555,12 +664,13 @@ export function resolveModel(
     return resolveCompatibleDefaultModel(customModels, trimmed);
   }
 
-  if (trimmed && isValidModel(trimmed)) {
-    const option = getModelById(trimmed);
-
-    if (option?.provider === provider) {
-      return trimmed;
-    }
+  // Provider-scoped check: region variants (e.g. minimax vs minimax_cn) may
+  // expose identical model ids, so global id uniqueness must not be assumed.
+  if (
+    trimmed &&
+    getModelsForProvider(provider).some((model) => model.id === trimmed)
+  ) {
+    return trimmed;
   }
 
   if (
@@ -588,7 +698,7 @@ export function modelSupportsVision(
   }
 
   if (
-    provider === "openai_compatible" ||
+    isDiscoveryModelProvider(provider) ||
     provider === "opencode_go" ||
     provider === "deepseek"
   ) {

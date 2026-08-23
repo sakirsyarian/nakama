@@ -1,5 +1,4 @@
 import { readEnvValue } from "./config";
-
 import type { ProviderName } from "./contract";
 
 export type UserProviderName = ProviderName;
@@ -15,7 +14,19 @@ export const USER_PROVIDER_NAMES: readonly UserProviderName[] = [
   "ollama",
   "openai_compatible",
   "opencode_go",
+  "cloudflare",
+  "minimax",
+  "minimax_cn",
+  "zhipu",
+  "zhipu_cn",
+  "xai",
 ] as const;
+
+export {
+  DISCOVERY_MODEL_PROVIDERS,
+  defaultDiscoveryBaseUrl,
+  isDiscoveryModelProvider,
+} from "./discovery-providers";
 
 export function parseProviderName(
   value: string | undefined
@@ -32,7 +43,13 @@ export function parseProviderName(
     normalized === "fireworks" ||
     normalized === "ollama" ||
     normalized === "openai_compatible" ||
-    normalized === "opencode_go"
+    normalized === "opencode_go" ||
+    normalized === "cloudflare" ||
+    normalized === "minimax" ||
+    normalized === "minimax_cn" ||
+    normalized === "zhipu" ||
+    normalized === "zhipu_cn" ||
+    normalized === "xai"
   ) {
     return normalized;
   }
@@ -64,6 +81,18 @@ export function apiKeyEnvVarForProvider(
       return "OPENAI_COMPATIBLE_API_KEY";
     case "opencode_go":
       return "OPENCODE_GO_API_KEY";
+    case "cloudflare":
+      return "CLOUDFLARE_API_KEY";
+    case "minimax":
+      return "MINIMAX_API_KEY";
+    case "minimax_cn":
+      return "MINIMAX_CN_API_KEY";
+    case "zhipu":
+      return "ZHIPU_API_KEY";
+    case "zhipu_cn":
+      return "ZHIPU_CN_API_KEY";
+    case "xai":
+      return "XAI_API_KEY";
   }
 }
 
@@ -98,8 +127,9 @@ export function resolveProvider(
     return envVar && readEnvValue(env, envVar);
   });
 
-  if (providersWithEnvKeys.length === 1) {
-    return providersWithEnvKeys[0]!;
+  const [onlyProvider] = providersWithEnvKeys;
+  if (providersWithEnvKeys.length === 1 && onlyProvider) {
+    return onlyProvider;
   }
 
   return null;

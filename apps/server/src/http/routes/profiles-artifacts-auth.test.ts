@@ -12,11 +12,7 @@ setupTestConfigDir("nakama-profiles-artifacts-auth-test-");
 
 function createApp() {
   const readCalls: Array<{ render?: "markdown" }> = [];
-  const writes: Array<{
-    content: string;
-    filename: string;
-    profileId: string;
-  }> = [];
+  const writeCalls: Array<{ content: string; filename: string }> = [];
   const agent = {
     deleteProfileArtifact: async () => ({
       deleted: true,
@@ -45,15 +41,14 @@ function createApp() {
       _orgId: string,
       profileId: string,
       filename: string,
-      request: { content: string }
+      content: string
     ) => {
-      writes.push({ content: request.content, filename, profileId });
+      writeCalls.push({ content, filename });
       return {
         filename,
-        mimeType: "text/markdown",
         profileId,
-        sizeBytes: Buffer.byteLength(request.content, "utf8"),
-        updatedAt: "2026-08-15T00:00:00.000Z",
+        sizeBytes: content.length,
+        updatedAt: "2026-08-18T00:00:00.000Z",
       };
     },
   };
@@ -61,7 +56,7 @@ function createApp() {
   return {
     ...createMinimalHonoApp({ agent }),
     readCalls,
-    writes,
+    writeCalls,
   };
 }
 
@@ -265,9 +260,11 @@ describe("profile artifact content auth", () => {
 
     expect(response.status).toBe(200);
   });
+});
 
-  test("org member can write artifact content", async () => {
-    const { app, databaseAdapter, writes } = createApp();
+describe("profile artifact write auth", () => {
+  test("org member can save artifact content", async () => {
+    const { app, databaseAdapter, writeCalls } = createApp();
     const memberSession = await setupFreshInstallSession(
       app,
       databaseAdapter,
@@ -277,9 +274,9 @@ describe("profile artifact content auth", () => {
 
     const response = await app.fetch(
       new Request(
-        "http://localhost:4310/v1/profiles/profile_1/artifacts/content?path=script.md",
+        "http://localhost:4310/v1/profiles/profile_1/artifacts/content?path=report.md",
         {
-          body: JSON.stringify({ content: "# Final hook\n" }),
+          body: JSON.stringify({ content: "# Report\n\nEdited by hand.\n" }),
           headers: memberSession.headers(
             {
               "Content-Type": "application/json",
@@ -293,21 +290,14 @@ describe("profile artifact content auth", () => {
     );
 
     expect(response.status).toBe(200);
-    expect(await response.json()).toMatchObject({
-      filename: "script.md",
-      mimeType: "text/markdown",
+    expect(writeCalls.at(-1)).toEqual({
+      content: "# Report\n\nEdited by hand.\n",
+      filename: "report.md",
     });
-    expect(writes).toEqual([
-      {
-        content: "# Final hook\n",
-        filename: "script.md",
-        profileId: "profile_1",
-      },
-    ]);
   });
 
-  test("org viewer cannot write artifact content", async () => {
-    const { app, databaseAdapter, writes } = createApp();
+  test("org viewer cannot save artifact content", async () => {
+    const { app, databaseAdapter, writeCalls } = createApp();
     const viewerSession = await setupFreshInstallSession(
       app,
       databaseAdapter,
@@ -317,9 +307,9 @@ describe("profile artifact content auth", () => {
 
     const response = await app.fetch(
       new Request(
-        "http://localhost:4310/v1/profiles/profile_1/artifacts/content?path=script.md",
+        "http://localhost:4310/v1/profiles/profile_1/artifacts/content?path=report.md",
         {
-          body: JSON.stringify({ content: "nope" }),
+          body: JSON.stringify({ content: "# Overwritten\n" }),
           headers: viewerSession.headers(
             {
               "Content-Type": "application/json",
@@ -333,39 +323,23 @@ describe("profile artifact content auth", () => {
     );
 
     expect(response.status).toBe(403);
-    expect(writes).toEqual([]);
+    expect(writeCalls).toHaveLength(0);
   });
 
-  test("write requires a path and string content", async () => {
-    const { app, databaseAdapter, writes } = createApp();
+  test("rejects a save with no path", async () => {
+    const { app, databaseAdapter, writeCalls } = createApp();
     const memberSession = await setupFreshInstallSession(
       app,
       databaseAdapter,
-      "invalid-write@example.com",
+      "nopath@example.com",
       "member"
     );
 
-    const missingPath = await app.fetch(
+    const response = await app.fetch(
       new Request(
         "http://localhost:4310/v1/profiles/profile_1/artifacts/content",
         {
-          body: JSON.stringify({ content: "x" }),
-          headers: memberSession.headers(
-            {
-              "Content-Type": "application/json",
-              "X-CSRF-Token": memberSession.csrfToken,
-            },
-            memberSession.orgId
-          ),
-          method: "PUT",
-        }
-      )
-    );
-    const missingContent = await app.fetch(
-      new Request(
-        "http://localhost:4310/v1/profiles/profile_1/artifacts/content?path=script.md",
-        {
-          body: JSON.stringify({}),
+          body: JSON.stringify({ content: "# Report\n" }),
           headers: memberSession.headers(
             {
               "Content-Type": "application/json",
@@ -378,8 +352,7 @@ describe("profile artifact content auth", () => {
       )
     );
 
-    expect(missingPath.status).toBe(400);
-    expect(missingContent.status).toBe(400);
-    expect(writes).toEqual([]);
+    expect(response.status).toBe(400);
+    expect(writeCalls).toHaveLength(0);
   });
 });

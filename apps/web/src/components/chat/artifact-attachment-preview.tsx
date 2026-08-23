@@ -1,21 +1,21 @@
 import {
   File01Icon,
   Image01Icon,
+  PencilEdit01Icon,
   Video01Icon,
   ViewIcon,
 } from "hugeicons-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { ArtifactAttachmentPanelActions } from "@/components/chat/artifact-attachment-panel-actions";
 import { ArtifactAttachmentPanelBody } from "@/components/chat/artifact-attachment-panel-body";
 import {
-  artifactCanEdit,
   artifactCanTogglePreviewSource,
   artifactPanelBodyClassName,
   artifactPanelDefaultWidth,
   artifactPanelHeaderMeta,
   downloadActionLabel,
 } from "@/components/chat/artifact-attachment-panel-body.shared";
-import { ArtifactMarkdownTocSelect } from "@/components/chat/artifact-markdown-preview";
+import { ArtifactMarkdownEditor } from "@/components/chat/artifact-markdown-editor";
 import {
   type ArtifactPreviewMode,
   ArtifactPreviewModeToggle,
@@ -25,8 +25,12 @@ import {
   ArtifactSharePublishDialogFromState,
 } from "@/components/chat/artifact-share-controls";
 import { useArtifactPreviewContent } from "@/components/chat/use-artifact-preview-content";
-import { useArtifactShareControls } from "@/components/chat/use-artifact-share-controls";
+import {
+  type ArtifactShareControlsState,
+  useArtifactShareControls,
+} from "@/components/chat/use-artifact-share-controls";
 import { Button } from "@/components/ui/button";
+import { DropdownMenuItem } from "@/components/ui/dropdown-menu";
 import {
   Tooltip,
   TooltipContent,
@@ -34,10 +38,9 @@ import {
 } from "@/components/ui/tooltip";
 import { useAuth } from "@/context/use-auth";
 import { useChatAttachmentPanel } from "@/context/use-chat-attachment-panel";
-import { useUpdateArtifactMutation } from "@/hooks/use-resource-mutations";
+import { useWriteArtifactMutation } from "@/hooks/use-resource-mutations";
 import {
   artifactCodeLanguage,
-  artifactContentWritePath,
   buildArtifactContentUrl,
   type ChatArtifactRef,
   isDocxFile,
@@ -52,10 +55,6 @@ import {
 } from "@/lib/chat-artifacts";
 import { client, formatError } from "@/lib/client";
 import { formatBytes } from "@/lib/knowledge-base-files";
-import {
-  extractMarkdownToc,
-  MARKDOWN_TOC_MIN_HEADINGS,
-} from "@/lib/markdown-toc";
 import { cn } from "@/lib/utils";
 
 interface ArtifactAttachmentPreviewProps {
@@ -154,24 +153,20 @@ export function ArtifactAttachmentPreview({
   className,
   variant = "chip",
 }: ArtifactAttachmentPreviewProps) {
-  const { show, update, activeId, isFullscreen } = useChatAttachmentPanel();
+  const { show, update, activeId } = useChatAttachmentPanel();
   const share = useArtifactShareControls({
     artifactPath: artifact.path,
     profileId,
   });
   const open = activeId === id;
-  const fullscreen = open && isFullscreen;
+  const [fullscreen, setFullscreen] = useState(false);
   const [copied, setCopied] = useState(false);
   const [previewMode, setPreviewMode] =
     useState<ArtifactPreviewMode>("preview");
-  const [editing, setEditing] = useState(false);
-  const [dirty, setDirty] = useState(false);
+  const [draft, setDraft] = useState<string | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
-  const draftRef = useRef("");
-  const editorMountedRef = useRef(false);
-  const saveArtifactRef = useRef<() => Promise<void>>(async () => undefined);
   const { activeOrg } = useAuth();
-  const updateArtifact = useUpdateArtifactMutation();
+  const writeArtifact = useWriteArtifactMutation();
   const downloadUrl = `${client.baseUrl}${buildArtifactContentUrl(profileId, artifact.path)}`;
   const mimeType = resolveArtifactMimeType(
     artifact.mimeType,
@@ -184,18 +179,14 @@ export function ArtifactAttachmentPreview({
     isDocxFile(artifact.filename, mimeType) ||
     isLegacyDocFile(artifact.filename, mimeType);
   const isMarkdown = isMarkdownArtifactMimeType(mimeType) || isWordDocument;
-  const canEdit =
-    (activeOrg?.role === "admin" || activeOrg?.role === "member") &&
-    artifactCanEdit({ filename: artifact.filename, mimeType });
-  const canTogglePreview = artifactCanTogglePreviewSource({
+  const showPreviewToggle = artifactCanTogglePreviewSource({
     isHtml,
     isMarkdown,
   });
-  const showPreviewToggle = canTogglePreview;
   const header = artifactPanelHeaderMeta({
     filename: artifact.filename,
     mimeType,
-    showPreviewToggle: canTogglePreview,
+    showPreviewToggle,
     sizeBytes: artifact.sizeBytes,
   });
   const language = artifactCodeLanguage(artifact.filename);
@@ -207,6 +198,9 @@ export function ArtifactAttachmentPreview({
     isTextArtifactMimeType(mimeType) ||
     isUnknownArtifactMimeType(mimeType);
   const downloadLabel = downloadActionLabel(mimeType);
+  // Word artifacts preview as converted markdown, so writing the buffer back
+  // would replace the .docx with its own preview text.
+  const canEdit = isMarkdown && !isWordDocument && activeOrg?.role !== "viewer";
   const {
     loading,
     error,
@@ -224,8 +218,6 @@ export function ArtifactAttachmentPreview({
     open,
     profileId,
   });
-  const previewText = dirty ? draftRef.current : (content ?? "");
-  const toc = useMemo(() => extractMarkdownToc(previewText), [previewText]);
 
   useEffect(() => {
     if (!copied) {
@@ -236,32 +228,42 @@ export function ArtifactAttachmentPreview({
     return () => window.clearTimeout(timeout);
   }, [copied]);
 
-  function handlePreviewModeChange(next: ArtifactPreviewMode) {
-    if (editing) {
-      editorMountedRef.current = false;
-      setEditing(false);
+  async function saveDraft() {
+    if (draft === null) {
+      return;
     }
-    setPreviewMode(next);
-  }
 
-  function handleDraftChange(next: string) {
-    draftRef.current = next;
-    const nextDirty = next !== (content ?? "");
-    setDirty((current) => (current === nextDirty ? current : nextDirty));
+    setSaveError(null);
+
+    try {
+      await writeArtifact.mutateAsync({
+        artifactPath: artifact.path,
+        content: draft,
+        profileId,
+      });
+      setContent(draft);
+      setDraft(null);
+    } catch (mutationError) {
+      setSaveError(formatError(mutationError));
+    }
   }
 
   function buildPanelBody(
     loadingOverride?: boolean,
     mode: ArtifactPreviewMode = previewMode
   ) {
-    if (editing && !(loadingOverride ?? loading)) {
-      const initial = dirty ? draftRef.current : (content ?? "");
-      draftRef.current = initial;
+    if (draft !== null) {
       return (
-        <ArtifactTextEditor
-          initialValue={initial}
-          onChange={handleDraftChange}
-          onSave={() => void saveArtifactRef.current()}
+        <ArtifactMarkdownEditor
+          busy={writeArtifact.isPending}
+          draft={draft}
+          error={saveError}
+          onCancel={() => {
+            setDraft(null);
+            setSaveError(null);
+          }}
+          onChange={setDraft}
+          onSave={() => void saveDraft()}
         />
       );
     }
@@ -277,7 +279,7 @@ export function ArtifactAttachmentPreview({
       <ArtifactAttachmentPreviewPanelBody
         artifact={artifact}
         canPreview={canPreview}
-        content={dirty ? draftRef.current : content}
+        content={content}
         error={error}
         imagePreviewUrl={imagePreviewUrl}
         kind={panelKind}
@@ -291,118 +293,74 @@ export function ArtifactAttachmentPreview({
   }
 
   function buildPanelConfig(mode: ArtifactPreviewMode = previewMode) {
-    const showTocSelect =
-      isMarkdown &&
-      !editing &&
-      mode === "preview" &&
-      toc.length >= MARKDOWN_TOC_MIN_HEADINGS;
-
     return {
-      bodyClassName: artifactPanelBodyClassName({
-        editing,
-        isHtml,
-        isImage,
-        isMarkdown,
-        isVideo,
-        previewMode: mode,
-      }),
+      bodyClassName:
+        draft === null
+          ? artifactPanelBodyClassName({
+              isHtml,
+              isImage,
+              isMarkdown,
+              isVideo,
+              previewMode: mode,
+            })
+          : "flex flex-col overflow-hidden p-0",
       content: buildPanelBody(undefined, mode),
       fullscreen,
       headerActions: (
-        <>
-          <ArtifactAttachmentPanelActions
-            additionalMenuItems={<ArtifactShareMenuItem share={share} />}
-            canEdit={canEdit && !canTogglePreview}
-            content={content}
-            copied={copied}
-            copyDisabled={isImage || isVideo}
-            downloadLabel={downloadLabel}
-            downloadUrl={downloadUrl}
-            editing={editing || dirty}
-            filename={artifact.filename}
-            fullscreen={fullscreen}
-            loading={loading}
-            onCancelEdit={cancelEditing}
-            onCopy={() => void copyArtifact()}
-            onEdit={startEditing}
-            onSave={() => void saveArtifactRef.current()}
-            onToggleFullscreen={() =>
-              update(id, {
-                fullscreen: !fullscreen,
-                resizable: fullscreen,
-              })
-            }
-            saveDisabled={!dirty}
-            saving={updateArtifact.isPending}
-          />
-          <ArtifactSharePublishDialogFromState
-            artifactPath={artifact.path}
-            share={share}
-          />
-        </>
+        <ArtifactAttachmentPreviewHeaderActions
+          artifactPath={artifact.path}
+          canEdit={canEdit}
+          content={content}
+          copied={copied}
+          copyDisabled={isImage || isVideo}
+          downloadLabel={downloadLabel}
+          downloadUrl={downloadUrl}
+          filename={artifact.filename}
+          fullscreen={fullscreen}
+          loading={loading}
+          onCopy={() =>
+            void copyArtifactContent({
+              artifactPath: artifact.path,
+              content,
+              isImage,
+              isVideo,
+              isWordDocument,
+              profileId,
+              setContent,
+              setCopied,
+            })
+          }
+          onEdit={() => {
+            setSaveError(null);
+            setDraft(content ?? "");
+          }}
+          onToggleFullscreen={() => setFullscreen((current) => !current)}
+          share={share}
+        />
       ),
       leading:
-        showPreviewToggle || showTocSelect ? (
-          <>
-            {showPreviewToggle ? (
-              <ArtifactPreviewModeToggle
-                editDisabled={loading && !content}
-                mode={editing ? "edit" : mode}
-                onChange={handlePreviewModeChange}
-                onEdit={startEditing}
-                showEdit={canEdit}
-              />
-            ) : null}
-            {showTocSelect ? <ArtifactMarkdownTocSelect entries={toc} /> : null}
-          </>
+        showPreviewToggle && draft === null ? (
+          <ArtifactPreviewModeToggle mode={mode} onChange={setPreviewMode} />
         ) : null,
       resizable: !fullscreen,
-      subtitle: saveError ?? header.subtitle,
-      subtitleClassName: saveError ? "text-destructive" : undefined,
-      title: showTocSelect ? "" : header.title,
-      typeLabel: null,
+      subtitle: header.subtitle,
+      title: header.title,
+      typeLabel: header.typeLabel,
     };
   }
 
   useEffect(() => {
     if (!open) {
-      editorMountedRef.current = false;
       return;
     }
 
-    const config = buildPanelConfig();
-    if (editing && !loading) {
-      if (editorMountedRef.current) {
-        update(id, {
-          bodyClassName: config.bodyClassName,
-          fullscreen: config.fullscreen,
-          headerActions: config.headerActions,
-          leading: config.leading,
-          resizable: config.resizable,
-          subtitle: config.subtitle,
-          subtitleClassName: config.subtitleClassName,
-          title: config.title,
-          typeLabel: config.typeLabel,
-        });
-        return;
-      }
-
-      editorMountedRef.current = true;
-      update(id, config);
-      return;
-    }
-
-    editorMountedRef.current = false;
-    update(id, config);
+    update(id, buildPanelConfig());
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     open,
     update,
     id,
-    artifact.filename,
-    artifact.mimeType,
-    artifact.path,
-    artifact.sizeBytes,
+    artifact,
     fullscreen,
     isHtml,
     isImage,
@@ -422,99 +380,22 @@ export function ArtifactAttachmentPreview({
     share.busy,
     share.publishDialogOpen,
     previewMode,
+    canEdit,
+    draft,
+    saveError,
+    writeArtifact.isPending,
     showPreviewToggle,
     header.subtitle,
     header.title,
-    canEdit,
-    editing,
-    dirty,
-    toc,
-    saveError,
-    updateArtifact.isPending,
+    header.typeLabel,
   ]);
 
-  function startEditing() {
-    if (editing) {
-      return;
-    }
-    if (!dirty) {
-      draftRef.current = content ?? "";
-    }
-    setSaveError(null);
-    editorMountedRef.current = false;
-    setEditing(true);
-  }
-
-  function cancelEditing() {
-    draftRef.current = content ?? "";
-    setDirty(false);
-    setSaveError(null);
-    editorMountedRef.current = false;
-    setEditing(false);
-  }
-
-  function resetEditor() {
-    setEditing(false);
-    setDirty(false);
-    draftRef.current = "";
-    setSaveError(null);
-    editorMountedRef.current = false;
-  }
-
-  async function saveArtifact() {
-    const nextContent = draftRef.current;
-    if (nextContent === (content ?? "") || updateArtifact.isPending) {
-      return;
-    }
-
-    try {
-      await updateArtifact.mutateAsync({
-        content: nextContent,
-        path: artifactContentWritePath(artifact.path),
-        profileId,
-      });
-      setContent(nextContent);
-      setEditing(false);
-      setDirty(false);
-      setSaveError(null);
-    } catch (saveFailure) {
-      setSaveError(formatError(saveFailure));
-    }
-  }
-
-  saveArtifactRef.current = saveArtifact;
-
-  async function copyArtifact() {
-    if (isImage || isVideo) {
-      return;
-    }
-
-    try {
-      let text = content;
-      if (!text) {
-        const result = await client.readProfileArtifactContent(
-          profileId,
-          artifactContentWritePath(artifact.path),
-          {
-            inline: true,
-            render: isWordDocument ? "markdown" : undefined,
-          }
-        );
-        text = new TextDecoder().decode(result.data);
-        setContent(text);
-      }
-
-      await navigator.clipboard.writeText(text);
-      setCopied(true);
-    } catch {
-      // Clipboard may be unavailable outside secure contexts.
-    }
-  }
-
   function openPanel() {
+    setFullscreen(false);
     setCopied(false);
     setPreviewMode("preview");
-    resetEditor();
+    setDraft(null);
+    setSaveError(null);
     show({
       ...buildPanelConfig("preview"),
       content: buildPanelBody(
@@ -529,9 +410,11 @@ export function ArtifactAttachmentPreview({
       fullscreen: false,
       id,
       onClose: () => {
+        setFullscreen(false);
         setCopied(false);
         setPreviewMode("preview");
-        resetEditor();
+        setDraft(null);
+        setSaveError(null);
       },
       resizable: true,
     });
@@ -547,40 +430,6 @@ export function ArtifactAttachmentPreview({
       onOpen={openPanel}
       variant={variant}
     />
-  );
-}
-
-function ArtifactTextEditor({
-  initialValue,
-  onChange,
-  onSave,
-}: {
-  initialValue: string;
-  onChange: (value: string) => void;
-  onSave: () => void;
-}) {
-  const [value, setValue] = useState(initialValue);
-
-  return (
-    <div className="flex min-h-0 flex-1 flex-col">
-      <textarea
-        className="min-h-0 flex-1 resize-none overflow-y-auto border-0 bg-transparent px-4 py-3 font-mono text-sm leading-relaxed outline-none"
-        data-artifact-inner-scroll=""
-        onChange={(event) => {
-          const next = event.target.value;
-          setValue(next);
-          onChange(next);
-        }}
-        onKeyDown={(event) => {
-          if ((event.metaKey || event.ctrlKey) && event.key === "s") {
-            event.preventDefault();
-            onSave();
-          }
-        }}
-        spellCheck
-        value={value}
-      />
-    </div>
   );
 }
 
@@ -690,5 +539,122 @@ function ArtifactAttachmentPreviewTrigger({
         </p>
       </div>
     </button>
+  );
+}
+
+async function copyArtifactContent({
+  isImage,
+  isVideo,
+  isWordDocument,
+  content,
+  profileId,
+  artifactPath,
+  setContent,
+  setCopied,
+}: {
+  isImage: boolean;
+  isVideo: boolean;
+  isWordDocument: boolean;
+  content: string | null;
+  profileId: string;
+  artifactPath: string;
+  setContent: (value: string) => void;
+  setCopied: (value: boolean) => void;
+}) {
+  if (isImage || isVideo) {
+    return;
+  }
+
+  try {
+    let text = content;
+    if (!text) {
+      const result = await client.readProfileArtifactContent(
+        profileId,
+        artifactPath,
+        {
+          inline: true,
+          render: isWordDocument ? "markdown" : undefined,
+        }
+      );
+      text = new TextDecoder().decode(result.data);
+      setContent(text);
+    }
+
+    await navigator.clipboard.writeText(text);
+    setCopied(true);
+  } catch {
+    // Clipboard may be unavailable outside secure contexts.
+  }
+}
+
+function ArtifactAttachmentPreviewHeaderActions({
+  additionalEditDisabled,
+  artifactPath,
+  canEdit,
+  content,
+  copied,
+  copyDisabled,
+  downloadLabel,
+  downloadUrl,
+  filename,
+  fullscreen,
+  loading,
+  onCopy,
+  onEdit,
+  onToggleFullscreen,
+  share,
+}: {
+  additionalEditDisabled?: boolean;
+  artifactPath: string;
+  canEdit: boolean;
+  content: string | null;
+  copied: boolean;
+  copyDisabled: boolean;
+  downloadLabel: string;
+  downloadUrl: string;
+  filename: string;
+  fullscreen: boolean;
+  loading: boolean;
+  onCopy: () => void;
+  onEdit: () => void;
+  onToggleFullscreen: () => void;
+  share: ArtifactShareControlsState;
+}) {
+  return (
+    <>
+      <ArtifactAttachmentPanelActions
+        additionalMenuItems={
+          <>
+            {canEdit ? (
+              <DropdownMenuItem
+                className="cursor-pointer"
+                disabled={
+                  additionalEditDisabled ?? (loading || content === null)
+                }
+                onClick={onEdit}
+              >
+                <PencilEdit01Icon aria-hidden />
+                Edit artifact
+              </DropdownMenuItem>
+            ) : null}
+            <ArtifactShareMenuItem share={share} />
+          </>
+        }
+        content={content}
+        copied={copied}
+        copyDisabled={copyDisabled}
+        downloadLabel={downloadLabel}
+        downloadUrl={downloadUrl}
+        filename={filename}
+        fullscreen={fullscreen}
+        loading={loading}
+        onCopy={onCopy}
+        onToggleFullscreen={onToggleFullscreen}
+      />
+      <ArtifactSharePublishDialogFromState
+        artifactPath={artifactPath}
+        share={share}
+      />
+    </>
   );
 }

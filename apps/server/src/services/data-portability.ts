@@ -1,6 +1,4 @@
-import { constants } from "node:fs";
 import {
-  access,
   cp,
   lstat,
   mkdir,
@@ -27,6 +25,7 @@ import {
   type DataImportPreviewResponse,
   getUserConfigDir,
   NAKAMA_API_VERSION,
+  pathExists,
   type RestoreDataImportResponse,
 } from "@nakama/core";
 import { unzipSync, zipSync } from "fflate";
@@ -70,10 +69,20 @@ interface InventoryItem {
 const RESTORE_PREFIX = ".nakama-restore-";
 const BACKUP_PREFIX = ".nakama-backup-";
 
+function resolveNakamaRootDir(rootDir?: string): string {
+  const raw = rootDir ?? getUserConfigDir();
+  if (!isAbsolute(raw)) {
+    throw new Error(
+      "rootDir must be an absolute path; relative paths resolve against process.cwd() and break config isolation."
+    );
+  }
+  return resolve(raw);
+}
+
 export async function createNakamaDataExport(
   options: CreateDataExportOptions = {}
 ): Promise<CreateDataExportResult> {
-  const rootDir = resolve(options.rootDir ?? getUserConfigDir());
+  const rootDir = resolveNakamaRootDir(options.rootDir);
   const createdAt = (options.now ?? new Date()).toISOString();
   const { files, skipped } = await inventoryConfigRoot(rootDir);
   const topLevelPaths = Array.from(
@@ -132,7 +141,7 @@ export async function previewNakamaDataImport(
   archive: Buffer | Uint8Array | ArrayBuffer,
   options: PreviewDataImportOptions = {}
 ): Promise<DataImportPreviewResponse> {
-  const rootDir = resolve(options.rootDir ?? getUserConfigDir());
+  const rootDir = resolveNakamaRootDir(options.rootDir);
   const entries = readZip(toBuffer(archive));
   const manifest = readManifest(entries);
   const restorableEntries = entries.filter(
@@ -174,7 +183,7 @@ export async function restoreNakamaDataImport(
     throw new Error("Restore confirmation is required.");
   }
 
-  const rootDir = resolve(options.rootDir ?? getUserConfigDir());
+  const rootDir = resolveNakamaRootDir(options.rootDir);
   const entries = readZip(toBuffer(archive));
   const manifest = readManifest(entries);
 
@@ -440,15 +449,6 @@ function toBuffer(value: Buffer | Uint8Array | ArrayBuffer): Buffer {
   }
 
   return Buffer.from(value.buffer, value.byteOffset, value.byteLength);
-}
-
-async function pathExists(path: string): Promise<boolean> {
-  try {
-    await access(path, constants.F_OK);
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 async function listMovableTopLevelEntries(rootDir: string): Promise<string[]> {

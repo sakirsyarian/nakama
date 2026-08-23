@@ -84,28 +84,36 @@ describe("AgentService branching", () => {
       title: "Need input",
     });
 
-    const result = await service.branchSession(sourceSessionId, 1);
+    const result = await service.branchSession(sourceSessionId, 1, ORG_ID);
 
     expect(result).not.toBeNull();
     const branchSessionId = result!.sessionId;
 
-    const branchMessages = await service.getSessionMessages(branchSessionId);
+    const branchMessages = await service.getSessionMessages(
+      branchSessionId,
+      ORG_ID
+    );
     expect(branchMessages?.messages).toEqual([
       { content: "Hello", role: "user" },
       { content: "Hi there", role: "assistant" },
     ]);
     expect(branchMessages?.messageMeta).toHaveLength(2);
 
-    const branchTodos = await service.getSessionTodos(branchSessionId);
+    const branchTodos = await service.getSessionTodos(branchSessionId, ORG_ID);
     expect(branchTodos).toEqual([]);
-    expect(await service.getSessionQuestionnaire(branchSessionId)).toBeNull();
+    expect(
+      await service.getSessionQuestionnaire(branchSessionId, ORG_ID)
+    ).toBeNull();
 
     const branchRecord = await db.getSession(branchSessionId);
     expect(branchRecord?.profileId).toBe("profile_default");
     expect(branchRecord?.channel).toBe("web");
     expect(branchRecord?.title).toBe("Original chat (Branch)");
 
-    const sourceMessages = await service.getSessionMessages(sourceSessionId);
+    const sourceMessages = await service.getSessionMessages(
+      sourceSessionId,
+      ORG_ID
+    );
     expect(sourceMessages?.messages).toHaveLength(3);
   });
 
@@ -129,9 +137,9 @@ describe("AgentService branching", () => {
       },
     ]);
 
-    await expect(service.branchSession(sourceSessionId, 3)).rejects.toThrow(
-      "messageIndex is out of bounds."
-    );
+    await expect(
+      service.branchSession(sourceSessionId, 3, ORG_ID)
+    ).rejects.toThrow("messageIndex is out of bounds.");
   });
 
   test("falls back to org default when the requested profile is missing", async () => {
@@ -172,6 +180,31 @@ describe("AgentService branching", () => {
     } finally {
       database.close();
     }
+  });
+});
+
+describe("AgentService session org scope", () => {
+  test("by-id reads return null for a session in another org", async () => {
+    const db = createInMemoryDatabaseAdapter();
+    await db.upsertProfile(createDefaultProfile());
+    await db.upsertProfile({
+      ...createDefaultProfile(),
+      id: "profile_other",
+      isDefault: false,
+      name: "Other",
+      orgId: "org_other",
+    });
+    const service = new AgentService(null, null, db);
+    const sessionId = await service.createSession(
+      ORG_ID,
+      "web",
+      "profile_default"
+    );
+
+    expect(await service.getSessionMessages(sessionId, "org_other")).toBeNull();
+    expect(await service.resolveSession(sessionId, "org_other")).toBeNull();
+    expect(await service.purgeSession(sessionId, "org_other")).toBe(false);
+    expect(await db.getSession(sessionId)).not.toBeNull();
   });
 });
 
@@ -267,6 +300,43 @@ describe("AgentService vision settings", () => {
       vision: { model: "p-openai-1::gpt-4o-mini" },
     });
   });
+
+  test("does not reset coding-agent passthrough when vision is saved", async () => {
+    const db = createInMemoryDatabaseAdapter();
+    await db.upsertWorkspaceSettings({
+      codingAgentHarnesses: [],
+      codingAgentProviderPassthrough: false,
+      id: "workspace-settings",
+      imageModel: null,
+      selectedCodingAgentHarness: null,
+      transcriptionModel: null,
+      updatedAt: new Date().toISOString(),
+      visionModel: null,
+    });
+    const service = new AgentService(
+      {
+        defaultProviderId: "p-openai-1",
+        providers: [
+          {
+            apiKey: "test-key",
+            createdAt: new Date().toISOString(),
+            id: "p-openai-1",
+            label: "OpenAI",
+            type: "openai",
+          },
+        ],
+      },
+      null,
+      db
+    );
+
+    await service.setVisionSettings({ model: "p-openai-1::gpt-4o-mini" });
+
+    expect(await db.getWorkspaceSettings()).toMatchObject({
+      codingAgentProviderPassthrough: false,
+      visionModel: "p-openai-1::gpt-4o-mini",
+    });
+  });
 });
 
 describe("AgentService transcription settings", () => {
@@ -301,6 +371,45 @@ describe("AgentService transcription settings", () => {
     });
     expect(await service.getTranscriptionSettings()).toEqual({
       transcription: { model: "p-openai-1::whisper-1" },
+    });
+  });
+
+  test("does not reset coding-agent passthrough when transcription is saved", async () => {
+    const db = createInMemoryDatabaseAdapter();
+    await db.upsertWorkspaceSettings({
+      codingAgentHarnesses: [],
+      codingAgentProviderPassthrough: false,
+      id: "workspace-settings",
+      imageModel: null,
+      selectedCodingAgentHarness: null,
+      transcriptionModel: null,
+      updatedAt: new Date().toISOString(),
+      visionModel: null,
+    });
+    const service = new AgentService(
+      {
+        defaultProviderId: "p-openai-1",
+        providers: [
+          {
+            apiKey: "test-key",
+            createdAt: new Date().toISOString(),
+            id: "p-openai-1",
+            label: "OpenAI",
+            type: "openai",
+          },
+        ],
+      },
+      null,
+      db
+    );
+
+    await service.setTranscriptionSettings({
+      model: "p-openai-1::whisper-1",
+    });
+
+    expect(await db.getWorkspaceSettings()).toMatchObject({
+      codingAgentProviderPassthrough: false,
+      transcriptionModel: "p-openai-1::whisper-1",
     });
   });
 });
@@ -517,6 +626,111 @@ describe("AgentService skill_manage injection", () => {
     expect(automationTools.some((tool) => tool.name === "skill_manage")).toBe(
       false
     );
+  });
+
+  test("keeps raw /learn in history on web when manage-skills is assigned", async () => {
+    const db = createInMemoryDatabaseAdapter();
+    await db.upsertProfile(createDefaultProfile());
+    const skills = new SkillsService(db);
+    await ensureBundledSkillFiles();
+    await skills.syncDiscoveredSkills();
+    const manage = (await skills.listSkills()).skills.find(
+      (skill) => skill.name === "manage-skills"
+    );
+    expect(manage).toBeDefined();
+    await db.assignSkillToProfile("profile_default", manage!.id);
+
+    const service = new AgentService(null, null, db);
+    service.setSkillsService(skills);
+
+    const sessionId = await service.createSession(
+      ORG_ID,
+      "web",
+      "profile_default",
+      null,
+      { orgRole: "admin" }
+    );
+    const session = await service.resolveSession(sessionId, ORG_ID);
+    expect(session).not.toBeNull();
+
+    const typed = "/learn filing an expense: open portal, submit receipt";
+    await session!.send({ message: typed });
+
+    const stored = await service.getSessionMessages(sessionId, ORG_ID);
+    const userMessage = stored?.messages.find(
+      (message) => message.role === "user"
+    );
+    expect(userMessage?.content).toBe(typed);
+  });
+
+  test("does not expand /learn on telegram even with manage-skills assigned", async () => {
+    const db = createInMemoryDatabaseAdapter();
+    await db.upsertProfile(createDefaultProfile());
+    const skills = new SkillsService(db);
+    await ensureBundledSkillFiles();
+    await skills.syncDiscoveredSkills();
+    const manage = (await skills.listSkills()).skills.find(
+      (skill) => skill.name === "manage-skills"
+    );
+    expect(manage).toBeDefined();
+    await db.assignSkillToProfile("profile_default", manage!.id);
+
+    const service = new AgentService(null, null, db);
+    service.setSkillsService(skills);
+
+    const sessionId = await service.createSession(
+      ORG_ID,
+      "telegram",
+      "profile_default",
+      null,
+      { orgRole: "admin" }
+    );
+    const session = await service.resolveSession(sessionId, ORG_ID);
+    expect(session).not.toBeNull();
+
+    await session!.send({
+      message: "/learn filing an expense",
+    });
+
+    const stored = await service.getSessionMessages(sessionId, ORG_ID);
+    const userMessage = stored?.messages.find(
+      (message) => message.role === "user"
+    );
+    expect(userMessage?.content).toBe("/learn filing an expense");
+  });
+
+  test("keeps bare /learn raw in history on cli", async () => {
+    const db = createInMemoryDatabaseAdapter();
+    await db.upsertProfile(createDefaultProfile());
+    const skills = new SkillsService(db);
+    await ensureBundledSkillFiles();
+    await skills.syncDiscoveredSkills();
+    const manage = (await skills.listSkills()).skills.find(
+      (skill) => skill.name === "manage-skills"
+    );
+    expect(manage).toBeDefined();
+    await db.assignSkillToProfile("profile_default", manage!.id);
+
+    const service = new AgentService(null, null, db);
+    service.setSkillsService(skills);
+
+    const sessionId = await service.createSession(
+      ORG_ID,
+      "cli",
+      "profile_default",
+      null,
+      { orgRole: "admin" }
+    );
+    const session = await service.resolveSession(sessionId, ORG_ID);
+    expect(session).not.toBeNull();
+
+    await session!.send({ message: "/learn" });
+
+    const stored = await service.getSessionMessages(sessionId, ORG_ID);
+    const userMessage = stored?.messages.find(
+      (message) => message.role === "user"
+    );
+    expect(userMessage?.content).toBe("/learn");
   });
 });
 

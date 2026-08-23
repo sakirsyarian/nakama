@@ -1,3 +1,4 @@
+import { resolveCloudflareAccountInput } from "./cloudflare-provider-config";
 import {
   isValidBaseUrl,
   normalizeBaseUrl,
@@ -33,10 +34,16 @@ const PROVIDER_CHOICES: Array<{ id: UserProviderName; label: string }> = [
   { id: "openrouter", label: "OpenRouter" },
   { id: "gemini", label: "Gemini" },
   { id: "deepseek", label: "DeepSeek" },
+  { id: "xai", label: "xAI Grok" },
   { id: "cerebras", label: "Cerebras" },
+  { id: "cloudflare", label: "Cloudflare Worker AI" },
   { id: "fireworks", label: "Fireworks" },
   { id: "ollama", label: "Ollama" },
   { id: "opencode_go", label: "OpenCode Go" },
+  { id: "minimax", label: "MiniMax" },
+  { id: "minimax_cn", label: "MiniMax (CN)" },
+  { id: "zhipu", label: "GLM (Z.ai)" },
+  { id: "zhipu_cn", label: "GLM (CN)" },
   { id: "openai_compatible", label: "Custom (OpenAI-compatible)" },
 ];
 
@@ -88,6 +95,21 @@ export async function promptForProviderConfig(
       continue;
     }
 
+    let cloudflareBaseUrl: string | undefined;
+
+    if (provider === "cloudflare") {
+      const resolved = resolveCloudflareAccountInput(
+        (await question("Account ID: ")).trim()
+      );
+
+      if (!resolved) {
+        writeLine("Enter a Cloudflare account ID or Workers AI URL.\n");
+        continue;
+      }
+
+      cloudflareBaseUrl = resolved;
+    }
+
     const models = getModelsForProvider(provider);
     writeLine(`\nSelected provider: ${provider}`);
     writeLine("\nAvailable models:");
@@ -133,6 +155,7 @@ export async function promptForProviderConfig(
       id: createProviderInstanceId(),
       label: defaultProviderLabel(provider, []),
       type: getModelById(selectedModel)?.provider ?? provider,
+      ...(cloudflareBaseUrl ? { baseUrl: cloudflareBaseUrl } : {}),
       ...(customModels ? { customModels } : {}),
     };
 
@@ -157,10 +180,16 @@ function resolveProviderChoice(input: string): UserProviderName | null {
     normalized === "gemini" ||
     normalized === "deepseek" ||
     normalized === "cerebras" ||
+    normalized === "cloudflare" ||
     normalized === "fireworks" ||
     normalized === "ollama" ||
     normalized === "openai_compatible" ||
-    normalized === "opencode_go"
+    normalized === "opencode_go" ||
+    normalized === "minimax" ||
+    normalized === "minimax_cn" ||
+    normalized === "zhipu" ||
+    normalized === "zhipu_cn" ||
+    normalized === "xai"
   ) {
     return normalized;
   }

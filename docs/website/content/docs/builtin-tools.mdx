@@ -59,8 +59,10 @@ Nakama includes these builtins:
 | `extract_document_text` | Yes | No | Extracts text from PDF, Word, or Excel attachments returned by `email` |
 | `bash` | When assigned | No | Run shell commands in the profile workspace |
 | `sub_agent` | No | No | Opt-in: delegate to a same-profile sub-agent (see below) |
+| `list_profile_sessions` | Super Bot only | No | Opt-in: read another profile's session list (see below) |
+| `read_profile_session` | Super Bot only | No | Opt-in: read another profile's stored transcript (see below) |
 
-**New custom profiles** receive `read_file`, `write_file`, `edit_file`, `search_files`, `knowledge_base_search`, and `web_fetch` until a platform admin assigns additional tools. Memory writes, archives, and artifact saves use bundled skills with those file tools — see [Skills](/skills#bundled-system-skills). Word documents use `write_docx` (system profiles only by default). Coding-agent workflows use `bash` with the `coding-agent` skill — see [Coding agent](/coding-agent). Interactive browser automation (login walls, forms, clicks) uses `bash` with the opt-in `agent-browser` skill — see [Agent browser](/agent-browser). The `sub_agent` tool is seeded but **not** auto-assigned — platform admins opt in per profile. System profiles (`default`, `super_bot`) get the full seeded builtin set; Super Bot also receives `bash`.
+**New custom profiles** receive `read_file`, `write_file`, `edit_file`, `search_files`, `knowledge_base_search`, and `web_fetch` until a platform admin assigns additional tools. Memory writes, archives, and artifact saves use bundled skills with those file tools — see [Skills](/skills#bundled-system-skills). Word documents use `write_docx` (system profiles only by default). Coding-agent workflows use `bash` with the `coding-agent` skill — see [Coding agent](/coding-agent). Interactive browser automation (login walls, forms, clicks) uses `bash` with the opt-in `agent-browser` skill — see [Agent browser](/agent-browser). The `sub_agent` tool is seeded but **not** auto-assigned — platform admins opt in per profile. System profiles (`default`, `super_bot`) get the full seeded builtin set; Super Bot also receives `bash`, `list_profile_sessions`, and `read_profile_session`. The two session readers are seeded like `sub_agent` and assigned per profile; Super Bot receives them at seed time, and that assignment is re-applied on every boot.
 
 ## Choosing tools for a profile
 
@@ -86,9 +88,9 @@ Active `MEMORY.md` has a **4096-byte** soft limit. Default and super-bot profile
 
 ## Artifact saves
 
-Artifacts are files your agent creates and saves for you — reports, summaries, generated text, Word documents, and other outputs you can preview or download later from the dashboard Artifacts tab or from web chat.
+Artifacts are files your agent creates and saves for you — reports, summaries, generated text, Word documents, and other outputs you can preview or download later from the dashboard [Files page](/artifacts) or from web chat.
 
-They are not a separate builtin. Agents use `write_file` or `write_docx` with the `save-artifact` bundled skill under `artifacts/`. The skill also documents writing a `{filename}.nakama-meta.json` sidecar so the Artifacts tab shows MIME types and timestamps.
+They are not a separate builtin. Agents use `write_file` or `write_docx` with the `save-artifact` bundled skill under `artifacts/`. The skill also documents writing a `{filename}.nakama-meta.json` sidecar so the Files page shows MIME types and timestamps.
 
 On web chat, `write_file` and `write_docx` saves under `artifacts/` appear as attachment chips on the assistant message. Click a chip to open a resizable preview panel. Copy, download, and fullscreen are always available. Markdown and HTML have Preview, source, and **Edit** tabs; **Edit** opens a text editor, then **Save**. Markdown preview replaces the file name with a contents menu when the file has more than one heading. JSON and other text files keep **Edit** in the action bar. Word previews stay read-only.
 
@@ -312,7 +314,7 @@ Run a one-off shell command in the profile workspace and return stdout, stderr, 
 
 **Scope:** Profile workspace only. Do not use `bash` to create persistent tools or `.sh` wrappers — register JavaScript tools under `~/.nakama/tools/` instead.
 
-**Availability:** When assigned to the profile. Super Bot receives `bash` by default. Required for the [coding agent](/coding-agent) workflow and the opt-in [agent-browser](/agent-browser) skill.
+**Availability:** When assigned to the profile. Super Bot receives `bash` by default. Required for the [coding agent](/coding-agent) workflow and the opt-in [agent-browser](/agent-browser) skill. Interactive browser runs inherit host `AGENT_BROWSER_EXECUTABLE_PATH` / `AGENT_BROWSER_ARGS` when you opt into Cloak.
 
 ### `sub_agent`
 
@@ -339,6 +341,45 @@ Multiple `sub_agent` calls in one turn can run **in parallel** when the model ba
 - Default timeout counts toward the parent web stream budget (10 minute total turn limit)
 
 **Availability:** When assigned to the profile (opt-in; not part of default custom profile assignments).
+
+### `list_profile_sessions`
+
+List the chat sessions of **another agent profile in the same organization**, newest activity first. Use it to find a session id before reading a transcript.
+
+| Parameter | Type | Required | Notes |
+|-----------|------|----------|-------|
+| `profileId` | string | Yes | Profile whose sessions to list |
+| `channel` | string | No | One of `web`, `cli`, `telegram`, `whatsapp`, `discord`, `automation`, `task`, `subagent`. Defaults to `web` |
+
+**Returns:** `{ sessions }`, the same summary shape the sessions API returns.
+
+**Limits:**
+
+- Same organization only — a profile in another organization fails exactly the way an id that does not exist fails, so the tool never confirms that a profile exists somewhere else
+- Sessions with no messages are not listed
+- One channel per call; there is no merged view
+
+**Availability:** When assigned to the profile. Super Bot receives it at seed time.
+
+### `read_profile_session`
+
+Read the stored transcript of a session belonging to **another agent profile in the same organization**.
+
+| Parameter | Type | Required | Notes |
+|-----------|------|----------|-------|
+| `sessionId` | string | Yes | Session to read |
+| `limit` | number | No | Messages to return, default 50, capped at 200 |
+| `offset` | number | No | Messages to skip from the start, for paging |
+
+**Returns:** `{ channel, profileId, messages, returnedMessages, totalMessages }`.
+
+**Limits:**
+
+- Same organization only — a session outside it fails exactly the way an unknown session id fails
+- Read-only. It cannot compact, branch, or delete another profile's session
+- Persisted messages only. A session with a turn still running is returned as of its last completed turn
+
+**Availability:** When assigned to the profile. Super Bot receives it at seed time.
 
 ### `org_memory_search`
 
@@ -391,6 +432,48 @@ Exports are `.zip` backups and should be handled as sensitive files because they
 
 Import first previews the ZIP manifest and restore impact.
 Confirmed restore replaces the current local data root; selective merge, scheduled backups, cloud destinations, and encrypted archives are not part of the first version.
+
+## Custom tools
+
+Custom tools live in `~/.nakama/tools/` (follows `NAKAMA_CONFIG_DIR` if set) and are registered by a platform admin from **System → Tools**. Each tool points at a module file and can then be assigned to profiles like any builtin.
+
+Two handler types are supported:
+
+| Type | File | Runs on |
+|---|---|---|
+| `javascript` | `*.js` | The Nakama process (module import) |
+| `python` | `*.py` | A `python3` subprocess per call |
+
+### Authoring a Python tool
+
+A Python tool is a `.py` file that defines a `run(input, context)` function and prints one JSON object to stdout when run as a script:
+
+```python
+# ~/.nakama/tools/word_count.py
+import json
+import sys
+
+def run(input, context):
+    text = str(input.get("text", ""))
+    return {"words": len(text.split())}
+
+if __name__ == "__main__":
+    payload = json.loads(sys.stdin.read() or "{}")
+    sys.stdout.write(json.dumps(run(payload, {})))
+```
+
+The contract:
+
+- Nakama invokes `python3 <file>` once per call and writes the call arguments to stdin as JSON.
+- Whatever the script prints to stdout must be one JSON value — that becomes the tool result the agent sees.
+- A non-zero exit code or non-JSON stdout is returned to the agent as an error message (stderr is included).
+- Calls time out after 30 seconds.
+- The child process inherits your environment plus two extras: `NAKAMA_WORKSPACE_ROOT` (the active profile workspace) and `NAKAMA_CONFIG_DIR`.
+- Set `NAKAMA_PYTHON_BIN` before starting Nakama if your interpreter is not on `PATH` as `python3`.
+
+Parameters are declared as an optional JSON Schema in the tool's `handlerConfig.parameters`. When omitted, the model sees a permissive open object and can pass any arguments.
+
+Python tools run sequentially by default and cannot opt into parallel execution, because each call spawns a new process.
 
 ## Safety boundaries
 

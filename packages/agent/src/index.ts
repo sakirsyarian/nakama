@@ -59,16 +59,26 @@ export type {
 } from "./chat";
 export type { CompactionConfig } from "./history-compaction";
 export { usableContextTokens } from "./history-compaction";
-export type { MergeOrgMemoryWithApprovedBulletOptions } from "./org-memory-merge";
 export {
-  mergeOrgMemoryWithApprovedBullet,
-  mergeOrgMemoryWithApprovedBulletFallback,
-} from "./org-memory-merge";
+  buildLearnPrompt,
+  expandLearnInLastUserMessage,
+  expandLearnUserContent,
+  expandLearnUserMessage,
+  tryParseLearnCommand,
+} from "./learn-prompt";
 export {
   buildSessionTitlePrompt,
   generateSessionTitleFromMessages,
   normalizeSessionTitle,
 } from "./session-title";
+export type {
+  SkillConsolidateBodyInput,
+  SkillConsolidateMode,
+} from "./skill-consolidate";
+export {
+  buildSkillConsolidatePrompt,
+  generateSkillConsolidateMarkdown,
+} from "./skill-consolidate";
 export type {
   SkillCatalogEntry,
   SkillPostTurnReviewOutcome,

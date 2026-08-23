@@ -40,6 +40,7 @@ import {
   ChatMessageQueuePanel,
   type QueuedComposerMessage,
 } from "@/components/chat/ChatMessageQueuePanel";
+import { composerActions } from "@/components/chat/chat-composer-actions";
 import { ChatContextUsageRing } from "@/components/chat/chat-context-usage";
 import { ChatSkillPicker } from "@/components/chat/chat-skill-picker";
 import { ChatSkillTokenOverlay } from "@/components/chat/chat-skill-token-overlay";
@@ -59,8 +60,10 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import {
-  filterSkillsForSlashQuery,
+  type ComposerSlashSuggestion,
+  filterComposerSlashSuggestions,
   findActiveSkillSlashRange,
+  replaceSlashRangeWithReservedCommand,
   replaceSlashRangeWithSkillInvocation,
   type SkillSlashRange,
 } from "@/lib/chat-composer-skills";
@@ -363,13 +366,11 @@ function ChatComposerTextarea({
   const suggestions = useMemo(
     () =>
       slashRange
-        ? filterSkillsForSlashQuery(availableSkills, slashRange.query)
+        ? filterComposerSlashSuggestions(availableSkills, slashRange.query)
         : [],
     [availableSkills, slashRange]
   );
-  const pickerOpen = Boolean(
-    slashRange && availableSkills.length > 0 && !disabled
-  );
+  const pickerOpen = Boolean(slashRange && !disabled && suggestions.length > 0);
   const safeActiveIndex =
     suggestions.length === 0
       ? 0
@@ -380,8 +381,8 @@ function ChatComposerTextarea({
     setActiveIndex(0);
   }, []);
 
-  const selectSkill = useCallback(
-    (skill: SkillSummary) => {
+  const selectSuggestion = useCallback(
+    (suggestion: ComposerSlashSuggestion) => {
       const textarea = textareaRef.current;
       const value = controller.textInput.value;
       const cursorIndex = textarea?.selectionStart ?? value.length;
@@ -392,11 +393,18 @@ function ChatComposerTextarea({
         return;
       }
 
-      const next = replaceSlashRangeWithSkillInvocation(
-        value,
-        activeRange,
-        skill
-      );
+      const next =
+        suggestion.kind === "command"
+          ? replaceSlashRangeWithReservedCommand(
+              value,
+              activeRange,
+              suggestion.command
+            )
+          : replaceSlashRangeWithSkillInvocation(
+              value,
+              activeRange,
+              suggestion.skill
+            );
       controller.textInput.setInput(next.value);
       setSlashRange(null);
       setActiveIndex(0);
@@ -422,8 +430,8 @@ function ChatComposerTextarea({
       {pickerOpen ? (
         <ChatSkillPicker
           activeIndex={safeActiveIndex}
-          onSelect={selectSkill}
-          skills={suggestions}
+          onSelect={selectSuggestion}
+          suggestions={suggestions}
         />
       ) : null}
       <PromptInputTextarea
@@ -468,9 +476,9 @@ function ChatComposerTextarea({
 
           if (event.key === "Enter" && !event.shiftKey) {
             event.preventDefault();
-            const skill = suggestions[safeActiveIndex];
-            if (skill) {
-              selectSkill(skill);
+            const suggestion = suggestions[safeActiveIndex];
+            if (suggestion) {
+              selectSuggestion(suggestion);
             }
           }
         }}
@@ -624,18 +632,6 @@ function ChatComposerFullFooter({
 
 const composerSubmitButtonClassName =
   "size-7 shrink-0 rounded-full bg-primary text-primary-foreground shadow-none transition-colors hover:bg-primary/90 disabled:opacity-50";
-
-/**
- * Stop must stay reachable while a turn is running. It used to be hidden as soon
- * as the composer had text, so typing the next message swapped Stop for Queue and
- * left no way to cancel: the turn kept the session and every send came back 409.
- */
-export function composerActions(state: {
-  canStop: boolean;
-  hasContent: boolean;
-}): { showStop: boolean; showSubmit: boolean } {
-  return { showStop: state.canStop, showSubmit: state.hasContent };
-}
 
 function ChatComposerSubmitButton({
   chatStatus,

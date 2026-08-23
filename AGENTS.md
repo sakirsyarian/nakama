@@ -20,7 +20,11 @@ LLM_VCR_MODE=record bun test path/to/foo.llm.test.ts  # re-record (needs provide
 
 ## GitHub
 
-Use `gh` for issues, PRs, checks, reviews, releases, and any GitHub URL. Run the gh cli command outside the sandbox so that the auth can works.
+Use `gh` for issues, PRs, checks, reviews, releases, and any GitHub URL. Always run outside the sandbox (`required_permissions: ["all"]`) — sandbox returns `Forbidden`.
+
+`gh issue` / `gh pr` / `--json` go through GraphQL and often time out here. Prefer REST: `gh api repos/{owner}/{repo}/issues` or `/pulls`, body in a JSON file, `POST --input`. On GraphQL timeout, retry REST once.
+
+**PR descriptions:** use [`.agents/skills/adhd-pr-description/SKILL.md`](.agents/skills/adhd-pr-description/SKILL.md) (default body shape). GitHub fills the same shape via `.github/PULL_REQUEST_TEMPLATE.md`. Agents composing PR bodies (including `ce-commit-push-pr`) must follow that skill.
 
 ## Browser automation
 
@@ -117,7 +121,7 @@ Path: `~/.nakama/orgs/{orgId}/profiles/{profileId}/` (`getProfileSoulDir`). Load
 | `coding-agent` | Codex / Claude Code / OpenCode / pi / Cursor Agent (`agent`) via `bash` |
 | `agent-browser` | Opt-in browser CLI; needs host install — `docs/website/agent-browser.md` |
 | `create-profile` | Super Bot only, confirm-first — `apps/server/src/tools/super-bot-tools.ts` |
-| `skill_manage` | Interactive web/cli with `manage-skills` — create/patch/edit/delete profile skills + supporting-file write/remove + auto-assign (`apps/server/src/tools/skill-manage-tool.ts`). When org/profile **write approval** is enabled, mutations stage as proposals for org-admin review instead of writing immediately. When present, file tools refuse any path under `skills/*/` (`forbidProfileSkillMarkdownWrites`). Not injected for automations or Telegram/WhatsApp/Discord. Opt-in **post-turn skill review** (`skills_post_turn_review`) may suggest or stage create/patch after complex turns without writing into model history. |
+| `skill_manage` | Interactive web/cli with `manage-skills` — create/patch/edit/delete profile skills + supporting-file write/remove + auto-assign (`apps/server/src/tools/skill-manage-tool.ts`). When org/profile **write approval** is enabled, mutations stage as proposals for org-admin review instead of writing immediately. When present, file tools refuse any path under `skills/*/` (`forbidProfileSkillMarkdownWrites`). Not injected for automations or Telegram/WhatsApp/Discord. Opt-in **post-turn skill review** (`skills_post_turn_review`) may suggest or stage create/patch after complex turns without writing into model history. Opt-in **skill curator** (`skills_curator_enabled`, default off) archives unused agent/human profile skills at 90 days (stale report at 30 days) via `SkillCuratorService` — rename to `skills/.archive/`, never delete; bundled skills and profiles with enabled automations are skipped. |
 | Composio | Org toolkits + per-user OAuth — `docs/website/composio.md` |
 
 **Channel artifacts (Telegram/Discord):** `packages/core/src/channel-artifacts.ts`, `channel-artifact-delivery.ts`; handlers in `apps/platform/{telegram,discord}/src/channel-artifact-flow.ts`.
@@ -129,22 +133,22 @@ Path bugs (tool resolves under repo instead of `~/.nakama`) → start here. Over
 | Path | Purpose |
 |---|---|
 | `~/.nakama/orgs/{orgId}/profiles/{profileId}/` | Profile workspace — `getProfileSoulDir()` |
-| `~/.nakama/tools/*.js` | Custom JS tools — `getCustomToolsDir()` |
+| `~/.nakama/tools/*.js`, `*.py` | Custom JS / Python tools — `getCustomToolsDir()` |
 
-Always build context with `buildToolExecutionContext()` (`packages/core/src/tools/context.ts`) so `workspaceRoot` = soul dir. Custom JS tools must use `context.workspaceRoot`, **not** `process.cwd()`.
+Always build context with `buildToolExecutionContext()` (`packages/core/src/tools/context.ts`) so `workspaceRoot` = soul dir. Custom JS tools must use `context.workspaceRoot`, **not** `process.cwd()`; custom Python tools receive it as the `NAKAMA_WORKSPACE_ROOT` env var.
 
-| | Built-in | Custom JS |
-|---|---|---|
-| Code | `packages/core/src/tools/`, `apps/server/src/tools/` | `~/.nakama/tools/*.js` |
-| Workspace | `getProfileSoulDir` inside handler | `context.workspaceRoot` |
-| Loader | builtins map | `javascript-tool-loader.ts` |
+| | Built-in | Custom JS | Custom Python |
+|---|---|---|---|
+| Code | `packages/core/src/tools/`, `apps/server/src/tools/` | `~/.nakama/tools/*.js` | `~/.nakama/tools/*.py` |
+| Workspace | `getProfileSoulDir` inside handler | `context.workspaceRoot` | `NAKAMA_WORKSPACE_ROOT` env |
+| Loader | builtins map | `javascript-tool-loader.ts` | `python-tool-loader.ts` |
 
 | Flow | Entry |
 |---|---|
 | Chat | `agent-service` → `buildChatSession()` → `buildToolExecutionContext(...)` |
 | Tool loop | `packages/agent/src/tool-loop.ts` → `executeToolCall()`; parallel batching in `packages/agent/src/chat.ts` when every call in the turn is `parallelSafe` |
 
-**Parallel tool calls:** Built-in read/search/fetch tools (`read_file`, `search_files`, `knowledge_base_search`, `web_search`, `web_fetch`) set `parallelSafe: true` on `ToolDefinition`. Mutating, shell, delegation, and session-state tools stay sequential. Custom JS tools default to sequential; export `parallelSafe: true` from the module to opt in. When a turn mixes parallel-safe and sequential tools, the whole turn runs sequentially.
+**Parallel tool calls:** Built-in read/search/fetch tools (`read_file`, `search_files`, `knowledge_base_search`, `web_search`, `web_fetch`) set `parallelSafe: true` on `ToolDefinition`. Mutating, shell, delegation, and session-state tools stay sequential. Custom JS tools default to sequential; export `parallelSafe: true` from the module to opt in. Custom Python tools cannot opt in — each call spawns a subprocess and stays sequential. When a turn mixes parallel-safe and sequential tools, the whole turn runs sequentially.
 
 | Flow | Entry |
 |---|---|
@@ -180,6 +184,7 @@ This project uses **Ultracite**, a zero-config preset that enforces strict code 
 - **Format code**: `bun x ultracite fix`
 - **Check for issues**: `bun x ultracite check`
 - **Diagnose setup**: `bun x ultracite doctor`
+- **Unused files, dependencies, and exports**: `bun run knip` (CI fails on findings)
 
 Biome (the underlying engine) provides robust linting and formatting. Most issues are automatically fixable.
 

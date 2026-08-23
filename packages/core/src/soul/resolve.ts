@@ -1,4 +1,4 @@
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import { getUserConfigDir } from "../user-config";
 import { getSoulStatus, loadSoulStack } from "./load";
 import type { LoadedSoulStack, SoulStatus } from "./types";
@@ -65,6 +65,11 @@ export function getOrgMemoryDir(
   orgId: string,
   configDir = getUserConfigDir()
 ): string {
+  if (!isAbsolute(configDir)) {
+    throw new Error(
+      "configDir must be an absolute path; relative paths resolve against process.cwd() and break org isolation."
+    );
+  }
   return join(configDir, "orgs", assertConfigPathSegment(orgId, "orgId"));
 }
 
@@ -74,6 +79,14 @@ export function getOrgMemoryFilePath(
   configDir?: string
 ): string {
   return join(getOrgMemoryDir(orgId, configDir), "MEMORY.md");
+}
+
+/** Org curator reports: ~/.nakama/orgs/{orgId}/logs/curator/ */
+export function getOrgCuratorLogDir(
+  orgId: string,
+  configDir = getUserConfigDir()
+): string {
+  return join(getOrgMemoryDir(orgId, configDir), "logs", "curator");
 }
 
 /** Org memory archive dir: ~/.nakama/orgs/{orgId}/memory-archive/ */

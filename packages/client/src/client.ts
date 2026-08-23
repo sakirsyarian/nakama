@@ -22,6 +22,7 @@ import type {
   BranchSessionResponse,
   ChangePasswordRequest,
   CloneProfileRequest,
+  CodingHarnessSettingsResponse,
   CompactionResponse,
   ComposioConnectRequest,
   ComposioConnectResponse,
@@ -76,6 +77,7 @@ import type {
   ListProfilesResponse,
   ListProvidersResponse,
   ListSessionsResponse,
+  ListSkillCuratorOrgsResponse,
   ListSkillProposalsResponse,
   ListSkillSuggestionsResponse,
   ListSkillsResponse,
@@ -110,6 +112,8 @@ import type {
   RevokeArtifactShareResponse,
   RotateLocalAuthTokenResponse,
   RunAutomationResponse,
+  RunSkillCuratorInternalRequest,
+  RunSkillCuratorRequest,
   RunTaskResponse,
   RunToolRequest,
   RunToolResponse,
@@ -121,6 +125,8 @@ import type {
   SetActiveOrgRequest,
   SetupAuthRequest,
   SetupRestoreDataImportResponse,
+  SkillCuratorLatestResponse,
+  SkillCuratorRunResponse,
   SkillProposalResponse,
   SkillResponse,
   SoulStackResponse,
@@ -148,8 +154,8 @@ import type {
   TranscriptionSettings,
   TranscriptionSettingsResponse,
   UnpinOrgMemoryRequest,
-  UpdateArtifactFileRequest,
-  UpdateArtifactFileResponse,
+  UpdateArtifactRequest,
+  UpdateArtifactResponse,
   UpdateAuthProfileRequest,
   UpdateAutomationRequest,
   UpdateComposioSettingsRequest,
@@ -256,6 +262,24 @@ export class NakamaClient {
       "/v1/token-optimization",
       {
         body: JSON.stringify({ enabled }),
+        method: "PUT",
+      }
+    );
+  }
+
+  async getCodingHarnessSettings(): Promise<CodingHarnessSettingsResponse> {
+    return this.request<CodingHarnessSettingsResponse>(
+      "/v1/settings/coding-harnesses"
+    );
+  }
+
+  async setCodingHarnessSettings(
+    providerPassthroughEnabled: boolean
+  ): Promise<CodingHarnessSettingsResponse> {
+    return this.request<CodingHarnessSettingsResponse>(
+      "/v1/settings/coding-harnesses",
+      {
+        body: JSON.stringify({ providerPassthroughEnabled }),
         method: "PUT",
       }
     );
@@ -999,12 +1023,13 @@ export class NakamaClient {
     profileId: string,
     artifactPath: string,
     content: string
-  ): Promise<UpdateArtifactFileResponse> {
+  ): Promise<UpdateArtifactResponse> {
     const query = new URLSearchParams({ path: artifactPath });
-    return this.request<UpdateArtifactFileResponse>(
+
+    return this.request<UpdateArtifactResponse>(
       `/v1/profiles/${encodeURIComponent(profileId)}/artifacts/content?${query.toString()}`,
       {
-        body: JSON.stringify({ content } satisfies UpdateArtifactFileRequest),
+        body: JSON.stringify({ content } satisfies UpdateArtifactRequest),
         method: "PUT",
       }
     );
@@ -1825,6 +1850,50 @@ export class NakamaClient {
     });
   }
 
+  async runOrgSkillCurator(
+    orgId: string,
+    request: RunSkillCuratorRequest = {}
+  ): Promise<SkillCuratorRunResponse> {
+    return this.request<SkillCuratorRunResponse>(
+      `/v1/orgs/${encodeURIComponent(orgId)}/curator/run`,
+      {
+        body: JSON.stringify(request),
+        headers: { "X-Org-Id": orgId },
+        method: "POST",
+      }
+    );
+  }
+
+  async getOrgSkillCuratorLatest(
+    orgId: string
+  ): Promise<SkillCuratorLatestResponse> {
+    return this.request<SkillCuratorLatestResponse>(
+      `/v1/orgs/${encodeURIComponent(orgId)}/curator/latest`,
+      {
+        headers: { "X-Org-Id": orgId },
+      }
+    );
+  }
+
+  async listSkillCuratorOrgs(): Promise<ListSkillCuratorOrgsResponse> {
+    return this.request<ListSkillCuratorOrgsResponse>(
+      "/v1/internal/curator/orgs"
+    );
+  }
+
+  async runSkillCuratorInternal(
+    orgId: string,
+    request: RunSkillCuratorInternalRequest
+  ): Promise<SkillCuratorRunResponse> {
+    return this.request<SkillCuratorRunResponse>(
+      `/v1/internal/curator/orgs/${encodeURIComponent(orgId)}/run`,
+      {
+        body: JSON.stringify(request),
+        method: "POST",
+      }
+    );
+  }
+
   async updateOrganization(
     orgId: string,
     request: UpdateOrganizationRequest
@@ -1848,6 +1917,17 @@ export class NakamaClient {
       {
         body: JSON.stringify(request),
         method: "PATCH",
+      }
+    );
+  }
+
+  async archivePlatformOrganization(
+    orgId: string
+  ): Promise<OrganizationResponse> {
+    return this.request<OrganizationResponse>(
+      `/v1/platform/orgs/${encodeURIComponent(orgId)}`,
+      {
+        method: "DELETE",
       }
     );
   }

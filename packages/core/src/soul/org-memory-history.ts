@@ -4,9 +4,9 @@ import {
   pathExists,
   readDirectoryEntries,
   readText,
-  writePrivateTextFile,
+  writeTextFile,
 } from "../fs";
-import { getOrgMemoryHistoryDir } from "./resolve";
+import { assertConfigPathSegment, getOrgMemoryHistoryDir } from "./resolve";
 
 export const ORG_MEMORY_HISTORY_MAX_ENTRIES = 50;
 
@@ -19,7 +19,10 @@ function historyMetaPath(
   id: string,
   configDir?: string
 ): string {
-  return join(getOrgMemoryHistoryDir(orgId, configDir), `${id}.json`);
+  return join(
+    getOrgMemoryHistoryDir(orgId, configDir),
+    `${assertConfigPathSegment(id, "revisionId")}.json`
+  );
 }
 
 function historyContentPath(
@@ -27,7 +30,10 @@ function historyContentPath(
   id: string,
   configDir?: string
 ): string {
-  return join(getOrgMemoryHistoryDir(orgId, configDir), `${id}.md`);
+  return join(
+    getOrgMemoryHistoryDir(orgId, configDir),
+    `${assertConfigPathSegment(id, "revisionId")}.md`
+  );
 }
 
 let orgMemoryChangeSequence = 0;
@@ -44,20 +50,16 @@ export async function appendOrgMemoryHistory(
   configDir?: string
 ): Promise<void> {
   const historyDir = getOrgMemoryHistoryDir(orgId, configDir);
-  await writePrivateTextFile(
+  await writeTextFile(
     historyMetaPath(orgId, entry.id, configDir),
     `${JSON.stringify(entry, null, 2)}\n`,
     {
       ensureDir: historyDir,
     }
   );
-  await writePrivateTextFile(
-    historyContentPath(orgId, entry.id, configDir),
-    content,
-    {
-      ensureDir: historyDir,
-    }
-  );
+  await writeTextFile(historyContentPath(orgId, entry.id, configDir), content, {
+    ensureDir: historyDir,
+  });
   await pruneOrgMemoryHistory(orgId, ORG_MEMORY_HISTORY_MAX_ENTRIES, configDir);
 }
 

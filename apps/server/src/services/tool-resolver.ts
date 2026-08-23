@@ -12,10 +12,11 @@ import { emailTool } from "@nakama/core/tools/email";
 import type { DatabaseAdapter, StoredToolRecord } from "@nakama/db";
 import { bashTool, runBash } from "../tools/bash";
 import { enrichCodingAgentBashInput } from "./coding-agent-bash-env";
-import { loadJavascriptTool } from "./javascript-tool-loader";
+import { getCustomToolHandler } from "./custom-tool-handlers";
 
 let registeredSubAgentTool: ToolDefinition | null = null;
 let registeredGenerateImageTool: ToolDefinition | null = null;
+let registeredSessionTools: ToolDefinition[] = [];
 
 export function registerSubAgentTool(tool: ToolDefinition): void {
   registeredSubAgentTool = tool;
@@ -23,6 +24,10 @@ export function registerSubAgentTool(tool: ToolDefinition): void {
 
 export function registerGenerateImageTool(tool: ToolDefinition | null): void {
   registeredGenerateImageTool = tool;
+}
+
+export function registerSessionTools(tools: ToolDefinition[]): void {
+  registeredSessionTools = tools;
 }
 
 export function omitUnavailableBuiltinTools(
@@ -86,20 +91,19 @@ async function resolveStoredTool(
     return builtinMap.get(record.name) ?? null;
   }
 
-  if (record.handlerType === "bash") {
+  if (
+    record.handlerType === "bash" ||
+    record.handlerType === "sub_agent" ||
+    record.handlerType === "generate_image" ||
+    record.handlerType === "session"
+  ) {
     return serverTools.get(record.name) ?? null;
   }
 
-  if (record.handlerType === "sub_agent") {
-    return serverTools.get(record.name) ?? null;
-  }
+  const customHandler = getCustomToolHandler(record.handlerType);
 
-  if (record.handlerType === "generate_image") {
-    return serverTools.get(record.name) ?? null;
-  }
-
-  if (record.handlerType === "javascript") {
-    return loadJavascriptTool(record);
+  if (customHandler) {
+    return customHandler.load(record);
   }
 
   return null;
@@ -118,6 +122,10 @@ function buildServerTools(
 
   if (registeredGenerateImageTool) {
     map.set(registeredGenerateImageTool.name, registeredGenerateImageTool);
+  }
+
+  for (const tool of registeredSessionTools) {
+    map.set(tool.name, tool);
   }
 
   return map;

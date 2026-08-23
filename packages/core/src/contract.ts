@@ -260,6 +260,20 @@ export interface TokenOptimizationUpdateResponse {
   installed: boolean;
 }
 
+export interface CodingHarnessLoginCommand {
+  command: string;
+  name: string;
+}
+
+export interface CodingHarnessSettingsResponse {
+  loginCommands: CodingHarnessLoginCommand[];
+  providerPassthroughEnabled: boolean;
+}
+
+export interface UpdateCodingHarnessSettingsRequest {
+  providerPassthroughEnabled: boolean;
+}
+
 export interface TokenOptimizationTurnArm {
   arm: string;
   /** Turns whose token count came from an estimate, not the provider. */
@@ -382,9 +396,13 @@ export type OrgRole = "admin" | "member" | "viewer";
 export type ChannelType = "telegram" | "whatsapp" | "discord";
 
 export interface OrganizationSummary {
+  archivedAt?: string | null;
   createdAt: string;
   id: string;
   name: string;
+  skillsCuratorConsolidateEnabled?: boolean;
+  skillsCuratorEnabled?: boolean;
+  skillsCuratorLastRunAt?: string | null;
   skillsPostTurnReview?: boolean;
   skillsWriteApproval?: boolean;
   slug: string;
@@ -403,8 +421,67 @@ export interface CreateOrganizationRequest {
 
 export interface UpdateOrganizationRequest {
   name?: string;
+  skillsCuratorConsolidateEnabled?: boolean;
+  skillsCuratorEnabled?: boolean;
   skillsPostTurnReview?: boolean;
   skillsWriteApproval?: boolean;
+}
+
+export type SkillCuratorTrigger = "schedule" | "manual" | "seed";
+
+export interface SkillCuratorRestoreMiss {
+  archivedDirectory: string;
+  skillId: string;
+}
+
+export interface SkillCuratorRunResult {
+  archived: number;
+  consolidateApplied?: number;
+  consolidateBudgetExhausted?: boolean;
+  consolidateDeslopified?: number;
+  consolidateMerged?: number;
+  consolidateSkipped?: number;
+  consolidateStaged?: number;
+  dryRun: boolean;
+  finishedAt: string;
+  orgId: string;
+  restoreMisses: SkillCuratorRestoreMiss[];
+  scanned: number;
+  skippedAutomation: number;
+  skippedBundled: number;
+  skippedError: number;
+  skippedTooNew: number;
+  stale: number;
+  startedAt: string;
+  status: "completed" | "in_flight";
+  trigger: SkillCuratorTrigger;
+}
+
+export interface RunSkillCuratorRequest {
+  dryRun?: boolean;
+}
+
+export interface SkillCuratorRunResponse {
+  result: SkillCuratorRunResult;
+}
+
+export interface SkillCuratorLatestResponse {
+  lastRunAt: string | null;
+  result: SkillCuratorRunResult | null;
+}
+
+export interface SkillCuratorOrgSchedule {
+  id: string;
+  skillsCuratorEnabled: boolean;
+  skillsCuratorLastRunAt: string | null;
+}
+
+export interface ListSkillCuratorOrgsResponse {
+  orgs: SkillCuratorOrgSchedule[];
+}
+
+export interface RunSkillCuratorInternalRequest {
+  trigger: "seed" | "schedule";
 }
 
 export interface ListOrganizationsResponse {
@@ -593,6 +670,7 @@ export type SkillProposalAction =
 
 export interface SkillProposal {
   action: SkillProposalAction;
+  consolidateLoserSkillNames?: string[] | null;
   content: string | null;
   createdAt: string;
   id: string;
@@ -1446,6 +1524,8 @@ export interface ProfileSummary {
   mcpServerCount: number;
   model: string | null;
   name: string;
+  /** null = inherit org default; true/false = force consolidate on/off for this profile */
+  skillsCuratorConsolidateEnabled?: boolean | null;
   /** null = inherit org default; true/false = force post-turn review on/off for this profile */
   skillsPostTurnReview?: boolean | null;
   /** null = inherit org default; true/false = force gate on/off for this profile */
@@ -1632,7 +1712,7 @@ export interface ToolResponse {
 
 export interface ToolSourceResponse {
   content: string;
-  language: "javascript" | "typescript";
+  language: "javascript" | "python" | "typescript";
   path: string;
 }
 
@@ -1661,6 +1741,7 @@ export interface CreateProfileRequest {
 export interface UpdateProfileRequest {
   model?: string | null;
   name?: string;
+  skillsCuratorConsolidateEnabled?: boolean | null;
   skillsPostTurnReview?: boolean | null;
   skillsWriteApproval?: boolean | null;
   systemPrompt?: string;
@@ -1748,6 +1829,17 @@ export interface ListArtifactsResponse {
   offset?: number;
   profileId: string;
   total: number;
+}
+
+export interface UpdateArtifactRequest {
+  content: string;
+}
+
+export interface UpdateArtifactResponse {
+  filename: string;
+  profileId: string;
+  sizeBytes: number;
+  updatedAt: string;
 }
 
 export interface DeleteArtifactResponse {
@@ -1870,7 +1962,13 @@ export type ProviderName =
   | "fireworks"
   | "ollama"
   | "openai_compatible"
-  | "opencode_go";
+  | "opencode_go"
+  | "cloudflare"
+  | "minimax"
+  | "minimax_cn"
+  | "zhipu"
+  | "zhipu_cn"
+  | "xai";
 
 export type OllamaHostMode = "local" | "cloud";
 
