@@ -5,6 +5,7 @@ import {
   isValidBaseUrl,
   normalizeBaseUrl,
   parseCustomModelsJson,
+  parseOpenAICompatibleApi,
   serializeCustomModels,
   validateDisplayName,
 } from "./compatible-provider-config";
@@ -39,6 +40,7 @@ export {
 } from "./provider-resolution";
 
 export interface ProviderInstance {
+  apiFormat?: import("./contract").OpenAICompatibleApi;
   apiKey: string;
   baseUrl?: string;
   createdAt: string;
@@ -605,6 +607,10 @@ function loadProvidersFromSections(
 
     const label = normalizeProviderInstanceLabel(type, values.label, providers);
     const apiKey = values.api_key ?? "";
+    const apiFormat =
+      type === "openai_compatible"
+        ? parseOpenAICompatibleApi(values.api_format)
+        : undefined;
     const baseUrl = values.base_url?.trim()
       ? normalizeBaseUrl(values.base_url)
       : undefined;
@@ -628,6 +634,7 @@ function loadProvidersFromSections(
       id,
       label,
       type,
+      ...(apiFormat ? { apiFormat } : {}),
       ...(baseUrl ? { baseUrl } : {}),
       ...(hostMode ? { hostMode } : {}),
       ...(customModels ? { customModels } : {}),
@@ -652,6 +659,10 @@ function buildProviderSectionValues(
 
   if (provider.baseUrl?.trim()) {
     values.base_url = normalizeBaseUrl(provider.baseUrl);
+  }
+
+  if (provider.type === "openai_compatible") {
+    values.api_format = parseOpenAICompatibleApi(provider.apiFormat);
   }
 
   if (provider.type === "ollama" && provider.hostMode) {

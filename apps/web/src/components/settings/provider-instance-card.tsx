@@ -174,6 +174,11 @@ export function ProviderInstanceCard({
 
       {card.isCompatibleLike ? (
         <ProviderCompatibleEditDialog
+          apiFormat={
+            card.providerType === "openai_compatible"
+              ? card.editApiFormat
+              : undefined
+          }
           browseLabel={card.isOllama ? "Ollama" : undefined}
           busy={card.busy}
           dialogError={card.dialogError}
@@ -181,6 +186,11 @@ export function ProviderInstanceCard({
           editLabel={card.editLabel}
           hostMode={instance.hostMode ?? undefined}
           manageModels={card.editManageModels}
+          onApiFormatChange={
+            card.providerType === "openai_compatible"
+              ? card.setEditApiFormat
+              : undefined
+          }
           onBaseUrlChange={card.setEditBaseUrl}
           onCustomModelsChange={card.handleManageModelsChange}
           onDisplayNameChange={card.setEditLabel}

@@ -1,11 +1,20 @@
+import type { OpenAICompatibleApi } from "@nakama/core/contract";
 import { BrowsableModelFields } from "@/components/BrowsableModelFields";
 import type { ModelListRow } from "@/components/ModelListEditor";
 import { ModelsBrowseList } from "@/components/ModelsBrowseList";
 import { RemoteModelsBrowseList } from "@/components/RemoteModelsBrowseList";
 import { FormField } from "@/components/ui/form-field";
 import { InputGroup, InputGroupInput } from "@/components/ui/input-group";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 
 interface CustomProviderFieldsProps {
+  apiFormat?: OpenAICompatibleApi;
   apiKey: string;
   baseUrl: string;
   baseUrlError?: string | null;
@@ -23,6 +32,7 @@ interface CustomProviderFieldsProps {
   hostMode?: "local" | "cloud";
   identityReadOnly?: boolean;
   modelsError?: string | null;
+  onApiFormatChange?: (value: OpenAICompatibleApi) => void;
   onBaseUrlChange: (value: string) => void;
   onCustomModelsChange: (models: ModelListRow[]) => void;
   onDisplayNameChange: (value: string) => void;
@@ -32,6 +42,7 @@ interface CustomProviderFieldsProps {
 }
 
 export function CustomProviderFields({
+  apiFormat,
   displayName,
   baseUrl,
   apiKey,
@@ -50,6 +61,7 @@ export function CustomProviderFields({
   browseLabel,
   onDisplayNameChange,
   onBaseUrlChange,
+  onApiFormatChange,
   onCustomModelsChange,
 }: CustomProviderFieldsProps) {
   const identityDisabled = disabled || identityReadOnly;
@@ -107,6 +119,36 @@ export function CustomProviderFields({
           />
         </InputGroup>
       </FormField>
+
+      {apiFormat && onApiFormatChange ? (
+        <FormField
+          density={density}
+          id="provider-api-format"
+          label="API format"
+        >
+          <Select
+            disabled={disabled}
+            onValueChange={(value) => {
+              if (value === "chat_completions" || value === "responses") {
+                onApiFormatChange(value);
+              }
+            }}
+            value={apiFormat}
+          >
+            <SelectTrigger className="w-full" id="provider-api-format">
+              <SelectValue>
+                {apiFormat === "responses"
+                  ? "Responses API"
+                  : "Chat Completions"}
+              </SelectValue>
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="chat_completions">Chat Completions</SelectItem>
+              <SelectItem value="responses">Responses API</SelectItem>
+            </SelectContent>
+          </Select>
+        </FormField>
+      ) : null}
 
       {showModelsEditor ? (
         <BrowsableModelFields

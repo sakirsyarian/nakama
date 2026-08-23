@@ -1,5 +1,24 @@
 import { describe, expect, test } from "bun:test";
-import { validateCustomModels } from "./compatible-provider-config";
+import {
+  parseOpenAICompatibleApi,
+  validateCustomModels,
+} from "./compatible-provider-config";
+
+describe("parseOpenAICompatibleApi", () => {
+  test("defaults legacy configurations to chat completions", () => {
+    expect(parseOpenAICompatibleApi(undefined)).toBe("chat_completions");
+  });
+
+  test("accepts the Responses API format", () => {
+    expect(parseOpenAICompatibleApi("responses")).toBe("responses");
+  });
+
+  test("rejects unknown API formats", () => {
+    expect(() => parseOpenAICompatibleApi("completions")).toThrow(
+      "API format must be chat_completions or responses."
+    );
+  });
+});
 
 describe("validateCustomModels", () => {
   test("accepts supportsThinking when it is boolean", () => {

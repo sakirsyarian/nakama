@@ -2325,6 +2325,7 @@ export class AgentService {
     request: ConfigureProviderRequest
   ): Promise<ConfigureProviderResponse> {
     const result = await this.createProvider({
+      apiFormat: request.apiFormat,
       apiKey: request.apiKey,
       baseUrl: request.baseUrl,
       customModels: request.customModels,

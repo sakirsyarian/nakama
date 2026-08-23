@@ -1,10 +1,12 @@
 import type {
   ChatCompletionResult,
   ChatMessage,
+  CustomModelEntry,
   GenerateChatInput,
   GenerateTextInput,
   GenerateTextResult,
   LlmToolDefinition,
+  OpenAICompatibleApi,
   ProviderChatOptions,
   ProviderClient,
   StreamChatHandlers,
@@ -17,6 +19,7 @@ import {
   toOpenAIMessages,
   toOpenAITools,
 } from "../openai";
+import { generateOpenAIResponsesChat } from "../openai/responses";
 import { openAIModelRejectsChatToolsWithReasoning } from "../openai/thinking";
 import {
   buildChatCompletionResult,
@@ -29,8 +32,10 @@ import {
 } from "../shared";
 
 export interface OpenAICompatibleProviderOptions {
+  apiFormat?: OpenAICompatibleApi;
   apiKey: string;
   baseUrl: string;
+  customModels?: CustomModelEntry[];
   displayName: string;
   model: string;
   providerName?: ProviderClient["name"];
@@ -50,6 +55,7 @@ export function createOpenAICompatibleProvider(
   const model = options.model;
   const baseUrl = normalizeBaseUrl(options.baseUrl);
   const apiKey = options.apiKey || "not-needed";
+  const apiFormat = options.apiFormat ?? "chat_completions";
   const client = new OpenAI({
     apiKey,
     baseURL: baseUrl,
@@ -60,6 +66,19 @@ export function createOpenAICompatibleProvider(
 
   return {
     generateChat(input: GenerateChatInput) {
+      if (apiFormat === "responses") {
+        return generateOpenAIResponsesChat({
+          apiKey,
+          baseUrl,
+          customModels: options.customModels,
+          handlers: { onChunk: () => {} },
+          input,
+          label,
+          model,
+          stream: true,
+        });
+      }
+
       return requestChatCompletion(client, label, {
         messages: input.messages,
         model,
@@ -77,6 +96,19 @@ export function createOpenAICompatibleProvider(
         ? input.system
         : `${input.system}\n\nReturn only the requested text. No JSON, keys, labels, markdown fences, or surrounding quotes.`;
 
+      if (apiFormat === "responses") {
+        return requestResponsesText({
+          apiKey,
+          baseUrl,
+          customModels: options.customModels,
+          input,
+          label,
+          model,
+          system,
+          useJson,
+        });
+      }
+
       return requestCompletion(client, label, {
         messages: [
           { content: system, role: "system" },
@@ -88,6 +120,19 @@ export function createOpenAICompatibleProvider(
     },
     name: options.providerName ?? "openai_compatible",
     streamChat(input: GenerateChatInput, handlers: StreamChatHandlers) {
+      if (apiFormat === "responses") {
+        return generateOpenAIResponsesChat({
+          apiKey,
+          baseUrl,
+          customModels: options.customModels,
+          handlers,
+          input,
+          label,
+          model,
+          stream: true,
+        });
+      }
+
       return streamChatCompletion({
         apiKey,
         baseUrl,
@@ -103,6 +148,37 @@ export function createOpenAICompatibleProvider(
         tools: input.tools,
       });
     },
+  };
+}
+
+async function requestResponsesText(options: {
+  apiKey: string;
+  baseUrl: string;
+  customModels?: CustomModelEntry[];
+  input: GenerateTextInput;
+  label: string;
+  model: string;
+  system: string;
+  useJson: boolean;
+}): Promise<GenerateTextResult> {
+  const result = await generateOpenAIResponsesChat({
+    apiKey: options.apiKey,
+    baseUrl: options.baseUrl,
+    customModels: options.customModels,
+    handlers: { onChunk: () => {} },
+    input: {
+      messages: [{ content: options.input.prompt, role: "user" }],
+      system: options.system,
+    },
+    label: options.label,
+    model: options.model,
+    responseFormat: options.useJson ? "json_object" : undefined,
+    stream: true,
+  });
+
+  return {
+    content: result.content,
+    ...(result.usage ? { usage: result.usage } : {}),
   };
 }
 

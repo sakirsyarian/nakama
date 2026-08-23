@@ -1,6 +1,24 @@
-import type { CustomModelEntry, ProviderName } from "./contract";
+import type {
+  CustomModelEntry,
+  OpenAICompatibleApi,
+  ProviderName,
+} from "./contract";
 
 export const DISPLAY_NAME_MAX_LENGTH = 64;
+export const DEFAULT_OPENAI_COMPATIBLE_API: OpenAICompatibleApi =
+  "chat_completions";
+
+export function parseOpenAICompatibleApi(value: unknown): OpenAICompatibleApi {
+  if (value === undefined || value === null || value === "") {
+    return DEFAULT_OPENAI_COMPATIBLE_API;
+  }
+
+  if (value === "chat_completions" || value === "responses") {
+    return value;
+  }
+
+  throw new Error("API format must be chat_completions or responses.");
+}
 
 export function normalizeBaseUrl(baseUrl: string): string {
   return baseUrl.trim().replace(/\/+$/, "");

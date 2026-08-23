@@ -2,6 +2,7 @@ import type {
   ConfigureProviderRequest,
   CreateProviderRequest,
   OllamaHostMode,
+  OpenAICompatibleApi,
   ProviderModelOption,
 } from "@nakama/core/contract";
 import {
@@ -574,6 +575,7 @@ export function getModelDisplayName(
 }
 
 export function buildCreateProviderRequest(options: {
+  apiFormat?: OpenAICompatibleApi;
   apiKey: string;
   provider: SelectedProvider;
   model?: string;
@@ -594,10 +596,12 @@ export function buildCreateProviderRequest(options: {
     ...(options.baseUrl?.trim() ? { baseUrl: options.baseUrl.trim() } : {}),
     ...(options.hostMode ? { hostMode: options.hostMode } : {}),
     ...(request.customModels ? { customModels: request.customModels } : {}),
+    ...(request.apiFormat ? { apiFormat: request.apiFormat } : {}),
   };
 }
 
 export function buildConfigureProviderRequest(options: {
+  apiFormat?: OpenAICompatibleApi;
   apiKey: string;
   provider: SelectedProvider;
   model?: string;
@@ -615,6 +619,7 @@ export function buildConfigureProviderRequest(options: {
   if (options.provider === "openai_compatible") {
     return {
       ...request,
+      apiFormat: options.apiFormat,
       baseUrl: options.baseUrl?.trim(),
       customModels: options.customModels,
       displayName: options.displayName?.trim(),

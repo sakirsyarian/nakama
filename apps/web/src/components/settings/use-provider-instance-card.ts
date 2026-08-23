@@ -1,4 +1,5 @@
 import type {
+  OpenAICompatibleApi,
   ProviderInstanceSummary,
   ProviderModelOption,
   UpdateProviderRequest,
@@ -54,6 +55,8 @@ export function useProviderInstanceCard({
   const [showApiKey, setShowApiKey] = useState(false);
   const [editLabel, setEditLabel] = useState("");
   const [editBaseUrl, setEditBaseUrl] = useState("");
+  const [editApiFormat, setEditApiFormat] =
+    useState<OpenAICompatibleApi>("chat_completions");
   const [manageModels, setManageModels] = useState<ModelListRow[]>([]);
 
   const providerType = instance.type as SelectedProvider;
@@ -107,6 +110,7 @@ export function useProviderInstanceCard({
   const openEdit = () => {
     setDialogError(null);
     setEditLabel(instance.label);
+    setEditApiFormat(instance.apiFormat ?? "chat_completions");
     setEditBaseUrl(
       instance.baseUrl ??
         (isOllama
@@ -181,6 +185,9 @@ export function useProviderInstanceCard({
 
     await runUpdate(
       {
+        ...(providerType === "openai_compatible"
+          ? { apiFormat: editApiFormat }
+          : {}),
         baseUrl: editBaseUrl,
         label: editLabel,
         ...(isOllama
@@ -232,6 +239,7 @@ export function useProviderInstanceCard({
     busy,
     catalogModelsForType,
     dialogError,
+    editApiFormat,
     editBaseUrl,
     editLabel,
     editManageModels,
@@ -253,6 +261,7 @@ export function useProviderInstanceCard({
     saveCompatible,
     saveManageModels,
     setApiKey,
+    setEditApiFormat,
     setEditBaseUrl,
     setEditLabel,
     setEditOpen,

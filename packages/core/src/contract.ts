@@ -1414,6 +1414,8 @@ export interface CustomModelEntry {
   supportsVision?: boolean;
 }
 
+export type OpenAICompatibleApi = "chat_completions" | "responses";
+
 export interface ProviderModelOption {
   contextWindow?: number;
   default?: boolean;
@@ -1430,6 +1432,7 @@ export interface ProviderModelOption {
 }
 
 export interface ProviderInstanceSummary {
+  apiFormat?: OpenAICompatibleApi | null;
   baseUrl?: string | null;
   createdAt: string;
   customModels?: CustomModelEntry[];
@@ -1447,6 +1450,7 @@ export interface ListProvidersResponse {
 }
 
 export interface CreateProviderRequest {
+  apiFormat?: OpenAICompatibleApi;
   apiKey: string;
   baseUrl?: string;
   customModels?: CustomModelEntry[];
@@ -1463,6 +1467,7 @@ export interface CreateProviderResponse {
 }
 
 export interface UpdateProviderRequest {
+  apiFormat?: OpenAICompatibleApi;
   apiKey?: string;
   baseUrl?: string;
   customModels?: CustomModelEntry[];
@@ -1500,6 +1505,7 @@ export interface DiscoverModelsRequest {
 }
 
 export interface ConfigureProviderRequest {
+  apiFormat?: OpenAICompatibleApi;
   apiKey: string;
   baseUrl?: string;
   customModels?: CustomModelEntry[];

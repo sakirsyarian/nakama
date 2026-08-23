@@ -12,6 +12,7 @@ import {
   type OllamaHostMode,
   ollamaRequiresApiKey,
   type ProviderInstance,
+  parseOpenAICompatibleApi,
   resolveOllamaHostMode,
   type UserConfig,
   validateCustomModels,
@@ -44,6 +45,10 @@ export function toProviderInstanceSummary(
   modelCount: number
 ): ProviderInstanceSummary {
   return {
+    apiFormat:
+      instance.type === "openai_compatible"
+        ? parseOpenAICompatibleApi(instance.apiFormat)
+        : null,
     baseUrl: instance.baseUrl ?? null,
     hasApiKey:
       Boolean(instance.apiKey.trim()) ||
@@ -220,6 +225,14 @@ export function applyProviderInstanceUpdate(
     next.baseUrl = normalized;
   }
 
+  if (request.apiFormat !== undefined) {
+    if (instance.type !== "openai_compatible") {
+      throw new Error("API format is only supported by OpenAI Compatible.");
+    }
+
+    next.apiFormat = parseOpenAICompatibleApi(request.apiFormat);
+  }
+
   if (request.hostMode !== undefined && instance.type === "ollama") {
     next.hostMode = request.hostMode;
   }
@@ -265,7 +278,10 @@ export function applyProviderInstanceUpdate(
 
 function buildProviderFieldsFromRequest(
   request: CreateProviderRequest
-): Pick<ProviderInstance, "baseUrl" | "customModels" | "label" | "hostMode"> {
+): Pick<
+  ProviderInstance,
+  "apiFormat" | "baseUrl" | "customModels" | "label" | "hostMode"
+> {
   const type = request.type;
 
   if (type === "ollama") {
@@ -335,7 +351,12 @@ function buildProviderFieldsFromRequest(
       throw new Error("At least one model is required.");
     }
 
-    return { baseUrl, customModels, label };
+    return {
+      apiFormat: parseOpenAICompatibleApi(request.apiFormat),
+      baseUrl,
+      customModels,
+      label,
+    };
   }
 
   if (type === "openrouter") {

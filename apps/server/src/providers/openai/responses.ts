@@ -10,6 +10,7 @@ import type {
 import {
   fetchWithoutIdleTimeout,
   isMessageContentPartArray,
+  normalizeBaseUrl,
   toOpenAIResponsesUserContent,
   WEB_SEARCH_TOOL_NAME,
 } from "@nakama/core";
@@ -26,43 +27,49 @@ type ResponseItem = Record<string, unknown>;
 
 export async function generateOpenAIResponsesChat(options: {
   apiKey: string;
+  baseUrl?: string;
+  label?: string;
   model: string;
   input: GenerateChatInput;
   stream: boolean;
   handlers?: StreamChatHandlers;
   customModels?: CustomModelEntry[];
+  responseFormat?: "json_object";
 }): Promise<ChatCompletionResult> {
+  const baseUrl = normalizeBaseUrl(
+    options.baseUrl ?? "https://api.openai.com/v1"
+  );
+  const label = options.label?.trim() || "OpenAI";
   const body = await buildResponsesRequestBody(
     options.model,
     options.input,
     options.stream,
-    options.customModels
+    options.customModels,
+    options.responseFormat
   );
-  const response = await fetchWithoutIdleTimeout(
-    "https://api.openai.com/v1/responses",
-    {
-      body: JSON.stringify(body),
-      headers: {
-        Authorization: `Bearer ${options.apiKey}`,
-        "Content-Type": "application/json",
-      },
-      method: "POST",
-      signal: options.input.signal,
-    }
-  );
+  const endpoint = `${baseUrl}/responses`;
+  const response = await fetchWithoutIdleTimeout(endpoint, {
+    body: JSON.stringify(body),
+    headers: {
+      Authorization: `Bearer ${options.apiKey}`,
+      "Content-Type": "application/json",
+    },
+    method: "POST",
+    signal: options.input.signal,
+  });
 
   if (!response.ok) {
     throw new Error(
-      `OpenAI request failed (${response.status}): ${await response.text()}`
+      `${label} request to ${endpoint} failed (${response.status}): ${await response.text()}`
     );
   }
 
   if (options.stream) {
     if (!response.body) {
-      throw new Error("OpenAI returned an empty stream.");
+      throw new Error(`${label} returned an empty stream.`);
     }
 
-    return readOpenAIResponsesStream(response.body, options.handlers);
+    return readOpenAIResponsesStream(response.body, options.handlers, label);
   }
 
   const payload = (await response.json()) as {
@@ -76,7 +83,8 @@ export async function generateOpenAIResponsesChat(options: {
   return parseResponsesOutput(
     payload.output ?? [],
     options.handlers,
-    payload.usage
+    payload.usage,
+    label
   );
 }
 
@@ -84,7 +92,8 @@ async function buildResponsesRequestBody(
   model: string,
   input: GenerateChatInput,
   stream: boolean,
-  customModels?: CustomModelEntry[]
+  customModels?: CustomModelEntry[],
+  responseFormat?: "json_object"
 ) {
   const tools = buildResponsesTools(
     input.tools,
@@ -95,8 +104,10 @@ async function buildResponsesRequestBody(
     input: await toResponsesInput(input.messages),
     instructions: input.system,
     model,
+    store: false,
     ...(tools.length > 0 ? { tools } : {}),
     ...buildOpenAIReasoningRequest(model, input, customModels),
+    ...(responseFormat ? { text: { format: { type: responseFormat } } } : {}),
     ...(stream ? { stream: true } : {}),
   };
 }
@@ -249,7 +260,8 @@ function parseResponsesOutput(
     input_tokens?: number;
     output_tokens?: number;
     total_tokens?: number;
-  }
+  },
+  label = "OpenAI"
 ): ChatCompletionResult {
   const textParts: string[] = [];
   const thinkingParts: string[] = [];
@@ -307,7 +319,7 @@ function parseResponsesOutput(
   });
 
   if (!content && toolCalls.length === 0 && !providerContent?.length) {
-    throw new Error("OpenAI returned an empty response.");
+    throw new Error(`${label} returned an empty response.`);
   }
 
   return {
@@ -373,7 +385,8 @@ function emitWebSearchToolEvent(
 
 async function readOpenAIResponsesStream(
   body: ReadableStream<Uint8Array>,
-  handlers?: StreamChatHandlers
+  handlers?: StreamChatHandlers,
+  label = "OpenAI"
 ): Promise<ChatCompletionResult> {
   let content = "";
   let thinking = "";
@@ -436,7 +449,7 @@ async function readOpenAIResponsesStream(
     output.push(...outputIndex.values());
   }
 
-  const parsed = parseResponsesOutput(output, handlers);
+  const parsed = parseResponsesOutput(output, handlers, undefined, label);
 
   const thinkingText = thinking.trim() || parsed.assistantMessage.thinking;
 

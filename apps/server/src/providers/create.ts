@@ -5,6 +5,7 @@ import {
   type ProviderClient,
   type ProviderInstance,
   type ProviderName,
+  parseOpenAICompatibleApi,
   readEnvValue,
   type UserConfig,
 } from "@nakama/core";
@@ -134,8 +135,10 @@ function createProvider(options: CreateProviderOptions): ProviderClient {
       }
 
       return createOpenAICompatibleProvider({
+        apiFormat: parseOpenAICompatibleApi(options.instance?.apiFormat),
         apiKey: options.apiKey,
         baseUrl: baseUrlOverride,
+        customModels: options.instance?.customModels,
         displayName,
         model,
         supportsThinking: compatibleModelSupportsThinking(

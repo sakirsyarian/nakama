@@ -193,6 +193,7 @@ export function ProviderSetupForm({
 
           {form.selectedProvider === "openai_compatible" ? (
             <CustomProviderFields
+              apiFormat={form.apiFormat}
               apiKey={form.apiKey}
               baseUrl={form.baseUrl}
               baseUrlError={form.baseUrlError}
@@ -202,6 +203,7 @@ export function ProviderSetupForm({
               displayName={form.displayName}
               displayNameError={form.displayNameError}
               modelsError={form.modelsError}
+              onApiFormatChange={form.setApiFormat}
               onBaseUrlChange={form.setBaseUrl}
               onCustomModelsChange={form.setCustomModels}
               onDisplayNameChange={form.setDisplayName}

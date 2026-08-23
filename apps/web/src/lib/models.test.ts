@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { USER_PROVIDER_NAMES } from "@nakama/core/provider-resolution";
 import {
+  buildCreateProviderRequest,
   encodeModelSelection,
   filterVisionCapableProviderGroups,
   firstAvailableProviderOption,
@@ -12,6 +13,24 @@ import {
   resolveModelThinkingSupport,
   resolveModelVisionSupport,
 } from "./models";
+
+describe("buildCreateProviderRequest", () => {
+  test("includes the Responses API format for OpenAI Compatible providers", () => {
+    expect(
+      buildCreateProviderRequest({
+        apiFormat: "responses",
+        apiKey: "sk-test",
+        baseUrl: "https://api.example.com/v1",
+        customModels: [{ id: "example-model" }],
+        displayName: "Example",
+        provider: "openai_compatible",
+      })
+    ).toMatchObject({
+      apiFormat: "responses",
+      type: "openai_compatible",
+    });
+  });
+});
 
 function group(
   providerId: string,

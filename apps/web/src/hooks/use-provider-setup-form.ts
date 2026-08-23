@@ -2,6 +2,7 @@ import { resolveCloudflareAccountInput } from "@nakama/core/cloudflare-provider-
 import type {
   CreateProviderResponse,
   OllamaHostMode,
+  OpenAICompatibleApi,
   ProviderModelOption,
 } from "@nakama/core/contract";
 import { useCallback, useEffect, useMemo, useState } from "react";
@@ -87,6 +88,8 @@ export function useProviderSetupForm(
   const [ollamaHostMode, setOllamaHostMode] = useState<OllamaHostMode>("local");
   const [displayName, setDisplayName] = useState("");
   const [baseUrl, setBaseUrl] = useState("");
+  const [apiFormat, setApiFormat] =
+    useState<OpenAICompatibleApi>("chat_completions");
   const [customModels, setCustomModels] = useState<ModelListRow[]>([]);
   const [extraModels, setExtraModels] = useState<ProviderModelOption[]>([]);
   const [displayNameError, setDisplayNameError] = useState<string | null>(null);
@@ -234,6 +237,7 @@ export function useProviderSetupForm(
       }
 
       if (provider === "openai_compatible") {
+        setApiFormat("chat_completions");
         setBaseUrl("");
         setCustomModels([]);
       }
@@ -461,6 +465,8 @@ export function useProviderSetupForm(
             : null;
         const result = await createProvider(
           buildCreateProviderRequest({
+            apiFormat:
+              selectedProvider === "openai_compatible" ? apiFormat : undefined,
             apiKey: trimmedKey,
             baseUrl: resolvedCloudflareBaseUrl ?? baseUrl,
             customModels:
@@ -506,6 +512,7 @@ export function useProviderSetupForm(
     },
     [
       apiKey,
+      apiFormat,
       baseUrl,
       openRouterModels,
       shortlistModels,
@@ -523,6 +530,7 @@ export function useProviderSetupForm(
   );
 
   return {
+    apiFormat,
     apiKey,
     apiKeyError,
     baseUrl,
@@ -552,6 +560,7 @@ export function useProviderSetupForm(
     openRouterModelsError,
     selectedModel,
     selectedProvider,
+    setApiFormat,
     setBaseUrl,
     setCustomModels,
     setDisplayName,

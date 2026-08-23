@@ -207,6 +207,22 @@ describe("resolveProfileProviderSelection", () => {
 });
 
 describe("applyProviderInstanceUpdate", () => {
+  test("updates the API format on OpenAI Compatible providers", () => {
+    const instance = createProviderInstance({
+      apiFormat: "chat_completions",
+      baseUrl: "https://api.example.com/v1",
+      id: "compatible-1",
+      label: "Example",
+      type: "openai_compatible",
+    });
+
+    const updated = applyProviderInstanceUpdate(instance, {
+      apiFormat: "responses",
+    });
+
+    expect(updated.apiFormat).toBe("responses");
+  });
+
   test("preserves supportsThinking on compatible custom models", () => {
     const instance = createProviderInstance({
       apiKey: "",
@@ -325,6 +341,37 @@ describe("applyProviderInstanceUpdate", () => {
 });
 
 describe("buildProviderInstanceFromCreateRequest", () => {
+  test("defaults OpenAI Compatible providers to chat completions", () => {
+    const instance = buildProviderInstanceFromCreateRequest(
+      {
+        apiKey: "",
+        baseUrl: "https://api.example.com/v1",
+        customModels: [{ id: "example-model" }],
+        label: "Example",
+        type: "openai_compatible",
+      },
+      []
+    );
+
+    expect(instance.apiFormat).toBe("chat_completions");
+  });
+
+  test("persists the Responses API format for OpenAI Compatible providers", () => {
+    const instance = buildProviderInstanceFromCreateRequest(
+      {
+        apiFormat: "responses",
+        apiKey: "",
+        baseUrl: "https://api.example.com/v1",
+        customModels: [{ id: "example-model" }],
+        label: "Example",
+        type: "openai_compatible",
+      },
+      []
+    );
+
+    expect(instance.apiFormat).toBe("responses");
+  });
+
   test("persists a Cloudflare Workers AI base URL on the instance", () => {
     const instance = buildProviderInstanceFromCreateRequest(
       {
