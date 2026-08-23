@@ -1,5 +1,12 @@
-import { ArrowDown01Icon } from "hugeicons-react";
-import type { RefObject } from "react";
+import { ArrowDown01Icon, ListViewIcon } from "hugeicons-react";
+import { type RefObject, useEffect, useState } from "react";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import {
   findHeadingElement,
   MARKDOWN_TOC_MIN_HEADINGS,
@@ -63,5 +70,111 @@ export function ArtifactMarkdownToc({
         </ul>
       </nav>
     </details>
+  );
+}
+
+export function ArtifactMarkdownTocSelect({
+  contentRef,
+  headings,
+}: {
+  contentRef: RefObject<HTMLElement | null>;
+  headings: MarkdownHeading[];
+}) {
+  const [activeIndex, setActiveIndex] = useState(0);
+
+  useEffect(() => {
+    setActiveIndex(0);
+
+    const content = contentRef.current;
+    const scroller = content?.closest<HTMLElement>(
+      "[data-artifact-panel-scroll]"
+    );
+
+    if (!(content && scroller)) {
+      return;
+    }
+
+    const scrollContainer = scroller;
+    const elements = headings.map((heading) =>
+      findHeadingElement(content, heading)
+    );
+    let animationFrame = 0;
+
+    function updateActiveHeading() {
+      cancelAnimationFrame(animationFrame);
+      animationFrame = requestAnimationFrame(() => {
+        const threshold = scrollContainer.getBoundingClientRect().top + 24;
+        let nextIndex = 0;
+
+        for (const [index, element] of elements.entries()) {
+          if (!element || element.getBoundingClientRect().top > threshold) {
+            break;
+          }
+          nextIndex = index;
+        }
+
+        setActiveIndex((current) =>
+          current === nextIndex ? current : nextIndex
+        );
+      });
+    }
+
+    updateActiveHeading();
+    scrollContainer.addEventListener("scroll", updateActiveHeading, {
+      passive: true,
+    });
+
+    return () => {
+      cancelAnimationFrame(animationFrame);
+      scrollContainer.removeEventListener("scroll", updateActiveHeading);
+    };
+  }, [contentRef, headings]);
+
+  if (headings.length < MARKDOWN_TOC_MIN_HEADINGS) {
+    return null;
+  }
+
+  const selectedHeading = headings[activeIndex] ?? headings[0];
+
+  return (
+    <Select
+      onValueChange={(value) => {
+        const nextIndex = Number(value);
+        const heading = headings[nextIndex];
+
+        if (!(heading && Number.isInteger(nextIndex))) {
+          return;
+        }
+
+        setActiveIndex(nextIndex);
+        findHeadingElement(contentRef.current, heading)?.scrollIntoView({
+          behavior: "smooth",
+          block: "start",
+        });
+      }}
+      value={String(activeIndex)}
+    >
+      <SelectTrigger
+        aria-label="Table of contents"
+        className="w-full max-w-[32rem]"
+      >
+        <ListViewIcon aria-hidden className="size-4 text-muted-foreground" />
+        <SelectValue>{selectedHeading.text}</SelectValue>
+      </SelectTrigger>
+      <SelectContent align="start">
+        {headings.map((heading, index) => (
+          <SelectItem
+            className={cn(
+              heading.level === 2 && "pl-4",
+              heading.level === 3 && "pl-7"
+            )}
+            key={`${heading.level}-${heading.occurrence}-${heading.text}-${index}`}
+            value={String(index)}
+          >
+            {heading.text}
+          </SelectItem>
+        ))}
+      </SelectContent>
+    </Select>
   );
 }

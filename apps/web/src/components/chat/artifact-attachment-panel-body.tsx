@@ -1,4 +1,4 @@
-import { useMemo, useRef } from "react";
+import { type RefObject, useMemo, useRef } from "react";
 import { CodeBlock } from "@/components/ai-elements/code-block";
 import { MessageResponse } from "@/components/ai-elements/message";
 import { ArtifactMarkdownToc } from "@/components/chat/artifact-markdown-toc";
@@ -39,6 +39,7 @@ export type ArtifactAttachmentPanelBodyProps =
       content: string | null;
       format: "markdown" | "plain";
       language: string | null;
+      markdownContentRef?: RefObject<HTMLDivElement | null>;
       streaming?: boolean;
     });
 
@@ -207,6 +208,7 @@ function ArtifactAttachmentTextBody({
   streaming = false,
   canPreview,
   previewMode = "preview",
+  markdownContentRef,
 }: Extract<ArtifactAttachmentPanelBodyProps, { kind: "text" }>) {
   const sourceFormat = previewMode === "source" ? "plain" : format;
   const sourceLanguage =
@@ -214,7 +216,8 @@ function ArtifactAttachmentTextBody({
       ? (language ?? (format === "markdown" ? "markdown" : null))
       : language;
   const showCodeBlock = Boolean(content && sourceFormat !== "markdown");
-  const renderedRef = useRef<HTMLDivElement>(null);
+  const fallbackRenderedRef = useRef<HTMLDivElement>(null);
+  const renderedRef = markdownContentRef ?? fallbackRenderedRef;
   const headings = useMemo(
     () =>
       content && sourceFormat === "markdown"
@@ -244,7 +247,12 @@ function ArtifactAttachmentTextBody({
       {!(loading || error) && rendered ? (
         sourceFormat === "markdown" ? (
           <>
-            <ArtifactMarkdownToc contentRef={renderedRef} headings={headings} />
+            {markdownContentRef ? null : (
+              <ArtifactMarkdownToc
+                contentRef={renderedRef}
+                headings={headings}
+              />
+            )}
             <div ref={renderedRef}>{rendered}</div>
           </>
         ) : (

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { type RefObject, useEffect, useMemo, useRef, useState } from "react";
 import { ArtifactAttachmentPanelBody } from "@/components/chat/artifact-attachment-panel-body";
 import {
   artifactCanTogglePreviewSource,
@@ -6,6 +6,7 @@ import {
   artifactPanelDefaultWidth,
   artifactPanelHeaderMeta,
 } from "@/components/chat/artifact-attachment-panel-body.shared";
+import { ArtifactMarkdownTocSelect } from "@/components/chat/artifact-markdown-toc";
 import {
   type ArtifactPreviewMode,
   ArtifactPreviewModeToggle,
@@ -26,6 +27,10 @@ import {
   findLatestStreamingArtifact,
 } from "@/lib/chat-stream-artifact";
 import { client, formatError } from "@/lib/client";
+import {
+  extractMarkdownHeadings,
+  MARKDOWN_TOC_MIN_HEADINGS,
+} from "@/lib/markdown-toc";
 
 interface EligibleStreamTarget {
   relativePath: string;
@@ -84,10 +89,12 @@ function buildStreamingArtifactHeader(
 function buildStreamingPanelBody({
   artifact,
   content,
+  markdownContentRef,
   previewMode,
 }: {
   artifact: ChatArtifactRef;
   content: string;
+  markdownContentRef: RefObject<HTMLDivElement | null>;
   previewMode: ArtifactPreviewMode;
 }) {
   const { isHtml, isMarkdown } = streamingPreviewFlags(artifact);
@@ -103,6 +110,7 @@ function buildStreamingPanelBody({
       kind="text"
       language={language}
       loading={false}
+      markdownContentRef={markdownContentRef}
       previewMode={previewMode}
       streaming
     />
@@ -112,10 +120,12 @@ function buildStreamingPanelBody({
 function buildStablePanelBody({
   artifact,
   content,
+  markdownContentRef,
   previewMode,
 }: {
   artifact: ChatArtifactRef;
   content: string;
+  markdownContentRef: RefObject<HTMLDivElement | null>;
   previewMode: ArtifactPreviewMode;
 }) {
   const { isHtml, isMarkdown } = streamingPreviewFlags(artifact);
@@ -144,7 +154,36 @@ function buildStablePanelBody({
       kind="text"
       language={artifactCodeLanguage(artifact.filename)}
       loading={false}
+      markdownContentRef={markdownContentRef}
       previewMode={previewMode}
+    />
+  );
+}
+
+function buildStreamingTableOfContents({
+  content,
+  isMarkdown,
+  markdownContentRef,
+  previewMode,
+}: {
+  content: string;
+  isMarkdown: boolean;
+  markdownContentRef: RefObject<HTMLDivElement | null>;
+  previewMode: ArtifactPreviewMode;
+}) {
+  if (!(isMarkdown && previewMode === "preview")) {
+    return;
+  }
+
+  const headings = extractMarkdownHeadings(content);
+  if (headings.length < MARKDOWN_TOC_MIN_HEADINGS) {
+    return;
+  }
+
+  return (
+    <ArtifactMarkdownTocSelect
+      contentRef={markdownContentRef}
+      headings={headings}
     />
   );
 }
@@ -185,6 +224,7 @@ export function ArtifactStreamingPanelBridge({
   const lastEligibleRef = useRef<EligibleStreamTarget | null>(null);
   const handedOffRef = useRef(new Set<string>());
   const autoWidthAppliedRef = useRef(new Set<string>());
+  const markdownContentRef = useRef<HTMLDivElement>(null);
   const [previewModeByPanel, setPreviewModeByPanel] = useState<
     Partial<Record<string, ArtifactPreviewMode>>
   >({});
@@ -235,6 +275,7 @@ export function ArtifactStreamingPanelBridge({
     const body = buildStreamingPanelBody({
       artifact,
       content: streaming.parsed.content ?? "",
+      markdownContentRef,
       previewMode,
     });
     const defaultWidth = artifactPanelDefaultWidth(
@@ -243,6 +284,12 @@ export function ArtifactStreamingPanelBridge({
     );
     const header = buildStreamingArtifactHeader(artifact, { streaming: true });
     const { isHtml, isMarkdown } = streamingPreviewFlags(artifact);
+    const titleContent = buildStreamingTableOfContents({
+      content: streaming.parsed.content ?? "",
+      isMarkdown,
+      markdownContentRef,
+      previewMode,
+    });
     const bodyClassName = artifactPanelBodyClassName({
       isHtml,
       isImage: false,
@@ -275,6 +322,7 @@ export function ArtifactStreamingPanelBridge({
         leading,
         subtitle: header.subtitle,
         title: header.title,
+        titleContent,
         typeLabel: header.typeLabel,
         ...widthPatch,
       });
@@ -299,6 +347,7 @@ export function ArtifactStreamingPanelBridge({
       content: buildStreamingPanelBody({
         artifact,
         content: streaming.parsed.content ?? "",
+        markdownContentRef,
         previewMode: "preview",
       }),
       defaultWidth,
@@ -324,6 +373,12 @@ export function ArtifactStreamingPanelBridge({
       resizable: true,
       subtitle: header.subtitle,
       title: header.title,
+      titleContent: buildStreamingTableOfContents({
+        content: streaming.parsed.content ?? "",
+        isMarkdown,
+        markdownContentRef,
+        previewMode: "preview",
+      }),
       typeLabel: header.typeLabel,
     });
   }, [activeId, previewModeByPanel, profileId, show, streaming, update]);
@@ -424,6 +479,7 @@ export function ArtifactStreamingPanelBridge({
       content: buildStablePanelBody({
         artifact: stableContent.artifact,
         content: stableContent.content,
+        markdownContentRef,
         previewMode,
       }),
       defaultWidth: artifactPanelDefaultWidth(
@@ -442,6 +498,12 @@ export function ArtifactStreamingPanelBridge({
       ) : null,
       subtitle: header.subtitle,
       title: header.title,
+      titleContent: buildStreamingTableOfContents({
+        content: stableContent.content,
+        isMarkdown,
+        markdownContentRef,
+        previewMode,
+      }),
       typeLabel: header.typeLabel,
     });
   }, [activeId, previewModeByPanel, stableContent, update]);

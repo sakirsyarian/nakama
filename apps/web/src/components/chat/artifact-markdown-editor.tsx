@@ -3,6 +3,7 @@ import { restoreArtifactEditorScrollTop } from "@/components/chat/artifact-markd
 import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
 import { Textarea } from "@/components/ui/textarea";
+import { isArtifactSaveShortcut } from "@/lib/artifact-keyboard-shortcuts";
 
 export function ArtifactMarkdownEditor({
   busy,
@@ -41,6 +42,29 @@ export function ArtifactMarkdownEditor({
           scrollTopRef.current = event.currentTarget.scrollTop;
           setDraft(event.currentTarget.value);
         }}
+        onKeyDown={(event) => {
+          if (event.nativeEvent.isComposing) {
+            return;
+          }
+
+          if (isArtifactSaveShortcut(event)) {
+            event.preventDefault();
+            if (!busy) {
+              onSave(draft);
+            }
+            return;
+          }
+
+          if (
+            event.key === "Escape" &&
+            !(event.altKey || event.ctrlKey || event.metaKey || event.shiftKey)
+          ) {
+            event.preventDefault();
+            if (!busy) {
+              onCancel();
+            }
+          }
+        }}
         onScroll={(event) => {
           scrollTopRef.current = event.currentTarget.scrollTop;
         }}
@@ -50,6 +74,7 @@ export function ArtifactMarkdownEditor({
 
       <div className="flex shrink-0 items-center justify-end gap-2">
         <Button
+          aria-keyshortcuts="Escape"
           disabled={busy}
           onClick={onCancel}
           size="sm"
@@ -59,6 +84,7 @@ export function ArtifactMarkdownEditor({
           Cancel
         </Button>
         <Button
+          aria-keyshortcuts="Control+S Meta+S"
           disabled={busy}
           onClick={() => onSave(draft)}
           size="sm"

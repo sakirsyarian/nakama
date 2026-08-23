@@ -5,7 +5,14 @@ import {
   Video01Icon,
   ViewIcon,
 } from "hugeicons-react";
-import { useEffect, useState } from "react";
+import {
+  type RefObject,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { ArtifactAttachmentPanelActions } from "@/components/chat/artifact-attachment-panel-actions";
 import { ArtifactAttachmentPanelBody } from "@/components/chat/artifact-attachment-panel-body";
 import {
@@ -16,6 +23,7 @@ import {
   downloadActionLabel,
 } from "@/components/chat/artifact-attachment-panel-body.shared";
 import { ArtifactMarkdownEditor } from "@/components/chat/artifact-markdown-editor";
+import { ArtifactMarkdownTocSelect } from "@/components/chat/artifact-markdown-toc";
 import {
   type ArtifactPreviewMode,
   ArtifactPreviewModeToggle,
@@ -39,6 +47,7 @@ import {
 import { useAuth } from "@/context/use-auth";
 import { useChatAttachmentPanel } from "@/context/use-chat-attachment-panel";
 import { useWriteArtifactMutation } from "@/hooks/use-resource-mutations";
+import { isArtifactEditShortcut } from "@/lib/artifact-keyboard-shortcuts";
 import {
   artifactCodeLanguage,
   buildArtifactContentUrl,
@@ -55,6 +64,10 @@ import {
 } from "@/lib/chat-artifacts";
 import { client, formatError } from "@/lib/client";
 import { formatBytes } from "@/lib/knowledge-base-files";
+import {
+  extractMarkdownHeadings,
+  MARKDOWN_TOC_MIN_HEADINGS,
+} from "@/lib/markdown-toc";
 import { cn } from "@/lib/utils";
 
 interface ArtifactAttachmentPreviewProps {
@@ -78,6 +91,7 @@ function ArtifactAttachmentPreviewPanelBody({
   canPreview,
   artifact,
   previewMode,
+  markdownContentRef,
 }: {
   kind: "image" | "video" | "html" | "text";
   textFormat: "markdown" | "plain";
@@ -90,6 +104,7 @@ function ArtifactAttachmentPreviewPanelBody({
   canPreview: boolean;
   artifact: ChatArtifactRef;
   previewMode: ArtifactPreviewMode;
+  markdownContentRef: RefObject<HTMLDivElement | null>;
 }) {
   if (kind === "image") {
     return (
@@ -141,6 +156,7 @@ function ArtifactAttachmentPreviewPanelBody({
       kind="text"
       language={language}
       loading={loading}
+      markdownContentRef={markdownContentRef}
       previewMode={previewMode}
     />
   );
@@ -165,6 +181,7 @@ export function ArtifactAttachmentPreview({
     useState<ArtifactPreviewMode>("preview");
   const [draft, setDraft] = useState<string | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
+  const markdownContentRef = useRef<HTMLDivElement>(null);
   const { activeOrg } = useAuth();
   const writeArtifact = useWriteArtifactMutation();
   const downloadUrl = `${client.baseUrl}${buildArtifactContentUrl(profileId, artifact.path)}`;
@@ -218,6 +235,38 @@ export function ArtifactAttachmentPreview({
     open,
     profileId,
   });
+  const markdownHeadings = useMemo(
+    () => (isMarkdown && content ? extractMarkdownHeadings(content) : []),
+    [content, isMarkdown]
+  );
+  const startEditing = useCallback(() => {
+    setSaveError(null);
+    setDraft(content ?? "");
+  }, [content]);
+
+  useEffect(() => {
+    if (!(open && canEdit && draft === null && !loading && content !== null)) {
+      return;
+    }
+
+    function handleEditShortcut(event: KeyboardEvent) {
+      const target = event.target;
+      const typingTarget =
+        target instanceof HTMLElement &&
+        (target.isContentEditable ||
+          target.matches("input, textarea, select, [role='textbox']"));
+
+      if (typingTarget || !isArtifactEditShortcut(event)) {
+        return;
+      }
+
+      event.preventDefault();
+      startEditing();
+    }
+
+    window.addEventListener("keydown", handleEditShortcut);
+    return () => window.removeEventListener("keydown", handleEditShortcut);
+  }, [canEdit, content, draft, loading, open, startEditing]);
 
   useEffect(() => {
     if (!copied) {
@@ -280,6 +329,7 @@ export function ArtifactAttachmentPreview({
         kind={panelKind}
         language={language}
         loading={loadingOverride ?? loading}
+        markdownContentRef={markdownContentRef}
         previewMode={mode}
         textFormat={isMarkdown ? "markdown" : "plain"}
         videoPreviewUrl={videoPreviewUrl}
@@ -288,6 +338,12 @@ export function ArtifactAttachmentPreview({
   }
 
   function buildPanelConfig(mode: ArtifactPreviewMode = previewMode) {
+    const showTableOfContents =
+      draft === null &&
+      mode === "preview" &&
+      isMarkdown &&
+      markdownHeadings.length >= MARKDOWN_TOC_MIN_HEADINGS;
+
     return {
       bodyClassName:
         draft === null
@@ -325,10 +381,7 @@ export function ArtifactAttachmentPreview({
               setCopied,
             })
           }
-          onEdit={() => {
-            setSaveError(null);
-            setDraft(content ?? "");
-          }}
+          onEdit={startEditing}
           onToggleFullscreen={() => setFullscreen((current) => !current)}
           share={share}
         />
@@ -340,6 +393,12 @@ export function ArtifactAttachmentPreview({
       resizable: !fullscreen,
       subtitle: header.subtitle,
       title: header.title,
+      titleContent: showTableOfContents ? (
+        <ArtifactMarkdownTocSelect
+          contentRef={markdownContentRef}
+          headings={markdownHeadings}
+        />
+      ) : undefined,
       typeLabel: header.typeLabel,
     };
   }
@@ -383,6 +442,7 @@ export function ArtifactAttachmentPreview({
     header.subtitle,
     header.title,
     header.typeLabel,
+    markdownHeadings,
   ]);
 
   function openPanel() {
@@ -622,6 +682,7 @@ function ArtifactAttachmentPreviewHeaderActions({
           <>
             {canEdit ? (
               <DropdownMenuItem
+                aria-keyshortcuts="Control+Shift+E Meta+Shift+E"
                 className="cursor-pointer"
                 disabled={
                   additionalEditDisabled ?? (loading || content === null)

@@ -155,6 +155,7 @@ export function ChatAttachmentPanelProvider({
               subtitle={config.subtitle}
               subtitleClassName={config.subtitleClassName}
               title={config.title}
+              titleContent={config.titleContent}
               typeLabel={config.typeLabel}
               width={width}
             >

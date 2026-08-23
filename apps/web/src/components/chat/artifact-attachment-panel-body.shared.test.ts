@@ -82,6 +82,17 @@ describe("artifact panel header", () => {
 });
 
 describe("artifact panel body class", () => {
+  test("markdown preview has comfortable reading space", () => {
+    expect(
+      artifactPanelBodyClassName({
+        isHtml: false,
+        isImage: false,
+        isMarkdown: true,
+        previewMode: "preview",
+      })
+    ).toBe("px-6 py-5");
+  });
+
   test("source view fills the panel with no padding", () => {
     expect(
       artifactPanelBodyClassName({

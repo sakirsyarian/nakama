@@ -13,6 +13,7 @@ export interface ChatAttachmentPanelConfig {
   subtitle?: string | null;
   subtitleClassName?: string;
   title: string;
+  titleContent?: ReactNode;
   typeLabel?: string | null;
 }
 

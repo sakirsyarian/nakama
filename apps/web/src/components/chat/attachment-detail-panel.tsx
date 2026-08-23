@@ -30,12 +30,14 @@ interface AttachmentDetailPanelProps {
   subtitle?: string | null;
   subtitleClassName?: string;
   title: string;
+  titleContent?: ReactNode;
   typeLabel?: string | null;
   width: number;
 }
 
 export function AttachmentDetailPanel({
   title,
+  titleContent,
   typeLabel,
   subtitle,
   subtitleClassName,
@@ -203,7 +205,12 @@ export function AttachmentDetailPanel({
         <div className="flex items-center justify-between gap-3 border-border border-b px-4 py-3">
           <div className="flex min-w-0 flex-1 items-center gap-2.5">
             {leading}
-            {title || typeLabel || (leading ? null : subtitle) ? (
+            {titleContent ? (
+              <div className="min-w-0 flex-1">
+                <h2 className="sr-only">{title}</h2>
+                {titleContent}
+              </div>
+            ) : title || typeLabel || (leading ? null : subtitle) ? (
               <div className="min-w-0 flex-1">
                 {title || typeLabel ? (
                   <h2 className="truncate font-medium text-sm">

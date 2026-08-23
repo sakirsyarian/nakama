@@ -150,6 +150,8 @@ export function artifactPanelBodyClassName({
   if (!isMarkdown || previewMode === "source") {
     return "flex flex-col overflow-hidden p-0";
   }
+
+  return "px-6 py-5";
 }
 
 export function artifactPanelSubtitle({
