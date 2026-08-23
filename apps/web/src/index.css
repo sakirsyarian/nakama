@@ -413,8 +413,8 @@
   /* Beat Streamdown's list-inside so wrapped lines align with the first. */
   .chat-markdown ul,
   .chat-markdown ol {
-    list-style-position: outside;
     padding-inline-start: 1.35em;
+    list-style-position: outside;
   }
 
   .chat-markdown ol {
