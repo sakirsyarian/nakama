@@ -558,14 +558,16 @@ export class AgentService {
     return this.userConfig;
   }
 
-  async setUserTimezone(timezone: string): Promise<string> {
-    await saveUserTimezone(timezone);
+  // Widened to match saveUserTimezone: the route hands this straight from an
+  // unvalidated request body.
+  async setUserTimezone(timezone: string | undefined): Promise<string> {
+    const saved = await saveUserTimezone(timezone);
 
     if (this.userConfig) {
-      this.userConfig = { ...this.userConfig, timezone };
+      this.userConfig = { ...this.userConfig, timezone: saved };
     }
 
-    return timezone;
+    return saved;
   }
 
   async getThinkingSettings(): Promise<ThinkingSettingsResponse> {
@@ -3379,8 +3381,9 @@ export class AgentService {
       profileModel: profile?.model ?? null,
       userConfig: this.userConfig,
     };
+    const [firstInstalled, secondInstalled] = installed;
 
-    if (installed.length === 0) {
+    if (!firstInstalled) {
       const installLines = [
         "# Coding Agent Harness",
         "No coding agent CLI is installed on this host.",
@@ -3396,7 +3399,7 @@ export class AgentService {
       return installLines.join("\n");
     }
 
-    if (installed.length > 1) {
+    if (secondInstalled) {
       const names = installed
         .map((harness) => `- ${harness.name} (\`${harness.command}\`)`)
         .join("\n");
@@ -3412,9 +3415,8 @@ export class AgentService {
       ].join("\n");
     }
 
-    const harness = installed[0]!;
     return this.formatSingleCodingHarnessContext(
-      harness,
+      firstInstalled,
       workspaceRoot,
       probeContext
     );
