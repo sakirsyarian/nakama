@@ -1,4 +1,4 @@
-import { useLayoutEffect, useRef, useState } from "react";
+import { useLayoutEffect, useRef } from "react";
 import { restoreArtifactEditorScrollTop } from "@/components/chat/artifact-markdown-editor-scroll";
 import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
@@ -7,18 +7,19 @@ import { isArtifactSaveShortcut } from "@/lib/artifact-keyboard-shortcuts";
 
 export function ArtifactMarkdownEditor({
   busy,
+  draft,
   error,
-  initialDraft,
   onCancel,
+  onChange,
   onSave,
 }: {
   busy: boolean;
+  draft: string;
   error: string | null;
-  initialDraft: string;
   onCancel: () => void;
-  onSave: (value: string) => void;
+  onChange: (value: string) => void;
+  onSave: () => void;
 }) {
-  const [draft, setDraft] = useState(initialDraft);
   const editorRef = useRef<HTMLTextAreaElement>(null);
   const scrollTopRef = useRef(0);
 
@@ -40,7 +41,7 @@ export function ArtifactMarkdownEditor({
         disabled={busy}
         onChange={(event) => {
           scrollTopRef.current = event.currentTarget.scrollTop;
-          setDraft(event.currentTarget.value);
+          onChange(event.currentTarget.value);
         }}
         onKeyDown={(event) => {
           if (event.nativeEvent.isComposing) {
@@ -50,7 +51,7 @@ export function ArtifactMarkdownEditor({
           if (isArtifactSaveShortcut(event)) {
             event.preventDefault();
             if (!busy) {
-              onSave(draft);
+              onSave();
             }
             return;
           }
@@ -86,7 +87,7 @@ export function ArtifactMarkdownEditor({
         <Button
           aria-keyshortcuts="Control+S Meta+S"
           disabled={busy}
-          onClick={() => onSave(draft)}
+          onClick={onSave}
           size="sm"
           type="button"
         >

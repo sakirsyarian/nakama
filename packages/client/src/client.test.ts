@@ -179,7 +179,7 @@ test("readProfileArtifactContent fetches artifact bytes with inline query", asyn
 test("writeProfileArtifactContent puts UTF-8 content", async () => {
   const fetchCalls: Array<{ input: RequestInfo | URL; init?: RequestInit }> =
     [];
-  const client = createClient({
+  const client = new NakamaClient({
     authToken: "local-auth-token",
     baseUrl: "http://localhost:4310",
     fetch: async (input, init) => {

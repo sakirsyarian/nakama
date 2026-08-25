@@ -2,8 +2,8 @@ import type { ArtifactPreviewMode } from "@/components/chat/artifact-preview-mod
 import { clampAttachmentPanelWidth } from "@/components/chat/attachment-panel-width";
 import {
   artifactCodeLanguage,
+  isDelimitedSpreadsheetFile,
   isDocxFile,
-  isEditableArtifact,
   isHtmlArtifactMimeType,
   isImageArtifactMimeType,
   isLegacyDocFile,
@@ -27,11 +27,12 @@ export function artifactPanelDefaultWidth(
   const isWordDocument =
     isDocxFile(filename, mimeType) || isLegacyDocFile(filename, mimeType);
   const isMarkdown = isMarkdownArtifactMimeType(mimeType) || isWordDocument;
+  const isSpreadsheet = isDelimitedSpreadsheetFile(filename, mimeType);
   const language = artifactCodeLanguage(filename);
 
   const baseWidth = isVideo
     ? VIDEO_ARTIFACT_PANEL_WIDTH
-    : isHtml || isImage || isMarkdown || language
+    : isHtml || isImage || isMarkdown || isSpreadsheet || language
       ? WIDE_ARTIFACT_PANEL_WIDTH
       : NARROW_ARTIFACT_PANEL_WIDTH;
 
@@ -41,21 +42,13 @@ export function artifactPanelDefaultWidth(
 export function artifactCanTogglePreviewSource({
   isHtml,
   isMarkdown,
+  isSpreadsheet = false,
 }: {
   isHtml: boolean;
   isMarkdown: boolean;
+  isSpreadsheet?: boolean;
 }): boolean {
-  return isHtml || isMarkdown;
-}
-
-export function artifactCanEdit({
-  filename,
-  mimeType,
-}: {
-  filename: string;
-  mimeType: string;
-}): boolean {
-  return isEditableArtifact(filename, mimeType);
+  return isHtml || isMarkdown || isSpreadsheet;
 }
 
 export function artifactPanelHeadingName(filename: string): string {
@@ -85,6 +78,10 @@ export function artifactPanelTypeLabel({
     isLegacyDocFile(filename, mimeType)
   ) {
     return "Markdown";
+  }
+
+  if (isDelimitedSpreadsheetFile(filename, mimeType)) {
+    return filename.toLowerCase().endsWith(".tsv") ? "TSV" : "CSV";
   }
 
   const language = artifactCodeLanguage(filename);
@@ -117,7 +114,7 @@ export function artifactPanelHeaderMeta({
     return {
       subtitle: null,
       title: artifactPanelHeadingName(filename),
-      typeLabel: null,
+      typeLabel: artifactPanelTypeLabel({ filename, mimeType }),
     };
   }
 
@@ -133,25 +130,23 @@ export function artifactPanelBodyClassName({
   isImage,
   isVideo = false,
   isMarkdown,
+  isSpreadsheet = false,
   previewMode = "preview",
-  editing = false,
 }: {
   isHtml: boolean;
   isImage: boolean;
   isVideo?: boolean;
   isMarkdown: boolean;
+  isSpreadsheet?: boolean;
   previewMode?: ArtifactPreviewMode;
-  editing?: boolean;
 }): string | undefined {
-  if (editing || isHtml || isImage || isVideo) {
+  if (isHtml || isImage || isVideo || isSpreadsheet) {
     return "flex flex-col overflow-hidden p-0";
   }
 
   if (!isMarkdown || previewMode === "source") {
     return "flex flex-col overflow-hidden p-0";
   }
-
-  return "px-6 py-5";
 }
 
 export function artifactPanelSubtitle({
@@ -185,6 +180,16 @@ export function downloadActionLabel(mimeType: string): string {
 
   if (isMarkdownArtifactMimeType(mimeType)) {
     return "Download as Markdown";
+  }
+
+  if (
+    mimeType === "text/csv" ||
+    mimeType === "application/csv" ||
+    mimeType === "text/tab-separated-values"
+  ) {
+    return mimeType === "text/tab-separated-values"
+      ? "Download as TSV"
+      : "Download as CSV";
   }
 
   if (isImageArtifactMimeType(mimeType)) {

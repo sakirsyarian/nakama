@@ -1760,6 +1760,12 @@ export interface UpdateProfileRequest {
   skillsCuratorConsolidateEnabled?: boolean | null;
   skillsPostTurnReview?: boolean | null;
   skillsWriteApproval?: boolean | null;
+  soulFiles?: {
+    "SOUL.md"?: string;
+    "STYLE.md"?: string;
+    "INSTRUCTIONS.md"?: string;
+    "MEMORY.md"?: string;
+  };
   systemPrompt?: string;
 }
 

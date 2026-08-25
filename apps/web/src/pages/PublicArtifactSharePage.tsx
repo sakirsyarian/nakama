@@ -6,6 +6,7 @@ import { usePublicArtifactShare } from "@/hooks/use-public-artifact-share";
 import { ARTIFACT_HTML_IFRAME_SANDBOX } from "@/lib/artifact-html-preview";
 import {
   artifactCodeLanguage,
+  isDelimitedSpreadsheetFile,
   isDocxFile,
   isHtmlArtifactMimeType,
   isImageArtifactMimeType,
@@ -44,6 +45,8 @@ export function PublicArtifactSharePage() {
     (isDocxFile(metadata.filename, mimeType) ||
       isLegacyDocFile(metadata.filename, mimeType));
   const isMarkdown = isMarkdownArtifactMimeType(mimeType) || isWordDocument;
+  const isSpreadsheet =
+    metadata != null && isDelimitedSpreadsheetFile(metadata.filename, mimeType);
   const language = metadata ? artifactCodeLanguage(metadata.filename) : null;
   const canPreview =
     metadata != null &&
@@ -85,7 +88,9 @@ export function PublicArtifactSharePage() {
     <div
       className={cn(
         "artifact-share-page bg-background text-foreground",
-        isHtml ? "flex h-svh flex-col overflow-hidden" : "h-svh overflow-y-auto"
+        isHtml || isSpreadsheet
+          ? "flex h-svh flex-col overflow-hidden"
+          : "h-svh overflow-y-auto"
       )}
     >
       <header className="border-border border-b">
@@ -112,7 +117,7 @@ export function PublicArtifactSharePage() {
 
       <main
         className={cn(
-          isHtml
+          isHtml || isSpreadsheet
             ? "flex min-h-0 flex-1 flex-col overflow-hidden"
             : cn(shareColumnClass, "py-6")
         )}
@@ -148,6 +153,15 @@ export function PublicArtifactSharePage() {
               error={null}
               htmlSandbox={ARTIFACT_HTML_IFRAME_SANDBOX}
               kind="html"
+              loading={false}
+            />
+          ) : isSpreadsheet ? (
+            <ArtifactAttachmentPanelBody
+              artifact={artifact}
+              canPreview={canPreview}
+              content={content}
+              error={null}
+              kind="spreadsheet"
               loading={false}
             />
           ) : (

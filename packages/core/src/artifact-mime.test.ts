@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   artifactCodeLanguage,
   inferArtifactMimeType,
-  isEditableArtifact,
+  isDelimitedSpreadsheetFile,
   isHtmlArtifactMimeType,
   isImageArtifactMimeType,
   isMarkdownArtifactMimeType,
@@ -80,24 +80,15 @@ describe("mime predicates", () => {
     expect(isUnknownArtifactMimeType("text/plain")).toBe(false);
   });
 
-  test("marks text-like artifacts editable and binaries not", () => {
-    expect(isEditableArtifact("script.md", "text/markdown")).toBe(true);
-    expect(isEditableArtifact("notes.txt", "text/plain")).toBe(true);
-    expect(isEditableArtifact("page.html", "text/html")).toBe(true);
-    expect(isEditableArtifact("data.json", "application/json")).toBe(true);
-    expect(isEditableArtifact("report.md", "application/octet-stream")).toBe(
-      true
-    );
-    expect(isEditableArtifact("icon.svg", "image/svg+xml")).toBe(true);
-    expect(isEditableArtifact("photo.png", "image/png")).toBe(false);
-    expect(isEditableArtifact("clip.mp4", "video/mp4")).toBe(false);
-    expect(isEditableArtifact("deck.pdf", "application/pdf")).toBe(false);
+  test("classifies csv and tsv as delimited spreadsheets", () => {
+    expect(isDelimitedSpreadsheetFile("sample_customers.csv")).toBe(true);
+    expect(isDelimitedSpreadsheetFile("rates.tsv")).toBe(true);
+    expect(isDelimitedSpreadsheetFile("data.txt", "text/csv")).toBe(true);
     expect(
-      isEditableArtifact(
-        "laporan.docx",
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-      )
-    ).toBe(false);
+      isDelimitedSpreadsheetFile("data.txt", "text/tab-separated-values")
+    ).toBe(true);
+    expect(isDelimitedSpreadsheetFile("notes.md")).toBe(false);
+    expect(isDelimitedSpreadsheetFile("budget.xlsx")).toBe(false);
   });
 });
 

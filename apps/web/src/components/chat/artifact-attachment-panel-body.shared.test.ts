@@ -1,6 +1,5 @@
 import { describe, expect, test } from "bun:test";
 import {
-  artifactCanEdit,
   artifactCanTogglePreviewSource,
   artifactPanelBodyClassName,
   artifactPanelHeaderMeta,
@@ -9,7 +8,7 @@ import {
 } from "./artifact-attachment-panel-body.shared";
 
 describe("artifact preview source toggle", () => {
-  test("allows html and markdown only", () => {
+  test("allows html, markdown, and spreadsheet", () => {
     expect(
       artifactCanTogglePreviewSource({ isHtml: true, isMarkdown: false })
     ).toBe(true);
@@ -17,28 +16,14 @@ describe("artifact preview source toggle", () => {
       artifactCanTogglePreviewSource({ isHtml: false, isMarkdown: true })
     ).toBe(true);
     expect(
-      artifactCanTogglePreviewSource({ isHtml: false, isMarkdown: false })
-    ).toBe(false);
-  });
-});
-
-describe("artifact edit", () => {
-  test("allows markdown and text, not images or Word", () => {
-    expect(
-      artifactCanEdit({ filename: "script.md", mimeType: "text/markdown" })
-    ).toBe(true);
-    expect(
-      artifactCanEdit({ filename: "notes.txt", mimeType: "text/plain" })
-    ).toBe(true);
-    expect(
-      artifactCanEdit({ filename: "photo.png", mimeType: "image/png" })
-    ).toBe(false);
-    expect(
-      artifactCanEdit({
-        filename: "laporan.docx",
-        mimeType:
-          "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      artifactCanTogglePreviewSource({
+        isHtml: false,
+        isMarkdown: false,
+        isSpreadsheet: true,
       })
+    ).toBe(true);
+    expect(
+      artifactCanTogglePreviewSource({ isHtml: false, isMarkdown: false })
     ).toBe(false);
   });
 });
@@ -50,7 +35,7 @@ describe("artifact panel header", () => {
     expect(artifactPanelHeadingName("README")).toBe("README");
   });
 
-  test("labels html and markdown files", () => {
+  test("labels html, markdown, and csv files", () => {
     expect(
       artifactPanelTypeLabel({
         filename: "deck.html",
@@ -63,9 +48,15 @@ describe("artifact panel header", () => {
         mimeType: "text/markdown",
       })
     ).toBe("Markdown");
+    expect(
+      artifactPanelTypeLabel({
+        filename: "sample_customers.csv",
+        mimeType: "text/csv",
+      })
+    ).toBe("CSV");
   });
 
-  test("hides mime size and type when the preview toggle is shown", () => {
+  test("replaces mime size subtitle with type when toggle is shown", () => {
     expect(
       artifactPanelHeaderMeta({
         filename: "notes.md",
@@ -76,23 +67,12 @@ describe("artifact panel header", () => {
     ).toEqual({
       subtitle: null,
       title: "notes",
-      typeLabel: null,
+      typeLabel: "Markdown",
     });
   });
 });
 
 describe("artifact panel body class", () => {
-  test("markdown preview has comfortable reading space", () => {
-    expect(
-      artifactPanelBodyClassName({
-        isHtml: false,
-        isImage: false,
-        isMarkdown: true,
-        previewMode: "preview",
-      })
-    ).toBe("px-6 py-5");
-  });
-
   test("source view fills the panel with no padding", () => {
     expect(
       artifactPanelBodyClassName({
@@ -112,10 +92,10 @@ describe("artifact panel body class", () => {
     ).toBe("flex flex-col overflow-hidden p-0");
     expect(
       artifactPanelBodyClassName({
-        editing: true,
         isHtml: false,
         isImage: false,
-        isMarkdown: true,
+        isMarkdown: false,
+        isSpreadsheet: true,
         previewMode: "preview",
       })
     ).toBe("flex flex-col overflow-hidden p-0");
