@@ -1,8 +1,13 @@
-import { createClient } from "@nakama/client";
+import { join } from "node:path";
+import { NakamaClient } from "@nakama/client";
+import { installErrorHandlers, installErrorTrackingSink } from "@nakama/core";
+import { hasActiveStreams } from "@nakama/core/channel-active-stream";
 import {
   ChannelOrgStore,
   getChannelOrgSelectionPath,
 } from "@nakama/core/channel-org";
+import { ChannelSessionStore } from "@nakama/core/channel-session-store";
+import { getDiscordConfigDir } from "@nakama/core/discord-config";
 import {
   clearDiscordWorkerHeartbeat,
   isHeartbeatAlive,
@@ -15,12 +20,13 @@ import {
 } from "@nakama/core/ensure-server";
 import { loadLocalAuthToken } from "@nakama/core/local-auth";
 import { resolveWebPublicUrl } from "@nakama/core/runtime";
-import { hasActiveStreams } from "./active-stream";
 import { DiscordAuthStore } from "./auth-store";
 import { createBot } from "./bot";
 import { loadConfig } from "./config";
-import { SessionStore } from "./session-store";
 import { ThreadStore } from "./thread-store";
+
+installErrorHandlers("worker:discord");
+void installErrorTrackingSink();
 
 let spawnedChild: Bun.Subprocess | null = null;
 let clientStop: (() => void) | null = null;
@@ -60,7 +66,7 @@ try {
   const { serverUrl, spawnedChild: child } = await ensureServerRunning();
   spawnedChild = child;
 
-  const client = createClient({
+  const client = new NakamaClient({
     authToken:
       (await loadLocalAuthToken("discord@nakama.internal")) ?? undefined,
     baseUrl: serverUrl,
@@ -86,7 +92,9 @@ try {
     process.exit(1);
   }
 
-  const sessionStore = new SessionStore();
+  const sessionStore = new ChannelSessionStore(
+    join(getDiscordConfigDir(), "chat-sessions.json")
+  );
   await sessionStore.load();
 
   const threadStore = new ThreadStore();

@@ -9,7 +9,6 @@ import type {
   ThinkingEffort,
 } from "@nakama/core/contract";
 import { MAX_IMAGE_BYTES } from "@nakama/core/message-content";
-import type { ChatStatus, FileUIPart } from "ai";
 import {
   Add01Icon,
   ArrowUp02Icon,
@@ -59,6 +58,7 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
+import type { ChatStatus, FileUIPart } from "@/lib/ai-ui-types";
 import {
   type ComposerSlashSuggestion,
   filterComposerSlashSuggestions,
@@ -519,6 +519,8 @@ function ChatComposerFullFooter({
           <div className="min-w-[4.5rem] shrink overflow-hidden">
             <PromptInputSelect
               disabled={
+                busy ||
+                disabled ||
                 !props.providerModelGroups.some(
                   (group) => group.models.length > 0
                 )
