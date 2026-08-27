@@ -350,6 +350,70 @@ export interface SetupRestoreDataImportResponse
   requiresRestart: boolean;
 }
 
+/**
+ * Single-profile "pack" portability, distinct from full-root `nakama-export`.
+ * Contains only one profile's portable workspace + name-based assignment
+ * references — never provider keys, MCP config, or Composio connections.
+ */
+export interface ProfilePackSkippedItem {
+  path: string;
+  reason: string;
+}
+
+export interface ProfilePackCustomTool {
+  description: string;
+  handlerConfig: unknown;
+  handlerType: "javascript" | "python";
+  name: string;
+}
+
+export interface ProfilePackMeta {
+  bundledSkillNames: string[];
+  composioToolkitSlugs: string[];
+  customTools?: ProfilePackCustomTool[];
+  mcpServerNames: string[];
+  model: string | null;
+  name: string;
+  profileSkillNames: string[];
+  skillsCuratorConsolidateEnabled: boolean | null;
+  skillsPostTurnReview: boolean | null;
+  skillsWriteApproval: boolean | null;
+  systemPrompt: string;
+  thinkingEffort: ThinkingEffort | null;
+  thinkingEnabled: boolean | null;
+  toolNames: string[];
+}
+
+export interface ProfilePackManifest {
+  apiVersion: typeof NAKAMA_API_VERSION;
+  createdAt: string;
+  kind: "nakama-profile-export";
+  meta: ProfilePackMeta;
+  skipped: ProfilePackSkippedItem[];
+  sourceProfileId: string;
+  topLevelPaths: string[];
+  version: number;
+}
+
+export interface ProfilePackPreviewResponse {
+  manifest: ProfilePackManifest;
+  plannedName: string;
+  skippedAssignments: ProfilePackSkippedItem[];
+  topLevelPaths: string[];
+}
+
+export interface ProfilePackImportRequest {
+  confirm: boolean;
+  data: string;
+  name?: string;
+}
+
+export interface ProfilePackImportResponse {
+  manifest: ProfilePackManifest;
+  profileId: string;
+  skippedAssignments: ProfilePackSkippedItem[];
+}
+
 export interface AuthCredentialsRequest {
   email: string;
   password: string;
@@ -1424,8 +1488,6 @@ export interface CustomModelEntry {
   supportsVision?: boolean;
 }
 
-export type OpenAICompatibleApi = "chat_completions" | "responses";
-
 export interface ProviderModelOption {
   contextWindow?: number;
   default?: boolean;
@@ -1442,7 +1504,6 @@ export interface ProviderModelOption {
 }
 
 export interface ProviderInstanceSummary {
-  apiFormat?: OpenAICompatibleApi | null;
   baseUrl?: string | null;
   createdAt: string;
   customModels?: CustomModelEntry[];
@@ -1452,6 +1513,7 @@ export interface ProviderInstanceSummary {
   label: string;
   modelCount: number;
   type: ProviderName;
+  wireApi?: WireApi | null;
 }
 
 export interface ListProvidersResponse {
@@ -1460,7 +1522,6 @@ export interface ListProvidersResponse {
 }
 
 export interface CreateProviderRequest {
-  apiFormat?: OpenAICompatibleApi;
   apiKey: string;
   baseUrl?: string;
   customModels?: CustomModelEntry[];
@@ -1468,6 +1529,7 @@ export interface CreateProviderRequest {
   label?: string;
   model?: string;
   type: ProviderName;
+  wireApi?: WireApi;
 }
 
 export interface CreateProviderResponse {
@@ -1477,12 +1539,12 @@ export interface CreateProviderResponse {
 }
 
 export interface UpdateProviderRequest {
-  apiFormat?: OpenAICompatibleApi;
   apiKey?: string;
   baseUrl?: string;
   customModels?: CustomModelEntry[];
   hostMode?: OllamaHostMode;
   label?: string;
+  wireApi?: WireApi;
 }
 
 export interface UpdateProviderResponse {
@@ -1515,7 +1577,6 @@ export interface DiscoverModelsRequest {
 }
 
 export interface ConfigureProviderRequest {
-  apiFormat?: OpenAICompatibleApi;
   apiKey: string;
   baseUrl?: string;
   customModels?: CustomModelEntry[];
@@ -1870,18 +1931,6 @@ export interface DeleteArtifactResponse {
   profileId: string;
 }
 
-export interface UpdateArtifactFileRequest {
-  content: string;
-}
-
-export interface UpdateArtifactFileResponse {
-  filename: string;
-  mimeType: string;
-  profileId: string;
-  sizeBytes: number;
-  updatedAt: string;
-}
-
 export interface PublishArtifactShareRequest {
   /** Public web origin for minting share URLs (workers; browsers send Origin). */
   clientOrigin?: string;
@@ -1993,6 +2042,12 @@ export type ProviderName =
   | "xai";
 
 export type OllamaHostMode = "local" | "cloud";
+
+/**
+ * Which OpenAI API an endpoint speaks. Some hosts serve `/responses` only, so
+ * this is a property of the endpoint and cannot be inferred from the model id.
+ */
+export type WireApi = "chat" | "responses";
 
 export type GenerateTextFormat = "json" | "text";
 

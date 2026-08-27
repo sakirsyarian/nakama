@@ -12,7 +12,7 @@ import {
   type OllamaHostMode,
   ollamaRequiresApiKey,
   type ProviderInstance,
-  parseOpenAICompatibleApi,
+  parseWireApi,
   resolveOllamaHostMode,
   type UserConfig,
   validateCustomModels,
@@ -45,10 +45,6 @@ export function toProviderInstanceSummary(
   modelCount: number
 ): ProviderInstanceSummary {
   return {
-    apiFormat:
-      instance.type === "openai_compatible"
-        ? parseOpenAICompatibleApi(instance.apiFormat)
-        : null,
     baseUrl: instance.baseUrl ?? null,
     hasApiKey:
       Boolean(instance.apiKey.trim()) ||
@@ -59,6 +55,7 @@ export function toProviderInstanceSummary(
     id: instance.id,
     label: normalizeProviderInstanceLabel(instance.type, instance.label, []),
     type: instance.type,
+    wireApi: instance.wireApi ?? null,
     ...(instance.customModels?.length
       ? { customModels: instance.customModels }
       : {}),
@@ -235,16 +232,12 @@ export function applyProviderInstanceUpdate(
     next.baseUrl = normalized;
   }
 
-  if (request.apiFormat !== undefined) {
-    if (instance.type !== "openai_compatible") {
-      throw new Error("API format is only supported by OpenAI Compatible.");
-    }
-
-    next.apiFormat = parseOpenAICompatibleApi(request.apiFormat);
-  }
-
   if (request.hostMode !== undefined && instance.type === "ollama") {
     next.hostMode = request.hostMode;
+  }
+
+  if (request.wireApi !== undefined && instance.type === "openai_compatible") {
+    next.wireApi = parseWireApi(request.wireApi);
   }
 
   if (request.customModels !== undefined) {
@@ -290,7 +283,7 @@ function buildProviderFieldsFromRequest(
   request: CreateProviderRequest
 ): Pick<
   ProviderInstance,
-  "apiFormat" | "baseUrl" | "customModels" | "label" | "hostMode"
+  "baseUrl" | "customModels" | "label" | "hostMode" | "wireApi"
 > {
   const type = request.type;
 
@@ -362,10 +355,10 @@ function buildProviderFieldsFromRequest(
     }
 
     return {
-      apiFormat: parseOpenAICompatibleApi(request.apiFormat),
       baseUrl,
       customModels,
       label,
+      wireApi: parseWireApi(request.wireApi),
     };
   }
 

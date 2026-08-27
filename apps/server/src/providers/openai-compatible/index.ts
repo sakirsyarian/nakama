@@ -1,16 +1,15 @@
 import type {
   ChatCompletionResult,
   ChatMessage,
-  CustomModelEntry,
   GenerateChatInput,
   GenerateTextInput,
   GenerateTextResult,
   LlmToolDefinition,
-  OpenAICompatibleApi,
   ProviderChatOptions,
   ProviderClient,
   StreamChatHandlers,
   ToolCall,
+  WireApi,
 } from "@nakama/core";
 import { fetchWithoutIdleTimeout, normalizeBaseUrl } from "@nakama/core";
 import OpenAI from "openai";
@@ -32,14 +31,14 @@ import {
 } from "../shared";
 
 export interface OpenAICompatibleProviderOptions {
-  apiFormat?: OpenAICompatibleApi;
   apiKey: string;
   baseUrl: string;
-  customModels?: CustomModelEntry[];
   displayName: string;
   model: string;
   providerName?: ProviderClient["name"];
   supportsThinking: boolean;
+  /** `responses` targets `/responses`; anything else stays on `/chat/completions`. */
+  wireApi?: WireApi;
 }
 
 interface PendingToolCall {
@@ -55,7 +54,6 @@ export function createOpenAICompatibleProvider(
   const model = options.model;
   const baseUrl = normalizeBaseUrl(options.baseUrl);
   const apiKey = options.apiKey || "not-needed";
-  const apiFormat = options.apiFormat ?? "chat_completions";
   const client = new OpenAI({
     apiKey,
     baseURL: baseUrl,
@@ -63,19 +61,19 @@ export function createOpenAICompatibleProvider(
     maxRetries: 0,
     timeout: 600_000,
   });
+  const useResponsesApi = options.wireApi === "responses";
 
   return {
     generateChat(input: GenerateChatInput) {
-      if (apiFormat === "responses") {
+      if (useResponsesApi) {
         return generateOpenAIResponsesChat({
           apiKey,
           baseUrl,
-          customModels: options.customModels,
-          handlers: { onChunk: () => {} },
           input,
           label,
           model,
-          stream: true,
+          stream: false,
+          supportsThinking: options.supportsThinking,
         });
       }
 
@@ -90,23 +88,35 @@ export function createOpenAICompatibleProvider(
         tools: input.tools,
       });
     },
-    generateText(input: GenerateTextInput) {
+    async generateText(input: GenerateTextInput) {
       const useJson = (input.format ?? "json") === "json";
       const system = useJson
         ? input.system
         : `${input.system}\n\nReturn only the requested text. No JSON, keys, labels, markdown fences, or surrounding quotes.`;
 
-      if (apiFormat === "responses") {
-        return requestResponsesText({
+      if (useResponsesApi) {
+        const result = await generateOpenAIResponsesChat({
           apiKey,
           baseUrl,
-          customModels: options.customModels,
-          input,
+          input: {
+            messages: [{ content: input.prompt, role: "user" }],
+            system,
+          },
+          jsonOutput: useJson,
           label,
           model,
-          system,
-          useJson,
+          stream: false,
         });
+        const content = result.content.trim();
+
+        if (!content) {
+          throw new Error(`${label} returned an empty response.`);
+        }
+
+        return {
+          content,
+          ...(result.usage ? { usage: result.usage } : {}),
+        };
       }
 
       return requestCompletion(client, label, {
@@ -120,16 +130,16 @@ export function createOpenAICompatibleProvider(
     },
     name: options.providerName ?? "openai_compatible",
     streamChat(input: GenerateChatInput, handlers: StreamChatHandlers) {
-      if (apiFormat === "responses") {
+      if (useResponsesApi) {
         return generateOpenAIResponsesChat({
           apiKey,
           baseUrl,
-          customModels: options.customModels,
           handlers,
           input,
           label,
           model,
           stream: true,
+          supportsThinking: options.supportsThinking,
         });
       }
 
@@ -148,37 +158,6 @@ export function createOpenAICompatibleProvider(
         tools: input.tools,
       });
     },
-  };
-}
-
-async function requestResponsesText(options: {
-  apiKey: string;
-  baseUrl: string;
-  customModels?: CustomModelEntry[];
-  input: GenerateTextInput;
-  label: string;
-  model: string;
-  system: string;
-  useJson: boolean;
-}): Promise<GenerateTextResult> {
-  const result = await generateOpenAIResponsesChat({
-    apiKey: options.apiKey,
-    baseUrl: options.baseUrl,
-    customModels: options.customModels,
-    handlers: { onChunk: () => {} },
-    input: {
-      messages: [{ content: options.input.prompt, role: "user" }],
-      system: options.system,
-    },
-    label: options.label,
-    model: options.model,
-    responseFormat: options.useJson ? "json_object" : undefined,
-    stream: true,
-  });
-
-  return {
-    content: result.content,
-    ...(result.usage ? { usage: result.usage } : {}),
   };
 }
 

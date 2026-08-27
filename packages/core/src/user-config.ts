@@ -6,7 +6,7 @@ import {
   isValidBaseUrl,
   normalizeBaseUrl,
   parseCustomModelsJson,
-  parseOpenAICompatibleApi,
+  parseWireApi,
   serializeCustomModels,
   validateDisplayName,
 } from "./compatible-provider-config";
@@ -41,7 +41,6 @@ export {
 } from "./provider-resolution";
 
 export interface ProviderInstance {
-  apiFormat?: import("./contract").OpenAICompatibleApi;
   apiKey: string;
   baseUrl?: string;
   createdAt: string;
@@ -50,6 +49,7 @@ export interface ProviderInstance {
   id: string;
   label: string;
   type: UserProviderName;
+  wireApi?: import("./contract").WireApi;
 }
 
 export interface UserConfig {
@@ -618,10 +618,6 @@ function loadProvidersFromSections(
 
     const label = normalizeProviderInstanceLabel(type, values.label, providers);
     const apiKey = values.api_key ?? "";
-    const apiFormat =
-      type === "openai_compatible"
-        ? parseOpenAICompatibleApi(values.api_format)
-        : undefined;
     const baseUrl = values.base_url?.trim()
       ? normalizeBaseUrl(values.base_url)
       : undefined;
@@ -638,6 +634,8 @@ function loadProvidersFromSections(
       type === "ollama"
         ? (parseOllamaHostMode(values.host_mode) ?? undefined)
         : undefined;
+    const wireApi =
+      type === "openai_compatible" ? parseWireApi(values.wire_api) : undefined;
     const createdAt = values.created_at?.trim() || new Date(0).toISOString();
 
     providers.push({
@@ -645,9 +643,9 @@ function loadProvidersFromSections(
       id,
       label,
       type,
-      ...(apiFormat ? { apiFormat } : {}),
       ...(baseUrl ? { baseUrl } : {}),
       ...(hostMode ? { hostMode } : {}),
+      ...(wireApi ? { wireApi } : {}),
       ...(customModels ? { customModels } : {}),
       createdAt,
     });
@@ -672,12 +670,12 @@ function buildProviderSectionValues(
     values.base_url = normalizeBaseUrl(provider.baseUrl);
   }
 
-  if (provider.type === "openai_compatible") {
-    values.api_format = parseOpenAICompatibleApi(provider.apiFormat);
-  }
-
   if (provider.type === "ollama" && provider.hostMode) {
     values.host_mode = provider.hostMode;
+  }
+
+  if (provider.type === "openai_compatible" && provider.wireApi) {
+    values.wire_api = provider.wireApi;
   }
 
   if (provider.customModels?.length) {

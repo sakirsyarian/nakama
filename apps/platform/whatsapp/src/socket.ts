@@ -8,6 +8,7 @@ import {
   type WASocket,
 } from "@whiskeysockets/baileys";
 import { usePrivateMultiFileAuthState } from "./auth-state";
+import { createBaileysLogger } from "./baileys-logger";
 import {
   extractInboundText,
   isPrivateWhatsAppChat,
@@ -37,6 +38,8 @@ export async function createWhatsAppSocket(
 
   let socket: WASocket | null = null;
   let stopped = false;
+  let generation = 0;
+  let reconnectAttempt = 0;
   let loggedMissingTextPayload = false;
   const baileysLogger = createBaileysLogger();
 
@@ -49,7 +52,12 @@ export async function createWhatsAppSocket(
         return;
       }
 
-      socket = makeWASocket({
+      const myGen = ++generation;
+      const previous = socket;
+      socket = null;
+      previous?.end(undefined);
+
+      const next = makeWASocket({
         auth: state,
         browser: ["Nakama", "Chrome", "4.0.0"] as [string, string, string],
         connectTimeoutMs: 30_000,
@@ -63,7 +71,18 @@ export async function createWhatsAppSocket(
         version,
       });
 
-      socket.ev.on("connection.update", async (update) => {
+      if (myGen !== generation || stopped) {
+        next.end(undefined);
+        return;
+      }
+
+      socket = next;
+
+      next.ev.on("connection.update", async (update) => {
+        if (myGen !== generation) {
+          return;
+        }
+
         const { connection, lastDisconnect, qr } = update;
 
         if (qr) {
@@ -71,6 +90,7 @@ export async function createWhatsAppSocket(
         }
 
         if (connection === "open") {
+          reconnectAttempt = 0;
           const me = state.creds.me;
           if (me?.id) {
             deps.onConnected?.({ id: me.id, lid: me.lid ?? null });
@@ -78,9 +98,11 @@ export async function createWhatsAppSocket(
         }
 
         if (connection === "close") {
+          generation += 1;
           deps.onDisconnected?.();
           const statusCode = lastDisconnect?.error?.message
-            ? (lastDisconnect.error as any)?.output?.statusCode
+            ? (lastDisconnect.error as { output?: { statusCode?: number } })
+                .output?.statusCode
             : lastDisconnect?.statusCode;
           const shouldReconnect =
             statusCode !== DisconnectReason.loggedOut && !stopped;
@@ -89,15 +111,29 @@ export async function createWhatsAppSocket(
             `WhatsApp disconnected (code: ${statusCode}).${shouldReconnect ? " Reconnecting..." : ""}`
           );
 
-          if (shouldReconnect) {
-            await handle.start();
+          if (!shouldReconnect) {
+            return;
           }
+
+          const waitMs = Math.min(
+            30_000,
+            1000 * 2 ** Math.min(reconnectAttempt, 5)
+          );
+          reconnectAttempt += 1;
+          await new Promise<void>((resolve) => {
+            setTimeout(resolve, waitMs);
+          });
+          if (stopped) {
+            return;
+          }
+
+          await handle.start();
         }
       });
 
-      socket.ev.on("creds.update", saveCreds);
+      next.ev.on("creds.update", saveCreds);
 
-      socket.ev.on("messages.upsert", async (m) => {
+      next.ev.on("messages.upsert", async (m) => {
         console.log(
           `WhatsApp messages.upsert type=${m.type} count=${m.messages.length}`
         );
@@ -157,6 +193,7 @@ export async function createWhatsAppSocket(
     },
     stop() {
       stopped = true;
+      generation += 1;
       if (socket) {
         socket.end(undefined);
         socket = null;
@@ -198,21 +235,4 @@ function summarizeMissingTextPayload(msg: {
   };
 
   return JSON.stringify(summary);
-}
-
-// ponytail: keep Baileys on silent; worker logs what matters itself
-function createBaileysLogger() {
-  const noop = () => {};
-  const logger = {
-    child: () => logger,
-    debug: noop,
-    error: console.error.bind(console),
-    fatal: console.error.bind(console),
-    info: noop,
-    level: "silent",
-    trace: noop,
-    warn: console.warn.bind(console),
-  };
-
-  return logger;
 }

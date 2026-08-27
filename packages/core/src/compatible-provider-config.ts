@@ -1,23 +1,17 @@
-import type {
-  CustomModelEntry,
-  OpenAICompatibleApi,
-  ProviderName,
-} from "./contract";
+import type { CustomModelEntry, ProviderName, WireApi } from "./contract";
 
 export const DISPLAY_NAME_MAX_LENGTH = 64;
-export const DEFAULT_OPENAI_COMPATIBLE_API: OpenAICompatibleApi =
-  "chat_completions";
 
-export function parseOpenAICompatibleApi(value: unknown): OpenAICompatibleApi {
-  if (value === undefined || value === null || value === "") {
-    return DEFAULT_OPENAI_COMPATIBLE_API;
-  }
-
-  if (value === "chat_completions" || value === "responses") {
-    return value;
-  }
-
-  throw new Error("API format must be chat_completions or responses.");
+/**
+ * Endpoints that serve `/responses` have to be told apart from the ones that
+ * serve `/chat/completions`, and the model id does not say which is which.
+ * Anything unrecognised stays on chat, so a bad value cannot take an endpoint
+ * offline.
+ */
+export function parseWireApi(value: unknown): WireApi | undefined {
+  return typeof value === "string" && value.trim() === "responses"
+    ? "responses"
+    : undefined;
 }
 
 export function normalizeBaseUrl(baseUrl: string): string {

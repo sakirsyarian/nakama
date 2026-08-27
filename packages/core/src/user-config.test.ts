@@ -91,7 +91,6 @@ describe("user config multi-provider", () => {
           type: "openai",
         },
         {
-          apiFormat: "responses",
           apiKey: "",
           baseUrl: "http://localhost:11434/v1",
           createdAt: "2026-06-07T11:00:00.000Z",
@@ -106,6 +105,7 @@ describe("user config multi-provider", () => {
           id: compatibleId,
           label: "Ollama",
           type: "openai_compatible",
+          wireApi: "responses",
         },
       ],
       thinkingEffort: "medium",
@@ -116,18 +116,17 @@ describe("user config multi-provider", () => {
     const raw = await readFile(getUserConfigPath(), "utf8");
     expect(raw).toContain(`[provider.${openaiId}]`);
     expect(raw).toContain("label=Ollama");
-    expect(raw).toContain("api_format=responses");
     expect(raw).toContain("default_provider_id=");
 
     const loaded = await loadUserConfig();
     expect(loaded?.providers).toHaveLength(2);
     expect(loaded?.defaultProviderId).toBe(openaiId);
     expect(loaded?.providers[1]?.baseUrl).toBe("http://localhost:11434/v1");
-    expect(loaded?.providers[1]?.apiFormat).toBe("responses");
     expect(loaded?.providers[1]?.customModels?.[0]?.id).toBe("llama3.2");
     expect(loaded?.providers[1]?.customModels?.[0]?.supportsThinking).toBe(
       true
     );
+    expect(loaded?.providers[1]?.wireApi).toBe("responses");
   });
 
   test("round-trips cerebras models_json with capability flags", async () => {

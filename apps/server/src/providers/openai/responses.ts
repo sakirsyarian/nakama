@@ -10,7 +10,6 @@ import type {
 import {
   fetchWithoutIdleTimeout,
   isMessageContentPartArray,
-  normalizeBaseUrl,
   toOpenAIResponsesUserContent,
   WEB_SEARCH_TOOL_NAME,
 } from "@nakama/core";
@@ -25,30 +24,38 @@ import { openAIModelSupportsThinking } from "./thinking";
 
 type ResponseItem = Record<string, unknown>;
 
+const DEFAULT_OPENAI_RESPONSES_BASE_URL = "https://api.openai.com/v1";
+
 export async function generateOpenAIResponsesChat(options: {
   apiKey: string;
+  /** Endpoint root, without `/responses`. Defaults to the OpenAI API. */
   baseUrl?: string;
-  label?: string;
   model: string;
   input: GenerateChatInput;
+  /** Prefixes request errors. Defaults to the OpenAI provider label. */
+  label?: string;
   stream: boolean;
   handlers?: StreamChatHandlers;
   customModels?: CustomModelEntry[];
-  responseFormat?: "json_object";
+  /** Asks the model for a JSON object, mirroring chat `response_format`. */
+  jsonOutput?: boolean;
+  /**
+   * Overrides the OpenAI model-id heuristic. Compatible endpoints serve model
+   * ids the heuristic has never seen, and it answers false for those.
+   */
+  supportsThinking?: boolean;
 }): Promise<ChatCompletionResult> {
-  const baseUrl = normalizeBaseUrl(
-    options.baseUrl ?? "https://api.openai.com/v1"
-  );
-  const label = options.label?.trim() || "OpenAI";
+  const label = options.label ?? "OpenAI";
+  const baseUrl = options.baseUrl ?? DEFAULT_OPENAI_RESPONSES_BASE_URL;
   const body = await buildResponsesRequestBody(
     options.model,
     options.input,
     options.stream,
     options.customModels,
-    options.responseFormat
+    options.supportsThinking,
+    options.jsonOutput
   );
-  const endpoint = `${baseUrl}/responses`;
-  const response = await fetchWithoutIdleTimeout(endpoint, {
+  const response = await fetchWithoutIdleTimeout(`${baseUrl}/responses`, {
     body: JSON.stringify(body),
     headers: {
       Authorization: `Bearer ${options.apiKey}`,
@@ -60,7 +67,7 @@ export async function generateOpenAIResponsesChat(options: {
 
   if (!response.ok) {
     throw new Error(
-      `${label} request to ${endpoint} failed (${response.status}): ${await response.text()}`
+      `${label} request failed (${response.status}): ${await response.text()}`
     );
   }
 
@@ -69,7 +76,7 @@ export async function generateOpenAIResponsesChat(options: {
       throw new Error(`${label} returned an empty stream.`);
     }
 
-    return readOpenAIResponsesStream(response.body, options.handlers, label);
+    return readOpenAIResponsesStream(response.body, options.handlers);
   }
 
   const payload = (await response.json()) as {
@@ -83,8 +90,7 @@ export async function generateOpenAIResponsesChat(options: {
   return parseResponsesOutput(
     payload.output ?? [],
     options.handlers,
-    payload.usage,
-    label
+    payload.usage
   );
 }
 
@@ -93,7 +99,8 @@ async function buildResponsesRequestBody(
   input: GenerateChatInput,
   stream: boolean,
   customModels?: CustomModelEntry[],
-  responseFormat?: "json_object"
+  supportsThinking?: boolean,
+  jsonOutput?: boolean
 ) {
   const tools = buildResponsesTools(
     input.tools,
@@ -104,10 +111,14 @@ async function buildResponsesRequestBody(
     input: await toResponsesInput(input.messages),
     instructions: input.system,
     model,
-    store: false,
     ...(tools.length > 0 ? { tools } : {}),
-    ...buildOpenAIReasoningRequest(model, input, customModels),
-    ...(responseFormat ? { text: { format: { type: responseFormat } } } : {}),
+    ...buildOpenAIReasoningRequest(
+      model,
+      input,
+      customModels,
+      supportsThinking
+    ),
+    ...(jsonOutput ? { text: { format: { type: "json_object" } } } : {}),
     ...(stream ? { stream: true } : {}),
   };
 }
@@ -115,14 +126,13 @@ async function buildResponsesRequestBody(
 function buildOpenAIReasoningRequest(
   model: string,
   input: GenerateChatInput,
-  customModels?: CustomModelEntry[]
+  customModels?: CustomModelEntry[],
+  supportsThinking?: boolean
 ): Record<string, unknown> {
-  if (
-    !(
-      input.providerOptions?.thinking?.enabled &&
-      openAIModelSupportsThinking(model, customModels)
-    )
-  ) {
+  const modelSupportsThinking =
+    supportsThinking ?? openAIModelSupportsThinking(model, customModels);
+
+  if (!(input.providerOptions?.thinking?.enabled && modelSupportsThinking)) {
     return {};
   }
 
@@ -260,8 +270,7 @@ function parseResponsesOutput(
     input_tokens?: number;
     output_tokens?: number;
     total_tokens?: number;
-  },
-  label = "OpenAI"
+  }
 ): ChatCompletionResult {
   const textParts: string[] = [];
   const thinkingParts: string[] = [];
@@ -319,7 +328,7 @@ function parseResponsesOutput(
   });
 
   if (!content && toolCalls.length === 0 && !providerContent?.length) {
-    throw new Error(`${label} returned an empty response.`);
+    throw new Error("OpenAI returned an empty response.");
   }
 
   return {
@@ -385,8 +394,7 @@ function emitWebSearchToolEvent(
 
 async function readOpenAIResponsesStream(
   body: ReadableStream<Uint8Array>,
-  handlers?: StreamChatHandlers,
-  label = "OpenAI"
+  handlers?: StreamChatHandlers
 ): Promise<ChatCompletionResult> {
   let content = "";
   let thinking = "";
@@ -449,7 +457,7 @@ async function readOpenAIResponsesStream(
     output.push(...outputIndex.values());
   }
 
-  const parsed = parseResponsesOutput(output, handlers, undefined, label);
+  const parsed = parseResponsesOutput(output, handlers);
 
   const thinkingText = thinking.trim() || parsed.assistantMessage.thinking;
 

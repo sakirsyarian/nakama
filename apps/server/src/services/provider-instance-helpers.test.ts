@@ -208,20 +208,31 @@ describe("resolveProfileProviderSelection", () => {
 });
 
 describe("applyProviderInstanceUpdate", () => {
-  test("updates the API format on OpenAI Compatible providers", () => {
+  test("stores wireApi only for a recognised value on a compatible instance", () => {
     const instance = createProviderInstance({
-      apiFormat: "chat_completions",
-      baseUrl: "https://api.example.com/v1",
-      id: "compatible-1",
-      label: "Example",
+      baseUrl: "https://endpoint.test/v1",
+      id: "compat-1",
+      label: "Endpoint",
       type: "openai_compatible",
+      wireApi: "responses",
     });
 
-    const updated = applyProviderInstanceUpdate(instance, {
-      apiFormat: "responses",
-    });
-
-    expect(updated.apiFormat).toBe("responses");
+    // The request body is passthrough JSON, so anything can arrive here. An
+    // unrecognised value falls back to chat rather than being persisted.
+    expect(
+      applyProviderInstanceUpdate(instance, {
+        wireApi: "nonsense" as never,
+      }).wireApi
+    ).toBeUndefined();
+    expect(
+      applyProviderInstanceUpdate(instance, { wireApi: "responses" }).wireApi
+    ).toBe("responses");
+    expect(
+      applyProviderInstanceUpdate(
+        createProviderInstance({ id: "o-1", label: "OpenAI", type: "openai" }),
+        { wireApi: "responses" }
+      ).wireApi
+    ).toBeUndefined();
   });
 
   test("preserves supportsThinking on compatible custom models", () => {
@@ -342,37 +353,6 @@ describe("applyProviderInstanceUpdate", () => {
 });
 
 describe("buildProviderInstanceFromCreateRequest", () => {
-  test("defaults OpenAI Compatible providers to chat completions", () => {
-    const instance = buildProviderInstanceFromCreateRequest(
-      {
-        apiKey: "",
-        baseUrl: "https://api.example.com/v1",
-        customModels: [{ id: "example-model" }],
-        label: "Example",
-        type: "openai_compatible",
-      },
-      []
-    );
-
-    expect(instance.apiFormat).toBe("chat_completions");
-  });
-
-  test("persists the Responses API format for OpenAI Compatible providers", () => {
-    const instance = buildProviderInstanceFromCreateRequest(
-      {
-        apiFormat: "responses",
-        apiKey: "",
-        baseUrl: "https://api.example.com/v1",
-        customModels: [{ id: "example-model" }],
-        label: "Example",
-        type: "openai_compatible",
-      },
-      []
-    );
-
-    expect(instance.apiFormat).toBe("responses");
-  });
-
   test("persists a Cloudflare Workers AI base URL on the instance", () => {
     const instance = buildProviderInstanceFromCreateRequest(
       {

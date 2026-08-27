@@ -1,4 +1,4 @@
-import type { OpenAICompatibleApi } from "@nakama/core/contract";
+import type { WireApi } from "@nakama/core/contract";
 import { BrowsableModelFields } from "@/components/BrowsableModelFields";
 import type { ModelListRow } from "@/components/ModelListEditor";
 import { ModelsBrowseList } from "@/components/ModelsBrowseList";
@@ -14,7 +14,6 @@ import {
 } from "@/components/ui/select";
 
 interface CustomProviderFieldsProps {
-  apiFormat?: OpenAICompatibleApi;
   apiKey: string;
   baseUrl: string;
   baseUrlError?: string | null;
@@ -32,17 +31,18 @@ interface CustomProviderFieldsProps {
   hostMode?: "local" | "cloud";
   identityReadOnly?: boolean;
   modelsError?: string | null;
-  onApiFormatChange?: (value: OpenAICompatibleApi) => void;
   onBaseUrlChange: (value: string) => void;
   onCustomModelsChange: (models: ModelListRow[]) => void;
   onDisplayNameChange: (value: string) => void;
+  /** Omitted for endpoints that are known to speak chat/completions, like Ollama. */
+  onWireApiChange?: (value: WireApi) => void;
   providerInstanceId?: string;
   remoteProvider?: "ollama" | "openai_compatible";
   showModelsEditor?: boolean;
+  wireApi?: WireApi;
 }
 
 export function CustomProviderFields({
-  apiFormat,
   displayName,
   baseUrl,
   apiKey,
@@ -59,10 +59,11 @@ export function CustomProviderFields({
   providerInstanceId,
   hostMode,
   browseLabel,
+  wireApi = "chat",
   onDisplayNameChange,
   onBaseUrlChange,
-  onApiFormatChange,
   onCustomModelsChange,
+  onWireApiChange,
 }: CustomProviderFieldsProps) {
   const identityDisabled = disabled || identityReadOnly;
   const resolvedBrowseLabel =
@@ -120,31 +121,23 @@ export function CustomProviderFields({
         </InputGroup>
       </FormField>
 
-      {apiFormat && onApiFormatChange ? (
-        <FormField
-          density={density}
-          id="provider-api-format"
-          label="API format"
-        >
+      {onWireApiChange ? (
+        <FormField density={density} id="provider-wire-api" label="API">
           <Select
             disabled={disabled}
-            onValueChange={(value) => {
-              if (value === "chat_completions" || value === "responses") {
-                onApiFormatChange(value);
-              }
-            }}
-            value={apiFormat}
+            onValueChange={(value) =>
+              onWireApiChange(value === "responses" ? "responses" : "chat")
+            }
+            value={wireApi}
           >
-            <SelectTrigger className="w-full" id="provider-api-format">
+            <SelectTrigger className="w-full" id="provider-wire-api">
               <SelectValue>
-                {apiFormat === "responses"
-                  ? "Responses API"
-                  : "Chat Completions"}
+                {wireApi === "responses" ? "Responses" : "Chat completions"}
               </SelectValue>
             </SelectTrigger>
             <SelectContent>
-              <SelectItem value="chat_completions">Chat Completions</SelectItem>
-              <SelectItem value="responses">Responses API</SelectItem>
+              <SelectItem value="chat">Chat completions</SelectItem>
+              <SelectItem value="responses">Responses</SelectItem>
             </SelectContent>
           </Select>
         </FormField>

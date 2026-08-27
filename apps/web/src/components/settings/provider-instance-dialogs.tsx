@@ -1,7 +1,4 @@
-import type {
-  OpenAICompatibleApi,
-  ProviderInstanceSummary,
-} from "@nakama/core/contract";
+import type { ProviderInstanceSummary, WireApi } from "@nakama/core/contract";
 import { ViewIcon, ViewOffIcon } from "hugeicons-react";
 import type { ReactNode } from "react";
 import { CustomProviderFields } from "@/components/CustomProviderFields";
@@ -158,7 +155,6 @@ function ProviderModelsDialogShell({
 }
 
 export function ProviderCompatibleEditDialog({
-  apiFormat,
   open,
   busy,
   dialogError,
@@ -174,11 +170,11 @@ export function ProviderCompatibleEditDialog({
   onOpenChange,
   onDisplayNameChange,
   onBaseUrlChange,
-  onApiFormatChange,
   onCustomModelsChange,
+  onWireApiChange,
   onSave,
+  wireApi,
 }: {
-  apiFormat?: OpenAICompatibleApi;
   open: boolean;
   busy: boolean;
   dialogError: string | null;
@@ -194,9 +190,10 @@ export function ProviderCompatibleEditDialog({
   onOpenChange: (open: boolean) => void;
   onDisplayNameChange: (value: string) => void;
   onBaseUrlChange: (value: string) => void;
-  onApiFormatChange?: (value: OpenAICompatibleApi) => void;
   onCustomModelsChange: (rows: ModelListRow[]) => void;
+  onWireApiChange?: (value: WireApi) => void;
   onSave: () => void;
+  wireApi?: WireApi;
 }) {
   return (
     <ProviderModelsDialogShell
@@ -208,7 +205,6 @@ export function ProviderCompatibleEditDialog({
       title="Edit provider"
     >
       <CustomProviderFields
-        apiFormat={apiFormat}
         apiKey={apiKey}
         baseUrl={editBaseUrl}
         baseUrlError={null}
@@ -220,12 +216,13 @@ export function ProviderCompatibleEditDialog({
         displayNameError={null}
         hostMode={hostMode}
         modelsError={null}
-        onApiFormatChange={onApiFormatChange}
         onBaseUrlChange={onBaseUrlChange}
         onCustomModelsChange={onCustomModelsChange}
         onDisplayNameChange={onDisplayNameChange}
+        onWireApiChange={onWireApiChange}
         providerInstanceId={providerInstanceId}
         remoteProvider={remoteProvider}
+        wireApi={wireApi}
       />
     </ProviderModelsDialogShell>
   );

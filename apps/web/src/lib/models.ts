@@ -2,8 +2,8 @@ import type {
   ConfigureProviderRequest,
   CreateProviderRequest,
   OllamaHostMode,
-  OpenAICompatibleApi,
   ProviderModelOption,
+  WireApi,
 } from "@nakama/core/contract";
 import {
   OLLAMA_CLOUD_DEFAULT_BASE_URL,
@@ -570,7 +570,6 @@ export function getModelDisplayName(
 }
 
 export function buildCreateProviderRequest(options: {
-  apiFormat?: OpenAICompatibleApi;
   apiKey: string;
   provider: SelectedProvider;
   model?: string;
@@ -578,6 +577,7 @@ export function buildCreateProviderRequest(options: {
   baseUrl?: string;
   hostMode?: OllamaHostMode;
   customModels?: ConfigureProviderRequest["customModels"];
+  wireApi?: WireApi;
 }): CreateProviderRequest {
   const request = buildConfigureProviderRequest(options);
 
@@ -591,12 +591,11 @@ export function buildCreateProviderRequest(options: {
     ...(options.baseUrl?.trim() ? { baseUrl: options.baseUrl.trim() } : {}),
     ...(options.hostMode ? { hostMode: options.hostMode } : {}),
     ...(request.customModels ? { customModels: request.customModels } : {}),
-    ...(request.apiFormat ? { apiFormat: request.apiFormat } : {}),
+    ...(options.wireApi === "responses" ? { wireApi: options.wireApi } : {}),
   };
 }
 
 export function buildConfigureProviderRequest(options: {
-  apiFormat?: OpenAICompatibleApi;
   apiKey: string;
   provider: SelectedProvider;
   model?: string;
@@ -614,7 +613,6 @@ export function buildConfigureProviderRequest(options: {
   if (options.provider === "openai_compatible") {
     return {
       ...request,
-      apiFormat: options.apiFormat,
       baseUrl: options.baseUrl?.trim(),
       customModels: options.customModels,
       displayName: options.displayName?.trim(),
