@@ -1311,6 +1311,20 @@ export interface UpdateComposioSettingsRequest {
   apiKey?: string;
 }
 
+export interface ErrorTrackingSettingsResponse {
+  configured: boolean;
+  dsnMasked: string | null;
+}
+
+export interface UpdateErrorTrackingSettingsRequest {
+  /** Empty string clears the DSN and turns error tracking off. */
+  dsn?: string;
+}
+
+export interface SendErrorTrackingTestResponse {
+  delivered: boolean;
+}
+
 export type NotificationDestinationChannel = "telegram";
 
 export type NotificationWebhookLevel = "info" | "success" | "warning" | "error";
@@ -2244,11 +2258,6 @@ export type ComposioUserConnectionStatus =
   | "oauth_in_progress"
   | "connected"
   | "error";
-
-/** @deprecated Org catalog uses ComposioOrgToolkitStatus; user rows use ComposioUserConnectionStatus. */
-export type ComposioToolkitStatus =
-  | ComposioOrgToolkitStatus
-  | ComposioUserConnectionStatus;
 
 export type ComposioToolErrorCode =
   | "COMPOSIO_NOT_CONNECTED"

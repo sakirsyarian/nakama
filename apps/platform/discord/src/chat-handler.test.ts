@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import path from "node:path";
 import type { ChatMessage } from "@nakama/core/contract";
 import { loadDiscordConfigFile } from "@nakama/core/discord-config";
@@ -9,6 +9,7 @@ import {
   resetChatLocksForTests,
   withChatLock,
 } from "./chat-handler";
+import { TOO_MANY_IMAGES_REPLY, UNSUPPORTED_ATTACHMENT_REPLY } from "./images";
 import { SessionStore } from "./session-store";
 import {
   createDmMessage,
@@ -111,6 +112,32 @@ async function createPairedHandler(
     threadStore,
   };
 }
+
+describe("createChatHandler logging", () => {
+  test("logs message metadata without private content", async () => {
+    await withTempHome(async (homeDir) => {
+      const privateMessage = "private 🔒 message";
+      const log = spyOn(console, "log").mockImplementation(() => {});
+
+      try {
+        const { handleMessage } = await createPairedHandler(homeDir);
+        const dm = createDmMessage({ content: privateMessage });
+
+        await handleMessage(dm.message);
+
+        const output = log.mock.calls
+          .map((args) => args.map(String).join(" "))
+          .join("\n");
+        expect(output).toContain(
+          `textBytes=${Buffer.byteLength(privateMessage, "utf8")}`
+        );
+        expect(output).not.toContain(privateMessage);
+      } finally {
+        log.mockRestore();
+      }
+    });
+  });
+});
 
 describe("createChatHandler artifact delivery", () => {
   const metaJson = JSON.stringify({
@@ -1635,5 +1662,192 @@ describe("createChatHandler guild thread routing", () => {
     releaseHang();
     await first;
     expect(order).toEqual(["first-start", "second", "first-end"]);
+  });
+});
+
+describe("createChatHandler inbound images", () => {
+  test("image-only DM reaches the agent with images populated", async () => {
+    await withTempHome(async (homeDir) => {
+      const pngBytes = new Uint8Array([137, 80, 78, 71]);
+      const streamedInputs: unknown[] = [];
+      const fetchSpy = spyOn(globalThis, "fetch").mockResolvedValue(
+        new Response(pngBytes, { status: 200 })
+      );
+
+      try {
+        const { handleMessage } = await createPairedHandler(homeDir, {
+          onSendStream: async (input) => {
+            streamedInputs.push(input);
+            return "Looks like a PNG.";
+          },
+        });
+
+        const dm = createDmMessage({
+          attachments: [
+            {
+              contentType: "image/png",
+              size: pngBytes.byteLength,
+              url: "https://cdn.example/shot.png",
+            },
+          ],
+          content: "",
+          userId: "424242424242424242",
+        });
+        await handleMessage(dm.message);
+
+        expect(streamedInputs).toEqual([
+          {
+            images: [
+              {
+                data: Buffer.from(pngBytes).toString("base64"),
+                mediaType: "image/png",
+              },
+            ],
+            message: "",
+          },
+        ]);
+        expect(dm.sentMessages).toContain("Looks like a PNG.");
+        expect(
+          dm.sentMessages.some((reply) => /text messages only/i.test(reply))
+        ).toBe(false);
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    });
+  });
+
+  test("empty non-image DM still gets Text messages only.", async () => {
+    await withTempHome(async (homeDir) => {
+      const { handleMessage, calls } = await createPairedHandler(homeDir);
+      const dm = createDmMessage({
+        content: "",
+        userId: "424242424242424242",
+      });
+      await handleMessage(dm.message);
+
+      expect(calls.sendStream).toBe(0);
+      expect(dm.sentMessages).toContain("Text messages only.");
+    });
+  });
+
+  test("pdf-only DM gets unsupported attachment reply", async () => {
+    await withTempHome(async (homeDir) => {
+      const { handleMessage, calls } = await createPairedHandler(homeDir);
+      const dm = createDmMessage({
+        attachments: [
+          {
+            contentType: "application/pdf",
+            name: "notes.pdf",
+            size: 100,
+          },
+        ],
+        content: "",
+        userId: "424242424242424242",
+      });
+      await handleMessage(dm.message);
+
+      expect(calls.sendStream).toBe(0);
+      expect(dm.sentMessages).toContain(UNSUPPORTED_ATTACHMENT_REPLY);
+    });
+  });
+
+  test("too many images rejects without starting chat", async () => {
+    await withTempHome(async (homeDir) => {
+      const fetchSpy = spyOn(globalThis, "fetch").mockResolvedValue(
+        new Response(new Uint8Array(8), { status: 200 })
+      );
+
+      try {
+        const { handleMessage, calls } = await createPairedHandler(homeDir);
+        const dm = createDmMessage({
+          attachments: Array.from({ length: 6 }, (_, index) => ({
+            contentType: "image/png",
+            name: `shot-${index}.png`,
+            size: 8,
+            url: `https://cdn.example/shot-${index}.png`,
+          })),
+          content: "",
+          userId: "424242424242424242",
+        });
+        await handleMessage(dm.message);
+
+        expect(calls.sendStream).toBe(0);
+        expect(dm.sentMessages).toContain(TOO_MANY_IMAGES_REPLY);
+        expect(fetchSpy).not.toHaveBeenCalled();
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    });
+  });
+
+  test("guild mention plus image-only reaches the agent", async () => {
+    await withTempHome(async (homeDir) => {
+      const pngBytes = new Uint8Array([137, 80, 78, 71]);
+      const streamedInputs: unknown[] = [];
+      const fetchSpy = spyOn(globalThis, "fetch").mockResolvedValue(
+        new Response(pngBytes, { status: 200 })
+      );
+
+      try {
+        const { handleMessage } = await createPairedHandler(homeDir, {
+          onSendStream: async (input) => {
+            streamedInputs.push(input);
+            return "Got the screenshot.";
+          },
+        });
+
+        const guild = createGuildChatMessage({
+          attachments: [
+            {
+              contentType: "image/png",
+              name: "shot.png",
+              size: pngBytes.byteLength,
+            },
+          ],
+          content: "<@bot_id>",
+          mentionsBot: true,
+          userId: "424242424242424242",
+        });
+        await handleMessage(guild.message);
+
+        expect(streamedInputs.length).toBe(1);
+        expect(
+          (streamedInputs[0] as { images?: unknown[] }).images
+        ).toHaveLength(1);
+        expect(guild.threadSentMessages).toContain("Got the screenshot.");
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    });
+  });
+
+  test("guild image without mention does not fetch", async () => {
+    await withTempHome(async (homeDir) => {
+      const fetchSpy = spyOn(globalThis, "fetch").mockResolvedValue(
+        new Response(new Uint8Array(8), { status: 200 })
+      );
+
+      try {
+        const { handleMessage, calls } = await createPairedHandler(homeDir);
+        const guild = createGuildChatMessage({
+          attachments: [
+            {
+              contentType: "image/png",
+              name: "shot.png",
+              size: 8,
+            },
+          ],
+          content: "",
+          mentionsBot: false,
+          userId: "424242424242424242",
+        });
+        await handleMessage(guild.message);
+
+        expect(calls.sendStream).toBe(0);
+        expect(fetchSpy).not.toHaveBeenCalled();
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    });
   });
 });

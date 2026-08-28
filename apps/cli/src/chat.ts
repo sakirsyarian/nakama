@@ -730,6 +730,13 @@ async function runStickyChat(
   }
 
   let exiting = false;
+  let resolveExit: (() => void) | null = null;
+
+  const requestExit = (): void => {
+    exiting = true;
+    resolveExit?.();
+    resolveExit = null;
+  };
 
   prompt = new PersistentPrompt({
     getSuggestions: (input) => {
@@ -755,7 +762,7 @@ async function runStickyChat(
         return;
       }
 
-      exiting = true;
+      requestExit();
     },
     onScrollHistory: (event) => {
       if (event === "line_up") {
@@ -797,7 +804,7 @@ async function runStickyChat(
         const outcome = await handleSlashCommand(line);
 
         if (outcome === "exit") {
-          exiting = true;
+          requestExit();
           return;
         }
 
@@ -822,18 +829,17 @@ async function runStickyChat(
   }
 
   function onAbortSignal(): void {
-    exiting = true;
+    requestExit();
   }
 
   options.signal?.addEventListener("abort", onAbortSignal);
 
   await new Promise<void>((resolve) => {
-    const check = setInterval(() => {
-      if (exiting) {
-        clearInterval(check);
-        resolve();
-      }
-    }, 50);
+    resolveExit = resolve;
+    if (exiting || options.signal?.aborted) {
+      resolveExit = null;
+      resolve();
+    }
   });
 
   options.signal?.removeEventListener("abort", onAbortSignal);
@@ -1013,8 +1019,9 @@ async function runBlockingChat(context: ChatContext): Promise<void> {
       }
     }
   } finally {
+    disableRawModeIfActive(process.stdin);
+
     if (process.stdin.isTTY) {
-      process.stdin.setRawMode(false);
       process.stdin.pause();
     }
 
@@ -1133,6 +1140,21 @@ export function formatErrorLines(error: unknown): string[] {
   return ["", ...formatError(error).split(/\r?\n/)];
 }
 
+/** Disable raw mode only when stdin is a TTY currently in raw mode. */
+export function disableRawModeIfActive(
+  stdin: NodeJS.ReadStream = process.stdin
+): void {
+  if (!(stdin.isTTY && stdin.isRaw && typeof stdin.setRawMode === "function")) {
+    return;
+  }
+
+  try {
+    stdin.setRawMode(false);
+  } catch {
+    // Cleanup must not throw if the TTY rejects the mode change.
+  }
+}
+
 export function isEscInterruptKey(key: string): boolean {
   return key === "\u001b";
 }
@@ -1159,8 +1181,8 @@ function startEscAbortListener(onAbort: () => void): () => void {
   return () => {
     stdin.off("data", onData);
 
-    if (!wasRaw && process.stdin.isTTY) {
-      stdin.setRawMode(false);
+    if (!wasRaw) {
+      disableRawModeIfActive(stdin);
     }
   };
 }

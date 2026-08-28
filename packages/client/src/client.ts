@@ -53,6 +53,7 @@ import type {
   DraftTaskPromptRequest,
   DraftTaskPromptResponse,
   EmailSettingsResponse,
+  ErrorTrackingSettingsResponse,
   GenerateImageRequest,
   GenerateImageResponse,
   HealthResponse,
@@ -123,6 +124,7 @@ import type {
   RunToolResponse,
   SendEmailTestRequest,
   SendEmailTestResponse,
+  SendErrorTrackingTestResponse,
   SendMessageResponse,
   SessionMessagesResponse,
   SessionStatusResponse,
@@ -165,6 +167,7 @@ import type {
   UpdateComposioSettingsRequest,
   UpdateDiscordSettingsRequest,
   UpdateEmailSettingsRequest,
+  UpdateErrorTrackingSettingsRequest,
   UpdateImageGenerationRequest,
   UpdateMcpServerRequest,
   UpdateNotificationDestinationRequest,
@@ -648,8 +651,11 @@ export class NakamaClient {
     );
   }
 
-  async listProfiles(): Promise<ListProfilesResponse> {
-    return this.request<ListProfilesResponse>("/v1/profiles");
+  async listProfiles(orgId?: string): Promise<ListProfilesResponse> {
+    return this.request<ListProfilesResponse>(
+      "/v1/profiles",
+      orgId ? { headers: { "X-Org-Id": orgId } } : undefined
+    );
   }
 
   async getProfile(profileId: string): Promise<ProfileResponse> {
@@ -1621,6 +1627,28 @@ export class NakamaClient {
     );
   }
 
+  async getErrorTrackingSettings(): Promise<ErrorTrackingSettingsResponse> {
+    return this.request<ErrorTrackingSettingsResponse>(
+      "/v1/settings/error-tracking"
+    );
+  }
+
+  async setErrorTrackingSettings(
+    request: UpdateErrorTrackingSettingsRequest
+  ): Promise<ErrorTrackingSettingsResponse> {
+    return this.request<ErrorTrackingSettingsResponse>(
+      "/v1/settings/error-tracking",
+      { body: JSON.stringify(request), method: "PUT" }
+    );
+  }
+
+  async sendErrorTrackingTest(): Promise<SendErrorTrackingTestResponse> {
+    return this.request<SendErrorTrackingTestResponse>(
+      "/v1/settings/error-tracking/test",
+      { method: "POST" }
+    );
+  }
+
   async getComposioSettings(): Promise<ComposioSettingsResponse> {
     return this.request<ComposioSettingsResponse>("/v1/settings/composio");
   }
@@ -2368,7 +2396,9 @@ export class NakamaClient {
     retried = false
   ): Promise<T> {
     const method = (init?.method ?? "GET").toUpperCase();
-    const headers = this.buildHeaders(method, init?.headers);
+    const headers = this.buildHeaders(method, init?.headers, {
+      hasBody: init?.body != null,
+    });
 
     const response = await this.fetchImpl(`${this.baseUrl}${path}`, {
       ...init,
@@ -2406,8 +2436,9 @@ export class NakamaClient {
     retried = false
   ): Promise<Response> {
     const method = (init?.method ?? "GET").toUpperCase();
-    const headers = this.buildHeaders(method, init?.headers);
-    delete headers["Content-Type"];
+    const headers = this.buildHeaders(method, init?.headers, {
+      hasBody: false,
+    });
 
     const response = await this.fetchImpl(`${this.baseUrl}${path}`, {
       ...init,
@@ -2432,12 +2463,16 @@ export class NakamaClient {
 
   private buildHeaders(
     method: string,
-    headers?: HeadersInit
+    headers?: HeadersInit,
+    options: { hasBody?: boolean } = {}
   ): Record<string, string> {
     const merged: Record<string, string> = {
-      "Content-Type": "application/json",
       ...((headers as Record<string, string>) ?? {}),
     };
+
+    if (options.hasBody && merged["Content-Type"] == null) {
+      merged["Content-Type"] = "application/json";
+    }
 
     if (this.authToken) {
       merged["Authorization"] = `Bearer ${this.authToken}`;

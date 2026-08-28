@@ -35,6 +35,7 @@ import type {
   DiscoverModelsRequest,
   DocumentAttachment,
   EmailSettingsResponse,
+  ErrorTrackingSettingsResponse,
   GenerateImageRequest,
   GenerateImageResponse,
   ImageAttachment,
@@ -58,6 +59,7 @@ import type {
   ProviderClient,
   RunToolResponse,
   SendEmailTestResponse,
+  SendErrorTrackingTestResponse,
   SkillResponse,
   SoulStackResponse,
   SoulStatusResponse,
@@ -77,6 +79,7 @@ import type {
   UpdateComposioSettingsRequest,
   UpdateDiscordSettingsRequest,
   UpdateEmailSettingsRequest,
+  UpdateErrorTrackingSettingsRequest,
   UpdateImageGenerationRequest,
   UpdateProfileRequest,
   UpdateProviderRequest,
@@ -99,11 +102,13 @@ import {
   AGENT_CHANNELS,
   apiKeyEnvVarForProvider,
   appendOrgMemorySection,
+  buildErrorReport,
   buildThinkingProviderOptions,
   buildToolExecutionContext,
   buildUserContextStatus,
   composeKnowledgeBaseCatalog,
   composeSoulSystemPrompt,
+  createErrorTrackingSink,
   createSmtpSender,
   DEFAULT_THINKING_EFFORT,
   DEFAULT_THINKING_ENABLED,
@@ -124,6 +129,7 @@ import {
   loadDiscordSettingsPublic,
   loadEmailConfig,
   loadEmailSettingsPublic,
+  loadErrorTrackingSettingsPublic,
   loadSoulStack,
   loadTelegramSettingsPublic,
   loadUserConfig,
@@ -138,10 +144,12 @@ import {
   normalizeUserContextContent,
   type OrgRole,
   ollamaRequiresApiKey,
+  parseSentryDsn,
   persistInlineAttachmentsInContent,
   readArtifactFile,
   readBundledSkillBody,
   readEnvValue,
+  refreshErrorTrackingEnabled,
   regenerateDiscordHandshake,
   regenerateTelegramHandshake,
   regenerateWhatsAppPairingCode,
@@ -153,6 +161,7 @@ import {
   saveComposioConfig,
   saveDiscordConfig,
   saveEmailConfig,
+  saveErrorTrackingDsn,
   saveTelegramConfig,
   saveUserConfig,
   saveUserThinkingSettings,
@@ -176,7 +185,6 @@ import {
   catalogCustomModelsToCatalog,
   createProviderForInstance,
   createProviderFromActiveConfig,
-  createProviderFromSources,
   fetchFireworksGatewayModels,
   fetchOllamaModels,
   fetchRemoteOpenAIModels,
@@ -248,10 +256,6 @@ import {
   resolveVisionProviderSelection,
   VISION_MODEL_REQUIRED_MESSAGE,
 } from "./image-vision-fallback";
-import {
-  invalidateJavascriptModuleCache,
-  resolveJavascriptModulePath,
-} from "./javascript-tool-loader";
 import type { LlmUsageTracker } from "./llm-usage-tracker";
 import type { McpClientManager } from "./mcp-client-manager";
 import type { McpService } from "./mcp-service";
@@ -604,7 +608,7 @@ export class AgentService {
         const active = getActiveProviderInstance(this.userConfig);
         return active ? resolveDefaultModelForInstance(active) : null;
       })(),
-      provider: createProviderFromSources(process.env, this.userConfig),
+      provider: createProviderFromActiveConfig(this.userConfig, process.env),
       providerInstance: getActiveProviderInstance(this.userConfig),
       thinking: this.resolveWorkspaceThinkingDefaults(),
     });
@@ -1126,6 +1130,50 @@ export class AgentService {
     }
 
     return this.getComposioSettings();
+  }
+
+  async getErrorTrackingSettings(): Promise<ErrorTrackingSettingsResponse> {
+    return loadErrorTrackingSettingsPublic();
+  }
+
+  async setErrorTrackingSettings(
+    input: UpdateErrorTrackingSettingsRequest
+  ): Promise<ErrorTrackingSettingsResponse> {
+    const dsn = input.dsn?.trim() ?? "";
+
+    if (dsn && !parseSentryDsn(dsn)) {
+      throw new NakamaApiError(
+        "That does not look like a Sentry-compatible DSN.",
+        400
+      );
+    }
+
+    await saveErrorTrackingDsn(dsn || null);
+    // The flag gates whether anything is recorded at all, so it has to move with the
+    // DSN or saving one would need a restart to take effect.
+    await refreshErrorTrackingEnabled();
+    return this.getErrorTrackingSettings();
+  }
+
+  /**
+   * Sends one event immediately rather than through reportError, so a failed test does
+   * not leave a fake crash sitting in the delivery queue.
+   */
+  async sendErrorTrackingTest(): Promise<SendErrorTrackingTestResponse> {
+    const { configured } = await loadErrorTrackingSettingsPublic();
+
+    if (!configured) {
+      throw new NakamaApiError("Save a DSN first.", 400);
+    }
+
+    const delivered = await createErrorTrackingSink()(
+      buildErrorReport(new Error("Test event from nakama"), {
+        kind: "test",
+        source: "settings",
+      })
+    );
+
+    return { delivered };
   }
 
   async getEmailSettings(): Promise<EmailSettingsResponse> {
@@ -1952,7 +2000,10 @@ export class AgentService {
   }
 
   async draftTaskPrompt(title: string, description?: string): Promise<string> {
-    const provider = createProviderFromSources(process.env, this.userConfig);
+    const provider = createProviderFromActiveConfig(
+      this.userConfig,
+      process.env
+    );
 
     return draftTaskPromptFromFields(
       { description, title },
@@ -2530,24 +2581,6 @@ export class AgentService {
       toolId
     );
 
-    if (tool.handlerType === "javascript") {
-      const handlerConfig =
-        typeof record.handlerConfig === "object" &&
-        record.handlerConfig !== null
-          ? (record.handlerConfig as { modulePath?: string })
-          : null;
-
-      if (handlerConfig?.modulePath) {
-        try {
-          invalidateJavascriptModuleCache(
-            resolveJavascriptModulePath(handlerConfig.modulePath)
-          );
-        } catch {
-          // Invalid module paths fail when loading the tool.
-        }
-      }
-    }
-
     const loaded = await handler.load(record);
 
     if (!loaded) {
@@ -2598,7 +2631,10 @@ export class AgentService {
     }
 
     const loaded = await handler.load(record);
-    const provider = createProviderFromSources(process.env, this.userConfig);
+    const provider = createProviderFromActiveConfig(
+      this.userConfig,
+      process.env
+    );
     const parameters = await suggestToolParamsFromPrompt(
       {
         description: tool.description,

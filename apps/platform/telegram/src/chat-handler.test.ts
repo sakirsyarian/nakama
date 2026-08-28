@@ -54,40 +54,55 @@ async function waitForCondition(
 describe("createChatHandler group chats", () => {
   test("ignores plain group messages without mention", async () => {
     await withTempHome(async (homeDir) => {
-      await writeTelegramConfigIni(homeDir, {
-        botToken: "1234567890:TEST",
-        pairedUserIds: [42],
-      });
+      const privateMessage = "private 🔒 message";
+      const log = spyOn(console, "log").mockImplementation(() => {});
 
-      const authStore = new TelegramAuthStore();
-      await authStore.reload();
-      const { client, calls } = createMockClient();
-      const sessionStore = new SessionStore(
-        path.join(homeDir, ".nakama", "telegram", "chat-sessions.json")
-      );
-      const orgStore = createTestOrgStore(homeDir);
-      await orgStore.load();
-      const handleMessage = createChatHandler({
-        authStore,
-        client,
-        config: { botToken: "1234567890:TEST", profileId: "default" },
-        getBotInfo: () => TEST_BOT_INFO,
-        orgStore,
-        sessionStore,
-      });
+      try {
+        await writeTelegramConfigIni(homeDir, {
+          botToken: "1234567890:TEST",
+          pairedUserIds: [42],
+        });
 
-      const { ctx, replies } = createMessageContext({
-        chatId: -100_123,
-        chatType: "supergroup",
-        text: "hello",
-        userId: 42,
-      });
+        const authStore = new TelegramAuthStore();
+        await authStore.reload();
+        const { client, calls } = createMockClient();
+        const sessionStore = new SessionStore(
+          path.join(homeDir, ".nakama", "telegram", "chat-sessions.json")
+        );
+        const orgStore = createTestOrgStore(homeDir);
+        await orgStore.load();
+        const handleMessage = createChatHandler({
+          authStore,
+          client,
+          config: { botToken: "1234567890:TEST", profileId: "default" },
+          getBotInfo: () => TEST_BOT_INFO,
+          orgStore,
+          sessionStore,
+        });
 
-      await handleMessage(ctx);
+        const { ctx, replies } = createMessageContext({
+          chatId: -100_123,
+          chatType: "supergroup",
+          text: privateMessage,
+          userId: 42,
+        });
 
-      expect(replies).toEqual([]);
-      expect(calls.createSession).toBe(0);
-      expect(calls.sendStream).toBe(0);
+        await handleMessage(ctx);
+
+        const output = log.mock.calls
+          .map((args) => args.map(String).join(" "))
+          .join("\n");
+
+        expect(replies).toEqual([]);
+        expect(calls.createSession).toBe(0);
+        expect(calls.sendStream).toBe(0);
+        expect(output).toContain(
+          `textBytes=${Buffer.byteLength(privateMessage, "utf8")}`
+        );
+        expect(output).not.toContain(privateMessage);
+      } finally {
+        log.mockRestore();
+      }
     });
   });
 
@@ -1746,6 +1761,52 @@ describe("bridge API integration", () => {
       expect(getLastCreateSessionProfileId()).toBe("gary");
       expect(switchProfile.replies).toEqual([
         "Now using Gary Vee. Chat history reset. (Beta)",
+      ]);
+    });
+  });
+
+  test("/profile scopes each org's listing to that org, not the client's", async () => {
+    await withTempHome(async (homeDir) => {
+      await writeTelegramConfigIni(homeDir, {
+        botToken: "1234567890:TEST",
+        pairedUserIds: [1001],
+      });
+
+      const authStore = new TelegramAuthStore();
+      await authStore.reload();
+      const { client, listProfilesOrgIds } = createMockClient({
+        orgs: createMultiTestOrgs(),
+        profilesByOrgId: {
+          org_a: [{ id: "default", isDefault: true, name: "Default Bot" }],
+          org_b: [{ id: "gary", isDefault: true, name: "Gary Vee" }],
+        },
+      });
+      const sessionStore = new SessionStore(
+        path.join(homeDir, ".nakama", "telegram", "chat-sessions.json")
+      );
+      const orgStore = createTestOrgStore(homeDir);
+      await orgStore.load();
+      orgStore.set("u:1001", "org_a");
+      await orgStore.save();
+      const handleMessage = createChatHandler({
+        authStore,
+        client,
+        config: { botToken: "1234567890:TEST", profileId: "default" },
+        orgStore,
+        sessionStore,
+      });
+
+      const switchProfile = createMessageContext({
+        text: "/profile gary-vee",
+        userId: 1001,
+      });
+      await handleMessage(switchProfile.ctx);
+
+      // The cross-org scan names each org on its own request instead of
+      // repointing the shared client, which a concurrent chat would read.
+      expect(listProfilesOrgIds.filter((id) => id !== null)).toEqual([
+        "org_a",
+        "org_b",
       ]);
     });
   });

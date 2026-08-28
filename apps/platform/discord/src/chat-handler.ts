@@ -14,7 +14,7 @@ import {
   formatOrgSwitchConfirmation,
   prepareChannelOrgContext,
 } from "@nakama/core/channel-org";
-import type { SendMessageInput } from "@nakama/core/contract";
+import type { ImageAttachment, SendMessageInput } from "@nakama/core/contract";
 import { addDiscordAllowedUserId } from "@nakama/core/discord-config";
 import {
   filterProfilesForChatAccess,
@@ -54,6 +54,7 @@ import {
   resolveOrgChannelId,
   stripBotMention,
 } from "./guild-message";
+import { buildDiscordImageInput, UNSUPPORTED_ATTACHMENT_REPLY } from "./images";
 import { isIgnorableInteractionError } from "./interaction-errors";
 import {
   createDiscordMessenger,
@@ -240,12 +241,24 @@ export function createChatHandler(deps: ChatHandlerDeps) {
       }
     }
 
-    if (!text) {
-      await messenger.send("Text messages only.");
+    const imageBuild = await buildDiscordImageInput(message);
+
+    if (imageBuild?.kind === "reject") {
+      await messenger.send(imageBuild.message);
       return;
     }
 
-    if (command === "/org" || command === "/profile") {
+    const imageInput = imageBuild?.kind === "input" ? imageBuild.input : null;
+
+    if (!(text || imageInput)) {
+      const hasStickers = (message.stickers?.size ?? 0) > 0;
+      await messenger.send(
+        hasStickers ? UNSUPPORTED_ATTACHMENT_REPLY : "Text messages only."
+      );
+      return;
+    }
+
+    if (text && (command === "/org" || command === "/profile")) {
       await withChatLock(conversationKey, async () => {
         await handleTextCommand(
           text,
@@ -259,7 +272,7 @@ export function createChatHandler(deps: ChatHandlerDeps) {
       return;
     }
 
-    if (text.startsWith("/") && !isAttachOnlyCommand(text)) {
+    if (text?.startsWith("/") && !isAttachOnlyCommand(text)) {
       await messenger.send(
         "Use slash commands from Discord's command menu for session control."
       );
@@ -267,11 +280,11 @@ export function createChatHandler(deps: ChatHandlerDeps) {
     }
 
     const messageText =
-      isGuild && botInfo
+      text && isGuild && botInfo
         ? stripBotMention(text, botInfo, mentionedBotRoleIds)
-        : text;
+        : (text ?? "");
 
-    if (!messageText) {
+    if (!(messageText || imageInput)) {
       return;
     }
 
@@ -303,7 +316,8 @@ export function createChatHandler(deps: ChatHandlerDeps) {
     console.log(
       "[discord] chat start",
       replyConversationKey,
-      messageText.slice(0, 80)
+      `messageId=${message.id ?? "unknown"}`,
+      `textBytes=${Buffer.byteLength(messageText, "utf8")}`
     );
 
     await withChatLock(replyConversationKey, async () => {
@@ -313,7 +327,8 @@ export function createChatHandler(deps: ChatHandlerDeps) {
         replyMessenger,
         messageText,
         isGuild,
-        replyIsThread
+        replyIsThread,
+        imageInput?.images
       );
     });
 
@@ -646,7 +661,8 @@ export function createChatHandler(deps: ChatHandlerDeps) {
     messenger: DiscordMessenger,
     attachUserText: string,
     isGuild: boolean,
-    isThread: boolean
+    isThread: boolean,
+    images?: ImageAttachment[]
   ): Promise<void> {
     const session = await resolveSession(conversationKey);
     const profileId = sessionStore.get(conversationKey)?.profileId;
@@ -668,7 +684,10 @@ export function createChatHandler(deps: ChatHandlerDeps) {
 
     // Forward free text to the agent — do not gate Discord replies on questionnaire parsing.
     const streamInput = withGroupContext(
-      { message: attachUserText },
+      {
+        images,
+        message: attachUserText,
+      },
       isGuild,
       isThread
     );
@@ -922,10 +941,7 @@ export function createChatHandler(deps: ChatHandlerDeps) {
           }
         : isThread
           ? null
-          : resolveProfileInScopes(
-              await listProfileScopes(orgs, currentOrgId),
-              arg
-            );
+          : resolveProfileInScopes(await listProfileScopes(orgs), arg);
 
     if (!resolved) {
       await messenger.send("Unknown profile. Send /profile to see the list.");
@@ -961,30 +977,26 @@ export function createChatHandler(deps: ChatHandlerDeps) {
     );
   }
 
+  // The org travels with the request. Borrowing client.setOrgId per iteration
+  // let a concurrent chat read another org's profiles between the awaits.
   async function listProfileScopes(
-    orgs: Array<{ id: string; name: string }>,
-    restoreOrgId?: string
+    orgs: Array<{ id: string; name: string }>
   ): Promise<ProfileScope[]> {
     const scopes: ProfileScope[] = [];
 
     for (const org of orgs) {
-      client.setOrgId(org.id);
-      const profiles = await listSelectableProfiles();
+      const profiles = await listSelectableProfiles(org.id);
 
       if (profiles.length > 0) {
         scopes.push({ orgId: org.id, orgName: org.name, profiles });
       }
     }
 
-    if (restoreOrgId) {
-      client.setOrgId(restoreOrgId);
-    }
-
     return scopes;
   }
 
-  async function listSelectableProfiles() {
-    const { profiles } = await client.listProfiles();
+  async function listSelectableProfiles(orgId?: string) {
+    const { profiles } = await client.listProfiles(orgId);
     return filterProfilesForChatAccess(profiles, { excludeSuperBot: true });
   }
 

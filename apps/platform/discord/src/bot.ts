@@ -46,10 +46,13 @@ export async function createBot(
 
   client.on(Events.MessageCreate, async (message: Message) => {
     console.log(
-      "[discord] message",
-      message.author.id,
-      message.channelId,
-      message.content?.slice(0, 80)
+      [
+        "[discord] message",
+        `messageId=${message.id}`,
+        `authorId=${message.author.id}`,
+        `channelId=${message.channelId}`,
+        `textBytes=${Buffer.byteLength(message.content ?? "", "utf8")}`,
+      ].join(" ")
     );
     try {
       await handler.handleMessage(message);
