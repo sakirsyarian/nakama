@@ -432,54 +432,6 @@
       animation: none;
     }
   }
-
-  /* Beat Streamdown's list-inside so wrapped lines align with the first. */
-  .chat-markdown ul,
-  .chat-markdown ol {
-    padding-inline-start: 1.35em;
-    list-style-position: outside;
-  }
-
-  .chat-markdown ol {
-    padding-inline-start: 1.7em;
-  }
-
-  .chat-markdown li {
-    padding-inline-start: 0.4em;
-  }
-
-  /* Beat Streamdown heading utilities (text-3xl / text-2xl / …) in chat + artifacts. */
-  .chat-markdown h1,
-  .chat-markdown [data-streamdown="heading-1"] {
-    margin-block: 0.875rem 0.375rem;
-    font-size: 1.219rem;
-  }
-
-  .chat-markdown h2,
-  .chat-markdown [data-streamdown="heading-2"] {
-    margin-block: 0.75rem 0.375rem;
-    font-size: 1.125rem;
-  }
-
-  .chat-markdown h3,
-  .chat-markdown [data-streamdown="heading-3"] {
-    margin-block: 0.625rem 0.25rem;
-    font-size: 1rem;
-  }
-
-  .chat-markdown h4,
-  .chat-markdown [data-streamdown="heading-4"] {
-    margin-block: 0.625rem 0.25rem;
-    font-size: 0.875rem;
-  }
-
-  .chat-markdown h5,
-  .chat-markdown h6,
-  .chat-markdown [data-streamdown="heading-5"],
-  .chat-markdown [data-streamdown="heading-6"] {
-    margin-block: 0.5rem 0.25rem;
-    font-size: 0.875rem;
-  }
 }
 
 @layer components {
@@ -618,8 +570,13 @@
     transition:
       opacity 220ms cubic-bezier(0.4, 0, 0.2, 1),
       max-height 320ms cubic-bezier(0.4, 0, 0.2, 1),
-      margin 320ms cubic-bezier(0.4, 0, 0.2, 1);
-    @apply mb-1.5 overflow-hidden px-3 text-xs text-muted-foreground/55 motion-reduce:transition-none;
+      margin 320ms cubic-bezier(0.4, 0, 0.2, 1),
+      color 150ms ease-out;
+    @apply mb-1.5 flex w-full cursor-pointer items-center gap-1 overflow-hidden rounded-md px-2 py-1 text-left text-xs text-muted-foreground/55 motion-reduce:transition-none;
+  }
+
+  .sidebar-nav-group-label:hover {
+    @apply text-muted-foreground;
   }
 
   .sidebar-shell:not([data-collapsed]) .sidebar-nav-group-label {
@@ -629,7 +586,11 @@
 
   .sidebar-shell[data-collapsed] .sidebar-nav-group-label {
     transition-delay: 0ms;
-    @apply mb-0 max-h-0 opacity-0;
+    @apply pointer-events-none mb-0 max-h-0 opacity-0;
+  }
+
+  .sidebar-nav-group-chevron {
+    @apply size-3 shrink-0 transition-transform duration-200 ease-out motion-reduce:transition-none;
   }
 
   .sidebar-nav-divider {
@@ -648,6 +609,14 @@
     @apply flex flex-col;
   }
 
+  .sidebar-shell:not([data-collapsed]) .sidebar-nav-group[data-tree] {
+    @apply mt-3;
+  }
+
+  .sidebar-shell[data-collapsed] .sidebar-nav-group[data-tree] {
+    @apply mt-1.5;
+  }
+
   .sidebar-nav-group-items {
     @apply flex flex-col gap-0.5 overflow-visible;
   }
@@ -658,6 +627,13 @@
 
   aside[data-collapsed] .sidebar-nav-group-items {
     @apply items-center gap-1.5;
+  }
+
+  .sidebar-nav-group[data-tree][data-items-hidden] .sidebar-nav-group-items {
+    transition:
+      opacity 220ms cubic-bezier(0.4, 0, 0.2, 1),
+      max-height 220ms cubic-bezier(0.4, 0, 0.2, 1);
+    @apply pointer-events-none max-h-0 overflow-hidden opacity-0 motion-reduce:transition-none;
   }
 
   .scope-item {
@@ -712,12 +688,12 @@
     max-width: 68ch;
     font-family: var(--font-sans);
     font-size: 0.875rem;
-    line-height: 1.6;
+    line-height: 1.55;
     letter-spacing: 0.01em;
   }
 
   .artifact-share-page .chat-markdown,
-  [data-slot="attachment-detail-panel"] .chat-markdown {
+  .artifact-preview-panel .chat-markdown {
     max-width: none;
   }
 
@@ -846,7 +822,7 @@
   }
 
   .chat-markdown p {
-    margin-block: 0.75rem;
+    margin-block: 0.625rem;
   }
 
   .chat-markdown p:first-child {
@@ -860,9 +836,7 @@
   .chat-markdown h1,
   .chat-markdown h2,
   .chat-markdown h3,
-  .chat-markdown h4,
-  .chat-markdown h5,
-  .chat-markdown h6 {
+  .chat-markdown h4 {
     font-family: var(--font-sans);
     font-weight: 600;
     line-height: 1.35;
@@ -870,8 +844,29 @@
     letter-spacing: -0.015em;
   }
 
+  .chat-markdown h1 {
+    margin-block: 1.125rem 0.5rem;
+    font-size: 1.25rem;
+  }
+
+  .chat-markdown h2 {
+    margin-block: 1rem 0.5rem;
+    font-size: 1.125rem;
+  }
+
+  .chat-markdown h3 {
+    margin-block: 0.875rem 0.375rem;
+    font-size: 1rem;
+  }
+
+  .chat-markdown h4 {
+    margin-block: 0.75rem 0.375rem;
+    font-size: 0.9375rem;
+  }
+
   .chat-markdown ul,
   .chat-markdown ol {
+    padding-inline-start: 1.375rem;
     margin-block: 0.625rem;
   }
 
@@ -893,16 +888,11 @@
 
   .chat-markdown li {
     display: list-item;
-    margin-block: 0.4rem;
+    margin-block: 0.25rem;
   }
 
   .chat-markdown li::marker {
     color: var(--muted-foreground);
-  }
-
-  .chat-markdown li > ul,
-  .chat-markdown li > ol {
-    margin-block: 0.25rem;
   }
 
   .chat-markdown blockquote {
