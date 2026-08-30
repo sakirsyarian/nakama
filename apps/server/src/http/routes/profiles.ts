@@ -821,9 +821,15 @@ export function registerProfileRoutes(
     const orgId = requireActiveOrgIdFromContext(c);
     const profileId = decodeURIComponent(c.req.param("profileId"));
     const body = await readJson<UploadKnowledgeBaseRequest>(c.req.raw);
+    const result = await agent.uploadKnowledgeBaseDocument(
+      orgId,
+      profileId,
+      body.document,
+      body.onDuplicate
+    );
     return json<UploadKnowledgeBaseResponse>(
-      await agent.uploadKnowledgeBaseDocument(orgId, profileId, body.document),
-      201
+      result,
+      result.outcome === "created" ? 201 : 200
     );
   });
 
@@ -871,8 +877,9 @@ export function registerProfileRoutes(
   );
 
   app.get("/v1/profiles/:profileId/avatar", async (c) => {
+    const orgId = requireActiveOrgIdFromContext(c);
     const profileId = decodeURIComponent(c.req.param("profileId"));
-    const avatar = await agent.getProfileAvatarByProfileId(profileId);
+    const avatar = await agent.getProfileAvatar(orgId, profileId);
     return new Response(avatar.bytes, {
       headers: { "Content-Type": avatar.mediaType },
     });

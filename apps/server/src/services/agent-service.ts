@@ -44,6 +44,7 @@ import type {
   InitSoulResponse,
   InitUserContextResponse,
   InstallSkillRequest,
+  KnowledgeBaseDuplicateAction,
   ListArtifactsOptions,
   ListArtifactsResponse,
   ListKnowledgeBaseResponse,
@@ -2776,12 +2777,6 @@ export class AgentService {
     return this.profileService.getProfileAvatar(orgId, profileId);
   }
 
-  async getProfileAvatarByProfileId(
-    profileId: string
-  ): Promise<{ mediaType: string; bytes: Buffer }> {
-    return this.profileService.getProfileAvatarByProfileId(profileId);
-  }
-
   async deleteProfileAvatar(orgId: string, profileId: string): Promise<void> {
     return this.profileService.deleteProfileAvatar(orgId, profileId);
   }
@@ -2796,12 +2791,14 @@ export class AgentService {
   async uploadKnowledgeBaseDocument(
     orgId: string,
     profileId: string,
-    document: DocumentAttachment
+    document: DocumentAttachment,
+    onDuplicate?: KnowledgeBaseDuplicateAction
   ): Promise<UploadKnowledgeBaseResponse> {
     return this.profileService.uploadKnowledgeBaseDocument(
       orgId,
       profileId,
-      document
+      document,
+      onDuplicate
     );
   }
 
