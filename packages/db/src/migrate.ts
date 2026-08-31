@@ -7,39 +7,50 @@ export function migrateDatabase(db: Database): void {
   const schemaPath = resolveSchemaPath();
   const sql = readFileSync(schemaPath, "utf8");
 
+  // Each step runs in its own transaction so a failure cannot leave one half
+  // applied. They deliberately do not share a single outer transaction: the
+  // schema sets `PRAGMA foreign_keys`, and migrateLegacyProfileIds toggles it
+  // and opens its own BEGIN, both of which SQLite ignores or rejects inside a
+  // transaction. Stopping between steps is safe because every step is
+  // idempotent and this runs on every open.
+  const atomic = (step: (database: Database) => void): void => {
+    db.transaction(() => step(db))();
+  };
+
   db.exec(sql);
-  migrateProfilesTable(db);
-  migrateAutomationsTable(db);
-  migrateTasksTable(db);
-  migrateSessionsTable(db);
-  migrateMcpTables(db);
-  migrateSkillsTables(db);
-  migrateUsersTable(db);
-  migrateOrgTables(db);
-  migrateOrgMemoryProposalsTable(db);
-  migrateSkillProposalsTable(db);
-  migrateSkillSuggestionsTable(db);
-  migrateSkillsWriteApprovalColumns(db);
-  migrateSkillsPostTurnReviewColumns(db);
-  migrateSkillsCuratorColumns(db);
-  migrateSkillsCuratorConsolidateColumns(db);
-  migrateOrganizationArchivedAt(db);
-  migrateSkillUsageTables(db);
-  migrateTenantOrgScope(db);
-  migrateSkillOrgIds(db);
-  migrateProfileOrgColumns(db);
-  migrateBrowserSessionsTable(db);
+  atomic(migrateProfilesTable);
+  atomic(migrateAutomationsTable);
+  atomic(migrateTasksTable);
+  atomic(migrateSessionsTable);
+  atomic(migrateMcpTables);
+  atomic(migrateSkillsTables);
+  atomic(migrateUsersTable);
+  atomic(migrateOrgTables);
+  atomic(migrateOrgMemoryProposalsTable);
+  atomic(migrateSkillProposalsTable);
+  atomic(migrateSkillSuggestionsTable);
+  atomic(migrateSkillsWriteApprovalColumns);
+  atomic(migrateSkillsPostTurnReviewColumns);
+  atomic(migrateSkillsCuratorColumns);
+  atomic(migrateSkillsCuratorConsolidateColumns);
+  atomic(migrateOrganizationArchivedAt);
+  atomic(migrateSkillUsageTables);
+  atomic(migrateTenantOrgScope);
+  atomic(migrateSkillOrgIds);
+  atomic(migrateProfileOrgColumns);
+  atomic(migrateBrowserSessionsTable);
   migrateLegacyProfileIds(db);
-  migrateCodingDelegationSkillName(db);
-  migrateWorkspaceSettingsTable(db);
-  migrateLlmUsageModelStatsTable(db);
-  migrateToolOutputSavingsTable(db);
-  migrateLlmTurnUsageTable(db);
-  migrateAttachmentsTable(db);
-  migrateAutomationRunsTable(db);
-  migrateAutomationRunReadStateTable(db);
-  migrateComposioTables(db);
-  migrateComposioUserConnections(db);
+  atomic(migrateCodingDelegationSkillName);
+  atomic(migrateWorkspaceSettingsTable);
+  atomic(migrateLlmUsageModelStatsTable);
+  atomic(migrateToolOutputSavingsTable);
+  atomic(migrateLlmTurnUsageTable);
+  atomic(migrateAttachmentsTable);
+  atomic(migrateAutomationRunsTable);
+  atomic(migrateAutomationRunReadStateTable);
+  atomic(migrateComposioTables);
+  atomic(migrateComposioUserConnections);
+  atomic(migrateProfileChangeEventsTable);
 }
 
 export function resolveSchemaPath(
@@ -1402,6 +1413,27 @@ function migrateComposioUserConnections(db: Database): void {
 
     normalizeToolkitStmt.run(now, toolkit.id);
   }
+}
+
+function migrateProfileChangeEventsTable(db: Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS profile_change_events (
+      id TEXT PRIMARY KEY NOT NULL,
+      org_id TEXT NOT NULL,
+      profile_id TEXT NOT NULL,
+      actor_user_id TEXT,
+      source TEXT NOT NULL,
+      field TEXT NOT NULL,
+      before_value TEXT,
+      after_value TEXT,
+      created_at TEXT NOT NULL,
+      FOREIGN KEY (org_id) REFERENCES organizations (id) ON DELETE CASCADE,
+      FOREIGN KEY (profile_id) REFERENCES profiles (id) ON DELETE CASCADE
+    );
+
+    CREATE INDEX IF NOT EXISTS profile_change_events_profile_created
+      ON profile_change_events (profile_id, created_at DESC);
+  `);
 }
 
 function migrateComposioTables(db: Database): void {
