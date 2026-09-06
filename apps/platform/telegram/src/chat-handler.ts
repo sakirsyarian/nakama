@@ -1,10 +1,13 @@
 import type { NakamaClient, RemoteChatSession } from "@nakama/client";
+import { deliverTurnArtifactShares } from "@nakama/core";
+import { formatClientError } from "@nakama/core/api-error";
 import {
   clearActiveStream,
   isAbortError,
   registerActiveStream,
   stopActiveStream,
 } from "@nakama/core/channel-active-stream";
+import { createChatLock } from "@nakama/core/channel-chat-lock";
 import {
   type ChannelOrgStore,
   findOrgBySelectionInput,
@@ -12,6 +15,8 @@ import {
   formatOrgSwitchConfirmation,
   prepareChannelOrgContext,
 } from "@nakama/core/channel-org";
+import type { ChannelSessionStore } from "@nakama/core/channel-session-store";
+import { createTypingLoop } from "@nakama/core/channel-typing-loop";
 import type { SendMessageInput } from "@nakama/core/contract";
 import {
   filterProfilesForChatAccess,
@@ -37,12 +42,9 @@ import {
   hasTelegramAudio,
 } from "./audio";
 import type { TelegramAuthStore } from "./auth-store";
-import {
-  deliverTelegramTurnArtifactShares,
-  maybeSendRequestedTelegramArtifactAttachment,
-} from "./channel-artifact-flow";
+import { maybeSendRequestedTelegramArtifactAttachment } from "./channel-artifact-flow";
 import type { TelegramBridgeConfig } from "./config";
-import { formatError, HELP_TEXT, splitTelegramMessage } from "./format";
+import { HELP_TEXT, splitTelegramMessage } from "./format";
 import {
   explainGroupMessageHandling,
   isTelegramGroupChat,
@@ -59,11 +61,9 @@ import {
   createTelegramRichMessenger,
   type TelegramRichMessenger,
 } from "./rich-message";
-import type { SessionStore } from "./session-store";
 import { TelegramTodoStatusMessage } from "./todo-status-message";
-import { createTypingLoop } from "./typing-indicator";
 
-const chatLocks = new Map<string, Promise<void>>();
+const chatLock = createChatLock();
 
 const GROUP_MESSAGE_PREFIX =
   "[Telegram group — your reply is visible to everyone in this group.]\n";
@@ -87,7 +87,7 @@ export interface ChatHandlerDeps {
   config: TelegramBridgeConfig;
   getBotInfo?: () => TelegramBotInfo | undefined;
   orgStore: ChannelOrgStore;
-  sessionStore: SessionStore;
+  sessionStore: ChannelSessionStore;
 }
 
 export function createChatHandler(deps: ChatHandlerDeps) {
@@ -121,18 +121,23 @@ export function createChatHandler(deps: ChatHandlerDeps) {
       : null;
 
     if (groupDecision && !groupDecision.shouldHandle) {
-      console.log(
-        [
-          "Ignored Telegram group message",
-          `reason=${groupDecision.reason}`,
-          `bot=@${botInfo?.username ?? "unknown"}`,
+      const parts = [
+        "Ignored Telegram group message",
+        `reason=${groupDecision.reason}`,
+        `bot=@${botInfo?.username ?? "unknown"}`,
+        `messageId=${ctx.message?.message_id ?? "unknown"}`,
+        `textBytes=${Buffer.byteLength(text ?? "", "utf8")}`,
+      ];
+      if (process.env.NAKAMA_CH_DEBUG === "1") {
+        parts.splice(
+          3,
+          0,
           `botId=${botInfo?.id ?? "unknown"}`,
           `chatId=${chatId}`,
-          `messageId=${ctx.message?.message_id ?? "unknown"}`,
-          `userId=${userId}`,
-          `textBytes=${Buffer.byteLength(text ?? "", "utf8")}`,
-        ].join(" ")
-      );
+          `userId=${userId}`
+        );
+      }
+      console.log(parts.join(" "));
       return;
     }
 
@@ -385,7 +390,7 @@ export function createChatHandler(deps: ChatHandlerDeps) {
     try {
       return await buildTelegramImageInput(ctx);
     } catch (error) {
-      await telegram.send(formatError(error));
+      await telegram.send(formatClientError(error));
       return null;
     }
   }
@@ -451,14 +456,16 @@ export function createChatHandler(deps: ChatHandlerDeps) {
       });
     }
 
-    const typingLoop = createTypingLoop(ctx);
+    const typingLoop = createTypingLoop(() =>
+      ctx.replyWithChatAction("typing")
+    );
     const todoStatus = new TelegramTodoStatusMessage(telegram);
-    const signal = registerActiveStream(conversationKey);
     let reply = "";
-
-    typingLoop.start();
+    const signal = registerActiveStream(conversationKey);
 
     try {
+      typingLoop.start();
+
       reply = await session.sendStream(
         input,
         {
@@ -504,7 +511,7 @@ export function createChatHandler(deps: ChatHandlerDeps) {
       }
 
       await todoStatus.fail();
-      await telegram.send(formatError(error));
+      await telegram.send(formatClientError(error));
       return;
     } finally {
       clearActiveStream(conversationKey);
@@ -518,11 +525,10 @@ export function createChatHandler(deps: ChatHandlerDeps) {
     }
 
     if (profileId) {
-      await deliverTelegramTurnArtifactShares({
-        client,
+      await deliverTurnArtifactShares({
         conversationKey,
-        messenger: telegram,
-        profileId,
+        publish: (path) => client.publishProfileArtifactShare(profileId, path),
+        sendFooter: (footer) => telegram.sendRaw(footer),
         session,
         sessionStore,
       });
@@ -767,7 +773,7 @@ export function createChatHandler(deps: ChatHandlerDeps) {
 
       await replyChunks(telegram, lines.join("\n"));
     } catch (error) {
-      await telegram.send(formatError(error));
+      await telegram.send(formatClientError(error));
     }
   }
 
@@ -775,10 +781,16 @@ export function createChatHandler(deps: ChatHandlerDeps) {
     const existing = sessionStore.get(chatId);
 
     if (existing) {
+      const hot = sessionStore.getHotSession<RemoteChatSession>(chatId);
+      if (hot) {
+        return hot;
+      }
+
       const session = client.createChatSession(existing.sessionId, "telegram");
 
       try {
         await session.getMessages();
+        sessionStore.setHotSession(chatId, session);
         return session;
       } catch {
         // Session missing on server; create a new one below
@@ -803,6 +815,7 @@ export function createChatHandler(deps: ChatHandlerDeps) {
       sessionId: session.id,
       updatedAt: new Date().toISOString(),
     });
+    sessionStore.setHotSession(chatId, session);
     await sessionStore.save();
 
     return session;
@@ -897,25 +910,22 @@ function isStopCommand(text: string): boolean {
   return parseTelegramCommand(text) === "/stop";
 }
 
-async function withChatLock(
+export async function withChatLock(
   chatId: string,
   fn: () => Promise<void>
 ): Promise<void> {
-  const previous = chatLocks.get(chatId) ?? Promise.resolve();
-  let release!: () => void;
-  const current = new Promise<void>((resolve) => {
-    release = resolve;
-  });
-  const chain = previous.then(() => current);
-  chatLocks.set(chatId, chain);
+  return chatLock.withLock(chatId, fn);
+}
 
-  try {
-    await previous;
-    await fn();
-  } finally {
-    release();
-    if (chatLocks.get(chatId) === chain) {
-      chatLocks.delete(chatId);
-    }
-  }
+/** @internal Test helper — clears the in-process chat lock map. */
+export function resetChatLocksForTests(): void {
+  chatLock.resetForTests();
+}
+
+/** @internal Test helper — seed a predecessor promise (rejection-safety tests). */
+export function seedChatLockForTests(
+  chatId: string,
+  promise: Promise<void>
+): void {
+  chatLock.seedForTests(chatId, promise);
 }

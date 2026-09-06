@@ -1,12 +1,17 @@
 import type { NakamaClient, RemoteChatSession } from "@nakama/client";
 import { isAttachOnlyCommand } from "@nakama/core";
-import { hasActiveAgentQuestionnaire } from "@nakama/core/agent-questionnaire";
+import {
+  formatAgentQuestionnaireMessage,
+  hasActiveAgentQuestionnaire,
+} from "@nakama/core/agent-questionnaire";
+import { formatClientError } from "@nakama/core/api-error";
 import {
   clearActiveStream,
   isAbortError,
   registerActiveStream,
   stopActiveStream,
 } from "@nakama/core/channel-active-stream";
+import { createChatLock } from "@nakama/core/channel-chat-lock";
 import {
   type ChannelOrgStore,
   findOrgBySelectionInput,
@@ -14,6 +19,8 @@ import {
   formatOrgSwitchConfirmation,
   prepareChannelOrgContext,
 } from "@nakama/core/channel-org";
+import type { ChannelSessionStore } from "@nakama/core/channel-session-store";
+import { createTypingLoop } from "@nakama/core/channel-typing-loop";
 import type { ImageAttachment, SendMessageInput } from "@nakama/core/contract";
 import { addDiscordAllowedUserId } from "@nakama/core/discord-config";
 import {
@@ -38,8 +45,10 @@ import {
   maybeSendRequestedDiscordArtifactAttachment,
   uploadDiscordArtifactFromToolResult,
 } from "./channel-artifact-flow";
+import { isChannelDebugEnabled } from "./channel-log";
 import type { DiscordBridgeConfig } from "./config";
-import { formatError, HELP_TEXT, splitDiscordMessage } from "./format";
+import { DiscordEditableMessage } from "./editable-message";
+import { HELP_TEXT, splitDiscordMessage } from "./format";
 import {
   type DiscordBotInfo,
   explainGuildMessageHandling,
@@ -62,13 +71,10 @@ import {
   type DiscordMessenger,
   getMessageChannel,
 } from "./messenger";
-import { DiscordQuestionnaireMessage } from "./questionnaire-message";
-import type { SessionStore } from "./session-store";
 import type { ThreadStore } from "./thread-store";
 import { DiscordTodoStatusMessage } from "./todo-status-message";
-import { createTypingLoop } from "./typing-indicator";
 
-const chatLocks = new Map<string, Promise<void>>();
+const chatLock = createChatLock({ waitMs: 15 * 60 * 1000 });
 const THREAD_OWNERSHIP_LOCK_KEY = "__discord_thread_ownership__";
 
 /**
@@ -76,9 +82,7 @@ const THREAD_OWNERSHIP_LOCK_KEY = "__discord_thread_ownership__";
  * Long enough for legitimate multi-minute tool/LLM turns; short enough that a
  * wedged run cannot silence a thread forever. Slash commands bypass this lock.
  */
-export const chatLockOptions = {
-  waitMs: 15 * 60 * 1000,
-};
+export const chatLockOptions = chatLock.options;
 
 const GROUP_MESSAGE_PREFIX =
   "[Discord channel — your reply is visible to everyone in this channel.]\n";
@@ -107,7 +111,7 @@ export interface ChatHandlerDeps {
   config: DiscordBridgeConfig;
   getBotInfo?: () => DiscordBotInfo | undefined;
   orgStore: ChannelOrgStore;
-  sessionStore: SessionStore;
+  sessionStore: ChannelSessionStore;
   threadStore: ThreadStore;
 }
 
@@ -149,7 +153,9 @@ export function createChatHandler(deps: ChatHandlerDeps) {
     console.log(
       "[discord] handle",
       groupDecision?.reason ?? (isGuild ? "none" : "dm"),
-      { botId: botInfo?.id, botOwnsThread, channelId, isThread }
+      isChannelDebugEnabled()
+        ? { botId: botInfo?.id, botOwnsThread, channelId, isThread }
+        : { botOwnsThread, isThread }
     );
 
     if (groupDecision && !groupDecision.shouldHandle) {
@@ -159,7 +165,11 @@ export function createChatHandler(deps: ChatHandlerDeps) {
 
     if (isThread && groupDecision?.reason === "claim-thread") {
       await trackOwnedThread(channelId);
-      console.log("[discord] claimed thread", channelId);
+      console.log(
+        isChannelDebugEnabled()
+          ? `[discord] claimed thread ${channelId}`
+          : "[discord] claimed thread"
+      );
     }
 
     const resolvedParentId = isThread
@@ -187,27 +197,36 @@ export function createChatHandler(deps: ChatHandlerDeps) {
       parentResolution
     );
 
-    // Auth/org/thread-create run without the agent-stream lock so parallel parent mentions
-    // can each open a thread. Agent work locks per conversation/thread key below.
-    await authStore.reload();
-    const isAuthorized = authStore.isAuthorized(userId);
+    // Auth reload + pairing under the conversation lock so concurrent DMs cannot
+    // race reload against a just-written pairing. Agent work still locks later so
+    // parallel parent mentions can each open a thread.
+    let isAuthorized = false;
+    await withChatLock(conversationKey, async () => {
+      await authStore.reload();
+      isAuthorized = authStore.isAuthorized(userId);
+
+      if (!isAuthorized) {
+        console.log(
+          isChannelDebugEnabled()
+            ? `[discord] unauthorized ${userId}`
+            : "[discord] unauthorized"
+        );
+        if (isGuild) {
+          return;
+        }
+
+        if (!text) {
+          await messenger.send(
+            "Send your pairing code as text to link this chat."
+          );
+          return;
+        }
+
+        await handlePairing(text, userId, messenger);
+      }
+    });
 
     if (!isAuthorized) {
-      console.log("[discord] unauthorized", userId);
-      if (isGuild) {
-        return;
-      }
-
-      if (!text) {
-        await messenger.send(
-          "Send your pairing code as text to link this chat."
-        );
-        return;
-      }
-
-      await withChatLock(conversationKey, async () => {
-        await handlePairing(text, userId, messenger);
-      });
       return;
     }
 
@@ -235,7 +254,11 @@ export function createChatHandler(deps: ChatHandlerDeps) {
         orgGateText
       );
       if (!orgReady) {
-        console.log("[discord] skip org-gate", channelOrgKey);
+        console.log(
+          isChannelDebugEnabled()
+            ? `[discord] skip org-gate ${channelOrgKey}`
+            : "[discord] skip org-gate"
+        );
         return;
       }
     }
@@ -306,7 +329,11 @@ export function createChatHandler(deps: ChatHandlerDeps) {
         replyConversationKey = `g:${channelId}:t:${thread.id}`;
         replyMessenger = createDiscordMessenger(thread);
         replyIsThread = true;
-        console.log("[discord] thread created", thread.id);
+        console.log(
+          isChannelDebugEnabled()
+            ? `[discord] thread created ${thread.id}`
+            : "[discord] thread created"
+        );
       } else {
         console.log("[discord] thread create failed, falling back to channel");
       }
@@ -314,7 +341,7 @@ export function createChatHandler(deps: ChatHandlerDeps) {
 
     console.log(
       "[discord] chat start",
-      replyConversationKey,
+      ...(isChannelDebugEnabled() ? [replyConversationKey] : []),
       `messageId=${message.id ?? "unknown"}`,
       `textBytes=${Buffer.byteLength(messageText, "utf8")}`
     );
@@ -331,7 +358,11 @@ export function createChatHandler(deps: ChatHandlerDeps) {
       );
     });
 
-    console.log("[discord] chat done", replyConversationKey);
+    console.log(
+      isChannelDebugEnabled()
+        ? `[discord] chat done ${replyConversationKey}`
+        : "[discord] chat done"
+    );
   }
 
   async function createGuildThread(
@@ -580,7 +611,7 @@ export function createChatHandler(deps: ChatHandlerDeps) {
       }
 
       console.error("Slash command error:", error);
-      await messenger.send(formatError(error)).catch(() => {});
+      await messenger.send(formatClientError(error)).catch(() => {});
     }
   }
 
@@ -692,18 +723,21 @@ export function createChatHandler(deps: ChatHandlerDeps) {
       isThread
     );
 
-    const signal = registerActiveStream(conversationKey);
-    const typingLoop = createTypingLoop(messenger);
+    const typingLoop = createTypingLoop(() => messenger.sendTyping(), {
+      refreshMs: 8000,
+    });
     const todoStatus = new DiscordTodoStatusMessage(messenger);
-    const questionnaireStatus = new DiscordQuestionnaireMessage(messenger);
-    typingLoop.start();
+    const questionnaireStatus = new DiscordEditableMessage(messenger);
 
     let reply = "";
     let earlyAck: Promise<void> | undefined;
     let postedQuestionnaire = false;
     const pendingArtifactUploads: Promise<unknown>[] = [];
+    const signal = registerActiveStream(conversationKey);
 
     try {
+      typingLoop.start();
+
       reply = await session.sendStream(
         streamInput,
         {
@@ -714,7 +748,9 @@ export function createChatHandler(deps: ChatHandlerDeps) {
             typingLoop.ping();
             if (hasActiveAgentQuestionnaire(questionnaire)) {
               postedQuestionnaire = true;
-              void questionnaireStatus.update(questionnaire);
+              void questionnaireStatus.render(
+                formatAgentQuestionnaireMessage(questionnaire)
+              );
             }
           },
           onThinking: () => {
@@ -779,7 +815,7 @@ export function createChatHandler(deps: ChatHandlerDeps) {
       }
 
       await todoStatus.fail();
-      await messenger.send(formatError(error));
+      await messenger.send(formatClientError(error));
       return;
     } finally {
       clearActiveStream(conversationKey);
@@ -1028,7 +1064,7 @@ export function createChatHandler(deps: ChatHandlerDeps) {
 
       await replyChunks(messenger, lines.join("\n"));
     } catch (error) {
-      await messenger.send(formatError(error));
+      await messenger.send(formatClientError(error));
     }
   }
 
@@ -1036,10 +1072,16 @@ export function createChatHandler(deps: ChatHandlerDeps) {
     const existing = sessionStore.get(chatId);
 
     if (existing) {
+      const hot = sessionStore.getHotSession<RemoteChatSession>(chatId);
+      if (hot) {
+        return hot;
+      }
+
       const session = client.createChatSession(existing.sessionId, "discord");
 
       try {
         await session.getMessages();
+        sessionStore.setHotSession(chatId, session);
         return session;
       } catch {
         // Session missing on server; create a new one below
@@ -1064,6 +1106,7 @@ export function createChatHandler(deps: ChatHandlerDeps) {
       sessionId: session.id,
       updatedAt: new Date().toISOString(),
     });
+    sessionStore.setHotSession(chatId, session);
     await sessionStore.save();
 
     return session;
@@ -1226,46 +1269,23 @@ export async function withChatLock(
   chatId: string,
   fn: () => Promise<void>
 ): Promise<void> {
-  const previous = chatLocks.get(chatId) ?? Promise.resolve();
-  let release!: () => void;
-  const gate = new Promise<void>((resolve) => {
-    release = resolve;
-  });
-  chatLocks.set(chatId, gate);
-
-  const waitMs = chatLockOptions.waitMs;
-  let timedOut = false;
-  if (waitMs > 0) {
-    timedOut = await new Promise<boolean>((resolve) => {
-      const timer = setTimeout(() => resolve(true), waitMs);
-      previous
-        .then(() => {
-          clearTimeout(timer);
-          resolve(false);
-        })
-        .catch(() => {
-          clearTimeout(timer);
-          resolve(false);
-        });
-    });
-  } else {
-    await previous.catch(() => undefined);
-  }
-
-  if (timedOut) {
-    console.warn(
-      `Chat lock for ${chatId} exceeded ${waitMs}ms wait; proceeding to recover from a wedged run.`
-    );
-  }
-
-  try {
-    await fn();
-  } finally {
-    release();
-  }
+  return chatLock.withLock(chatId, fn);
 }
 
 /** @internal Test helper — clears the in-process chat lock map. */
 export function resetChatLocksForTests(): void {
-  chatLocks.clear();
+  chatLock.resetForTests();
+}
+
+/** @internal Test helper — map size for leak checks. */
+export function getChatLockCountForTests(): number {
+  return chatLock.getSizeForTests();
+}
+
+/** @internal Test helper — seed a predecessor promise (rejection-safety tests). */
+export function seedChatLockForTests(
+  chatId: string,
+  promise: Promise<void>
+): void {
+  chatLock.seedForTests(chatId, promise);
 }

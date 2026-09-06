@@ -3,14 +3,33 @@ import {
   type SkillPostTurnReviewOutcome,
 } from "@nakama/agent";
 import {
+  type AgentChannel,
   type ChatMessage,
   extractLatestTurnMessages,
-  resolveSkillPostTurnReviewEnabled,
+  parseAgentChannel,
+  resolveProfileOrgBooleanOverride,
   type UserConfig,
 } from "@nakama/core";
 import type { DatabaseAdapter } from "@nakama/db";
-import { createProviderForInstance } from "../providers/create";
-import { resolveProfileProviderSelection } from "./provider-instance-helpers";
+import { createProviderForProfile } from "./provider-instance-helpers";
+
+/**
+ * Which channels run the post-turn skill review. Total over `AgentChannel`, so
+ * a new channel fails the typecheck here and has to be decided. This gate is
+ * where #213 happened: `ae27f7b2` shipped it as
+ * `channel !== "web" && channel !== "cli"`, and Discord, Telegram and WhatsApp
+ * skipped the review for five days and 23 hours until `e0026ea6` (#224).
+ */
+const POST_TURN_REVIEW_CHANNELS = {
+  automation: false,
+  cli: true,
+  discord: true,
+  subagent: false,
+  task: false,
+  telegram: true,
+  web: true,
+  whatsapp: true,
+} as const satisfies Record<AgentChannel, boolean>;
 
 const MIN_TOOL_CALLS_FOR_COMPLEX_TURN = 5;
 const MANAGE_SKILLS_NAME = "manage-skills";
@@ -49,7 +68,7 @@ export type PostTurnReviewRunner = (
   context: PostTurnReviewRunnerContext
 ) => Promise<SkillPostTurnReviewOutcome | void>;
 
-export function countToolCallsInTurn(turnMessages: ChatMessage[]): number {
+function countToolCallsInTurn(turnMessages: ChatMessage[]): number {
   let count = 0;
   for (const message of turnMessages) {
     if (message.role === "assistant" && message.toolCalls) {
@@ -59,7 +78,7 @@ export function countToolCallsInTurn(turnMessages: ChatMessage[]): number {
   return count;
 }
 
-export function turnHasToolError(turnMessages: ChatMessage[]): boolean {
+function turnHasToolError(turnMessages: ChatMessage[]): boolean {
   for (const message of turnMessages) {
     if (message.role !== "tool") {
       continue;
@@ -81,7 +100,7 @@ export function turnHasToolError(turnMessages: ChatMessage[]): boolean {
   return false;
 }
 
-export function turnUsedSkillManage(turnMessages: ChatMessage[]): boolean {
+function turnUsedSkillManage(turnMessages: ChatMessage[]): boolean {
   for (const message of turnMessages) {
     if (
       message.role === "assistant" &&
@@ -140,10 +159,9 @@ export class SkillPostTurnReviewService {
 
   constructor(
     private readonly db: DatabaseAdapter,
-    private readonly getUserConfig: () => UserConfig | null,
-    runner?: PostTurnReviewRunner
+    private readonly getUserConfig: () => UserConfig | null
   ) {
-    this.runner = runner ?? ((context) => this.reviewTurnWithLlm(context));
+    this.runner = (context) => this.reviewTurnWithLlm(context);
   }
 
   /** Test/injection hook — U4 wraps this to stage/suggest after the LLM outcome. */
@@ -193,15 +211,10 @@ export class SkillPostTurnReviewService {
         return "session_missing";
       }
 
-      const channel = session.channel;
-      const interactiveChannels = new Set([
-        "web",
-        "cli",
-        "discord",
-        "telegram",
-        "whatsapp",
-      ]);
-      if (!interactiveChannels.has(channel)) {
+      // The session row keeps `channel` as a string, so an unknown value is
+      // narrowed away here and skips the review exactly as it did before.
+      const channel = parseAgentChannel(session.channel);
+      if (!(channel && POST_TURN_REVIEW_CHANNELS[channel])) {
         return "channel_not_interactive";
       }
 
@@ -215,10 +228,10 @@ export class SkillPostTurnReviewService {
         return "org_missing";
       }
 
-      const enabled = resolveSkillPostTurnReviewEnabled({
-        orgSkillsPostTurnReview: org.skillsPostTurnReview ?? false,
-        profileSkillsPostTurnReview: profile.skillsPostTurnReview ?? null,
-      });
+      const enabled = resolveProfileOrgBooleanOverride(
+        profile.skillsPostTurnReview ?? null,
+        org.skillsPostTurnReview ?? false
+      );
       if (!enabled) {
         return "flag_disabled";
       }
@@ -253,27 +266,7 @@ export class SkillPostTurnReviewService {
     }
   }
 
-  async resolveProviderForProfile(profileId: string) {
-    const userConfig = this.getUserConfig();
-    if (!userConfig) {
-      return null;
-    }
-
-    const profile = await this.db.getProfile(profileId);
-    if (!profile) {
-      return null;
-    }
-
-    const selection = resolveProfileProviderSelection({
-      defaultProviderId: userConfig.defaultProviderId,
-      profileModel: profile.model,
-      providers: userConfig.providers,
-    });
-
-    if (!selection) {
-      return null;
-    }
-
-    return createProviderForInstance(selection.instance, selection.model);
+  resolveProviderForProfile(profileId: string) {
+    return createProviderForProfile(this.db, profileId, this.getUserConfig());
   }
 }

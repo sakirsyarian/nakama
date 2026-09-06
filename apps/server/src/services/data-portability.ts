@@ -25,6 +25,7 @@ import {
   type DataImportPreviewResponse,
   getUserConfigDir,
   NAKAMA_API_VERSION,
+  NakamaApiError,
   pathExists,
   type RestoreDataImportResponse,
 } from "@nakama/core";
@@ -32,6 +33,15 @@ import { unzipSync, zipSync } from "fflate";
 
 export const NAKAMA_EXPORT_MANIFEST = "nakama-export.json";
 export const NAKAMA_EXPORT_FORMAT_VERSION = 1;
+
+// Setup import is unauthenticated until the first admin exists, so an archive
+// has to be capped on the way in rather than once it is already in memory.
+export const MAX_IMPORT_ARCHIVE_BYTES = 100 * 1024 * 1024;
+export const MAX_IMPORT_ENTRY_BYTES = 100 * 1024 * 1024;
+export const MAX_IMPORT_UNCOMPRESSED_BYTES = 500 * 1024 * 1024;
+/** Base64 carries 3 bytes per 4 characters. */
+const MAX_IMPORT_ARCHIVE_BASE64_CHARS =
+  Math.ceil(MAX_IMPORT_ARCHIVE_BYTES / 3) * 4;
 
 export interface CreateDataExportOptions {
   databasePath?: string | null;
@@ -167,12 +177,25 @@ export async function previewNakamaDataImport(
 }
 
 export function decodeArchiveRequestData(data: string): Buffer {
+  // Checked before the trim, so an oversized payload is rejected without
+  // being copied and then decoded.
+  if (data.length > MAX_IMPORT_ARCHIVE_BASE64_CHARS) {
+    throw new NakamaApiError(
+      `Import archive must be at most ${megabytes(MAX_IMPORT_ARCHIVE_BYTES)}.`,
+      413
+    );
+  }
+
   const trimmed = data.trim();
   if (!trimmed) {
-    throw new Error("Import archive data is required.");
+    throw new NakamaApiError("Import archive data is required.", 400);
   }
 
   return Buffer.from(trimmed, "base64");
+}
+
+function megabytes(bytes: number): string {
+  return `${bytes / (1024 * 1024)} MB`;
 }
 
 export async function restoreNakamaDataImport(
@@ -180,7 +203,7 @@ export async function restoreNakamaDataImport(
   options: RestoreDataImportOptions
 ): Promise<RestoreDataImportResponse> {
   if (!options.confirm) {
-    throw new Error("Restore confirmation is required.");
+    throw new NakamaApiError("Restore confirmation is required.", 400);
   }
 
   const rootDir = resolveNakamaRootDir(options.rootDir);
@@ -339,7 +362,10 @@ async function writeRestoredEntry(
   const targetPath = resolve(rootDir, entry.name);
   const relativeTarget = relative(rootDir, targetPath);
   if (relativeTarget.startsWith("..") || isAbsolute(relativeTarget)) {
-    throw new Error(`Archive entry escapes restore root: ${entry.name}`);
+    throw new NakamaApiError(
+      `Archive entry escapes restore root: ${entry.name}`,
+      400
+    );
   }
 
   await mkdir(dirname(targetPath), { mode: 0o700, recursive: true });
@@ -347,8 +373,34 @@ async function writeRestoredEntry(
 }
 
 function readZip(buffer: Buffer): ZipEntry[] {
+  let uncompressedTotal = 0;
+  // fflate sizes each output buffer from the entry's declared uncompressed
+  // size, so refusing here is what stops a bomb from being inflated at all.
+  const admitEntry = (name: string, size: number): boolean => {
+    if (size > MAX_IMPORT_ENTRY_BYTES) {
+      throw new NakamaApiError(
+        `Archive entry ${name} exceeds the ${megabytes(MAX_IMPORT_ENTRY_BYTES)} limit.`,
+        400
+      );
+    }
+
+    uncompressedTotal += size;
+    if (uncompressedTotal > MAX_IMPORT_UNCOMPRESSED_BYTES) {
+      throw new NakamaApiError(
+        `Archive exceeds the ${megabytes(MAX_IMPORT_UNCOMPRESSED_BYTES)} uncompressed limit.`,
+        400
+      );
+    }
+
+    return true;
+  };
+
   try {
-    return Object.entries(unzipSync(buffer))
+    return Object.entries(
+      unzipSync(buffer, {
+        filter: (file) => admitEntry(file.name, file.originalSize),
+      })
+    )
       .filter(([name]) => !name.endsWith("/"))
       .map(([name, data]) => {
         validateArchivePath(name);
@@ -360,13 +412,10 @@ function readZip(buffer: Buffer): ZipEntry[] {
         };
       });
   } catch (error) {
-    if (error instanceof Error) {
-      if (error.message === "invalid zip data") {
-        throw new Error("Invalid ZIP archive.");
-      }
-      throw new Error(`Invalid ZIP archive. ${error.message}`);
+    if (error instanceof NakamaApiError) {
+      throw error;
     }
-    throw new Error("Invalid ZIP archive.");
+    throw new NakamaApiError("Invalid ZIP archive.", 400);
   }
 }
 
@@ -375,7 +424,7 @@ function readManifest(entries: ZipEntry[]): DataExportManifest {
     (entry) => entry.name === NAKAMA_EXPORT_MANIFEST
   );
   if (!manifestEntry) {
-    throw new Error("Archive is missing Nakama export manifest.");
+    throw new NakamaApiError("Archive is missing Nakama export manifest.", 400);
   }
 
   let manifest: DataExportManifest;
@@ -384,15 +433,18 @@ function readManifest(entries: ZipEntry[]): DataExportManifest {
       manifestEntry.data.toString("utf8")
     ) as DataExportManifest;
   } catch {
-    throw new Error("Nakama export manifest is not valid JSON.");
+    throw new NakamaApiError("Nakama export manifest is not valid JSON.", 400);
   }
 
   if (manifest.kind !== "nakama-export") {
-    throw new Error("Archive is not a Nakama export.");
+    throw new NakamaApiError("Archive is not a Nakama export.", 400);
   }
 
   if (manifest.version !== NAKAMA_EXPORT_FORMAT_VERSION) {
-    throw new Error(`Unsupported Nakama export version: ${manifest.version}`);
+    throw new NakamaApiError(
+      `Unsupported Nakama export version: ${manifest.version}`,
+      400
+    );
   }
 
   return manifest;
@@ -400,15 +452,18 @@ function readManifest(entries: ZipEntry[]): DataExportManifest {
 
 function validateArchivePath(path: string): void {
   if (!path || path.includes("\0")) {
-    throw new Error("Archive entry path is empty or invalid.");
+    throw new NakamaApiError("Archive entry path is empty or invalid.", 400);
   }
 
   if (path !== toZipPath(path)) {
-    throw new Error(`Archive entry must use POSIX separators: ${path}`);
+    throw new NakamaApiError(
+      `Archive entry must use POSIX separators: ${path}`,
+      400
+    );
   }
 
   if (isAbsolute(path) || /^[a-zA-Z]:/.test(path)) {
-    throw new Error(`Archive entry must be relative: ${path}`);
+    throw new NakamaApiError(`Archive entry must be relative: ${path}`, 400);
   }
 
   const normalized = normalize(path).split(sep).join("/");
@@ -417,12 +472,18 @@ function validateArchivePath(path: string): void {
     normalized.startsWith("../") ||
     normalized.includes("/../")
   ) {
-    throw new Error(`Archive entry escapes restore root: ${path}`);
+    throw new NakamaApiError(
+      `Archive entry escapes restore root: ${path}`,
+      400
+    );
   }
 
   const first = normalized.split("/")[0] ?? "";
   if (first.startsWith(RESTORE_PREFIX) || first.startsWith(BACKUP_PREFIX)) {
-    throw new Error(`Archive entry uses a reserved restore path: ${path}`);
+    throw new NakamaApiError(
+      `Archive entry uses a reserved restore path: ${path}`,
+      400
+    );
   }
 }
 

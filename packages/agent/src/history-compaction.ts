@@ -3,6 +3,7 @@ import type {
   CompactionResponse,
   LlmToolDefinition,
   ProviderClient,
+  ProviderName,
 } from "@nakama/core";
 import {
   estimateUserContentTokens,
@@ -78,18 +79,17 @@ function estimateTokens(text: string): number {
   return Math.ceil(text.length / TOKEN_ESTIMATE_RATIO);
 }
 
-function stripThinkingFromProviderContent(content: unknown[]): unknown[] {
-  return content.filter((item) => {
-    if (typeof item !== "object" || item === null) {
-      return true;
-    }
-
-    const type = (item as { type?: unknown }).type;
-    return type !== "thinking" && type !== "reasoning";
-  });
+// Gemini is the only provider whose mapper never replays the reasoning trace:
+// toGeminiAssistantParts sends content and toolCalls only, because replaying a
+// thought needs the thoughtSignature the parser drops. See #768.
+export function providerReplaysThinking(provider: ProviderName): boolean {
+  return provider !== "gemini";
 }
 
-function estimateMessageTokens(messages: readonly ChatMessage[]): number {
+function estimateMessageTokens(
+  messages: readonly ChatMessage[],
+  replaysThinking: boolean
+): number {
   let total = 0;
 
   for (const message of messages) {
@@ -99,18 +99,27 @@ function estimateMessageTokens(messages: readonly ChatMessage[]): number {
     }
 
     if (message.role === "assistant") {
-      total += estimateTokens(message.content);
-
-      if (message.toolCalls?.length) {
-        total += estimateTokens(JSON.stringify(message.toolCalls));
-      }
-
+      // When providerContent is present it is what providers replay (#340).
+      // Count it verbatim (thinking/reasoning included) and skip content/
+      // toolCalls, which already live inside it. OpenAI tool turns can
+      // diverge slightly: Responses rebuilds function_call items from
+      // toolCalls and drops id/status; that gap is accepted deliberately
+      // rather than making the estimator provider-aware.
       if (message.providerContent?.length) {
-        total += estimateTokens(
-          JSON.stringify(
-            stripThinkingFromProviderContent(message.providerContent)
-          )
-        );
+        total += estimateTokens(JSON.stringify(message.providerContent));
+      } else {
+        total += estimateTokens(message.content);
+
+        // The chat-completions mapper replays this trace as reasoning_content.
+        // Anthropic and Responses carry it inside providerContent, counted
+        // above, and their parsers set that whenever a trace is present.
+        if (replaysThinking && message.thinking) {
+          total += estimateTokens(message.thinking);
+        }
+
+        if (message.toolCalls?.length) {
+          total += estimateTokens(JSON.stringify(message.toolCalls));
+        }
       }
 
       continue;
@@ -125,11 +134,12 @@ function estimateMessageTokens(messages: readonly ChatMessage[]): number {
 export function estimateHistoryTokens(
   messages: readonly ChatMessage[],
   systemPrompt: string,
-  tools?: LlmToolDefinition[]
+  tools?: LlmToolDefinition[],
+  replaysThinking = true
 ): number {
   return (
     estimateTokens(systemPrompt) +
-    estimateMessageTokens(messages) +
+    estimateMessageTokens(messages, replaysThinking) +
     estimateTokens(JSON.stringify(tools ?? []))
   );
 }
@@ -238,7 +248,7 @@ export function pruneToolOutputs(
 
   let total = 0;
   let pruned = 0;
-  const toPrune: Extract<ChatMessage, { role: "tool" }>[] = [];
+  const pruneIndexes: number[] = [];
   let turns = 0;
 
   for (
@@ -280,15 +290,20 @@ export function pruneToolOutputs(
     }
 
     pruned += estimate;
-    toPrune.push(message);
+    pruneIndexes.push(messageIndex);
   }
 
   if (pruned <= minimum) {
     return { prunedTokens: 0 };
   }
 
-  for (const message of toPrune) {
-    message.content = PRUNE_TRUNCATION;
+  // Copy-on-write (#589): replace slots so in-flight providers keep originals.
+  for (const index of pruneIndexes) {
+    const message = messages[index];
+    if (!message || message.role !== "tool") {
+      continue;
+    }
+    messages[index] = { ...message, content: PRUNE_TRUNCATION };
   }
 
   return { prunedTokens: pruned };
@@ -302,7 +317,8 @@ export async function compactHistory(
   const usedTokens = estimateHistoryTokens(
     input.history,
     input.systemPrompt,
-    input.tools
+    input.tools,
+    providerReplaysThinking(input.provider.name)
   );
   const overflow = isOverflow(usedTokens, input.compaction);
   const shouldSummarize = input.force === true || overflow;

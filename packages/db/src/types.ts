@@ -39,6 +39,43 @@ export interface AutomationUnreadCountRecord {
   unreadCount: number;
 }
 
+export interface StoredWorkflowRecord {
+  createdAt: string;
+  definition: unknown;
+  enabled: boolean;
+  id: string;
+  name: string;
+  orgId?: string | null;
+  profileId: string;
+  updatedAt: string;
+  version: number;
+}
+
+export interface StoredWorkflowRunRecord {
+  completedAt: string | null;
+  error: string | null;
+  id: string;
+  input: string | null;
+  output: string | null;
+  startedAt: string;
+  status: AutomationRunStatus;
+  workflowId: string;
+}
+
+export interface StoredWorkflowRunStepRecord {
+  completedAt: string | null;
+  error: string | null;
+  id: string;
+  input: string | null;
+  kind: string;
+  output: string | null;
+  position: number;
+  runId: string;
+  startedAt: string;
+  status: string;
+  stepId: string;
+}
+
 export interface StoredProfileRecord {
   createdAt: string;
   id: string;
@@ -119,32 +156,6 @@ export interface StoredSessionSummaryRecord {
   updatedAt: string;
 }
 
-export interface StoredTaskRecord {
-  createdAt: string;
-  description: string;
-  id: string;
-  orgId?: string | null;
-  position: number;
-  profileId: string;
-  prompt: string;
-  sessionId?: string | null;
-  status: string;
-  title: string;
-  updatedAt: string;
-}
-
-export type TaskRunStatus = "running" | "completed" | "failed";
-
-export interface StoredTaskRunRecord {
-  completedAt: string | null;
-  error: string | null;
-  id: string;
-  output: string | null;
-  startedAt: string;
-  status: TaskRunStatus;
-  taskId: string;
-}
-
 export interface StoredLlmUsageStatsRecord {
   estimatedCostUsd: number;
   id: string;
@@ -168,6 +179,8 @@ export interface StoredLlmUsageModelStatsRecord {
 }
 
 export interface StoredWorkspaceSettingsRecord {
+  /** Workspace-global interval for refreshing automation schedules and curator work. */
+  automationWorkerPollIntervalMs: number;
   codingAgentHarnesses: StoredCodingAgentHarnessRecord[];
   /**
    * When true (default), coding CLIs get Nakama provider credentials at spawn.
@@ -176,7 +189,6 @@ export interface StoredWorkspaceSettingsRecord {
   codingAgentProviderPassthrough: boolean;
   id: string;
   imageModel: string | null;
-  orgId?: string | null;
   selectedCodingAgentHarness: string | null;
   /** null = inherit the NAKAMA_OMNI env var; true/false = set explicitly here. */
   tokenOptimizerEnabled?: boolean | null;
@@ -385,9 +397,11 @@ export interface StoredOrganizationRecord {
   createdAt: string;
   id: string;
   name: string;
+  skillsCuratorArchiveAfterDays?: number;
   skillsCuratorConsolidateEnabled?: boolean;
   skillsCuratorEnabled?: boolean;
   skillsCuratorLastRunAt?: string | null;
+  skillsCuratorStaleAfterDays?: number;
   skillsPostTurnReview?: boolean;
   skillsWriteApproval?: boolean;
   slug: string;
@@ -422,6 +436,35 @@ export interface StoredOrgInviteRecord {
 }
 
 export type OrgMemoryProposalStatus = "pending" | "approved" | "rejected";
+
+export type ProfileChangeSource =
+  | "dashboard"
+  | "super_bot"
+  | "skill_manage"
+  | "pack_import";
+
+export type ProfileChangeField =
+  | "system_prompt"
+  | "soul.soul"
+  | "soul.style"
+  | "soul.instructions"
+  | "soul.memory"
+  | "tools"
+  | "skills"
+  | "mcp"
+  | "pack_import";
+
+export interface StoredProfileChangeEvent {
+  actorUserId: string | null;
+  afterValue: string | null;
+  beforeValue: string | null;
+  createdAt: string;
+  field: ProfileChangeField;
+  id: string;
+  orgId: string;
+  profileId: string;
+  source: ProfileChangeSource;
+}
 
 export interface StoredOrgMemoryProposal {
   bullet: string;
@@ -529,6 +572,16 @@ export interface DatabaseAdapter {
   assignMcpServerToProfile(profileId: string, serverId: string): Promise<void>;
   assignSkillToProfile(profileId: string, skillId: string): Promise<void>;
   assignToolToProfile(profileId: string, toolId: string): Promise<void>;
+  /**
+   * First-admin claim. Writes the org, the admin and the membership in one
+   * transaction, and returns false without writing anything when a human user
+   * already exists, so two concurrent setups cannot leave a memberless org.
+   */
+  bootstrapInitialSetup(input: {
+    member: StoredOrgMemberRecord;
+    organization: StoredOrganizationRecord;
+    user: StoredUserRecord;
+  }): Promise<boolean>;
   /** Users excluding the auto-created CLI bearer-auth identity. */
   countHumanUsers(): Promise<number>;
   countOrgMemoryProposals(
@@ -554,6 +607,9 @@ export interface DatabaseAdapter {
 
   createOrgMemoryProposal(record: StoredOrgMemoryProposal): Promise<void>;
 
+  /** Append-only insert. Adapters must not expose update/delete for this table. */
+  createProfileChangeEvent(record: StoredProfileChangeEvent): Promise<void>;
+
   createSkillProposal(record: StoredSkillProposal): Promise<void>;
 
   createSkillSuggestion(record: StoredSkillSuggestion): Promise<void>;
@@ -570,8 +626,9 @@ export interface DatabaseAdapter {
   deleteProfile(id: string): Promise<boolean>;
   deleteSession(id: string): Promise<boolean>;
   deleteSkill(id: string): Promise<boolean>;
-  deleteTask(id: string): Promise<boolean>;
   deleteTool(id: string): Promise<boolean>;
+  deleteWorkflow(id: string): Promise<boolean>;
+  deleteWorkflowRun(workflowId: string, runId: string): Promise<boolean>;
   getActiveArtifactShareByPath(
     orgId: string,
     profileId: string,
@@ -580,7 +637,6 @@ export interface DatabaseAdapter {
   getActiveAutomationRun(
     automationId: string
   ): Promise<StoredAutomationRunRecord | null>;
-  getActiveTaskRun(taskId: string): Promise<StoredTaskRunRecord | null>;
   getArtifactShareById(
     orgId: string,
     profileId: string,
@@ -690,12 +746,16 @@ export interface DatabaseAdapter {
     profileId: string,
     skillId: string
   ): Promise<StoredSkillUsageRecord | null>;
-  getTask(id: string): Promise<StoredTaskRecord | null>;
   getTool(id: string): Promise<StoredToolRecord | null>;
   getToolByName(name: string): Promise<StoredToolRecord | null>;
   getUserByEmail(email: string): Promise<StoredUserRecord | null>;
   getUserById(id: string): Promise<StoredUserRecord | null>;
   getUserContext(orgId: string, userId: string): Promise<string | null>;
+  getWorkflow(id: string): Promise<StoredWorkflowRecord | null>;
+  getWorkflowRun(
+    workflowId: string,
+    runId: string
+  ): Promise<StoredWorkflowRunRecord | null>;
 
   getWorkspaceSettings(): Promise<StoredWorkspaceSettingsRecord | null>;
   incrementLlmTurnUsage(orgId: string, delta: LlmTurnUsageDelta): Promise<void>;
@@ -727,7 +787,8 @@ export interface DatabaseAdapter {
 
   insertAttachment(record: StoredAttachmentRecord): Promise<void>;
   insertAutomationRun(record: StoredAutomationRunRecord): Promise<void>;
-  insertTaskRun(record: StoredTaskRunRecord): Promise<void>;
+  insertWorkflowRun(record: StoredWorkflowRunRecord): Promise<void>;
+  insertWorkflowRunStep(record: StoredWorkflowRunStepRecord): Promise<void>;
 
   listAutomationRuns(
     automationId: string,
@@ -767,6 +828,12 @@ export interface DatabaseAdapter {
     status?: OrgMemoryProposalStatus
   ): Promise<StoredOrgMemoryProposal[]>;
 
+  listProfileChangeEvents(
+    orgId: string,
+    profileId: string,
+    options?: { limit?: number; offset?: number }
+  ): Promise<StoredProfileChangeEvent[]>;
+
   listProfileComposioToolkits(
     profileId: string
   ): Promise<StoredProfileComposioToolkitRecord[]>;
@@ -805,10 +872,6 @@ export interface DatabaseAdapter {
     profileId: string
   ): Promise<StoredSkillUsageRecord[]>;
 
-  listTaskRuns(taskId: string, limit?: number): Promise<StoredTaskRunRecord[]>;
-
-  listTasks(): Promise<StoredTaskRecord[]>;
-  listTasksForOrg(orgId: string): Promise<StoredTaskRecord[]>;
   listToolOutputSavings(
     orgId: string
   ): Promise<StoredToolOutputSavingsRecord[]>;
@@ -819,6 +882,12 @@ export interface DatabaseAdapter {
   listUserOrganizations(
     userId: string
   ): Promise<StoredUserOrganizationRecord[]>;
+  listWorkflowRunSteps(runId: string): Promise<StoredWorkflowRunStepRecord[]>;
+  listWorkflowRuns(
+    workflowId: string,
+    limit?: number
+  ): Promise<StoredWorkflowRunRecord[]>;
+  listWorkflowsForOrg(orgId: string): Promise<StoredWorkflowRecord[]>;
   markOrgInviteAccepted(id: string, acceptedAt: string): Promise<void>;
   markSkillSuggestionApplied(
     orgId: string,
@@ -875,6 +944,12 @@ export interface DatabaseAdapter {
     activeOrgId: string | null
   ): Promise<void>;
   updateBrowserSessionLastUsedAt(id: string, lastUsedAt: string): Promise<void>;
+  /** False when the change would leave the org without an admin. */
+  updateOrgMemberRole(
+    orgId: string,
+    userId: string,
+    role: OrgRole
+  ): Promise<boolean>;
   updateOrgMemoryProposalStatus(
     orgId: string,
     id: string,
@@ -901,7 +976,6 @@ export interface DatabaseAdapter {
       reviewedAt: string;
     }
   ): Promise<boolean>;
-  updateTaskRun(record: StoredTaskRunRecord): Promise<void>;
   updateUserPassword(
     id: string,
     passwordHash: string,
@@ -912,6 +986,8 @@ export interface DatabaseAdapter {
     profile: { name: string | null; phone: string | null; email?: string },
     updatedAt: string
   ): Promise<void>;
+  updateWorkflowRun(record: StoredWorkflowRunRecord): Promise<void>;
+  updateWorkflowRunStep(record: StoredWorkflowRunStepRecord): Promise<void>;
   upsertAutomation(record: StoredAutomationRecord): Promise<void>;
   upsertAutomationRunReadThrough(
     userId: string,
@@ -932,7 +1008,7 @@ export interface DatabaseAdapter {
   upsertProfile(record: StoredProfileRecord): Promise<void>;
   upsertSession(record: StoredSessionRecord): Promise<void>;
   upsertSkill(record: StoredSkillRecord): Promise<void>;
-  upsertTask(record: StoredTaskRecord): Promise<void>;
   upsertTool(record: StoredToolRecord): Promise<void>;
+  upsertWorkflow(record: StoredWorkflowRecord): Promise<void>;
   upsertWorkspaceSettings(record: StoredWorkspaceSettingsRecord): Promise<void>;
 }

@@ -1,7 +1,4 @@
-export {
-  formatClientError as formatError,
-  NakamaApiError,
-} from "@nakama/core/api-error";
+export { NakamaApiError, NakamaAuthExpiredError } from "@nakama/core/api-error";
 export { NakamaClient } from "./client";
 export type {
   NakamaClientOptions,

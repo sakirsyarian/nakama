@@ -1,7 +1,5 @@
 import { describe, expect, test } from "bun:test";
 import {
-  agentWorkTabFromSearchParams,
-  agentWorkTabPath,
   orgSkillProposalsPath,
   pageIdFromPath,
   visibleNavGroups,
@@ -25,6 +23,7 @@ describe("visibleNavGroups", () => {
       "profiles",
       "settings",
       "soul",
+      "workers",
     ]);
   });
 
@@ -36,6 +35,7 @@ describe("visibleNavGroups", () => {
     expect(ids).toContain("organization");
     expect(ids).toContain("profiles");
     expect(ids).toContain("integrations");
+    expect(ids).toContain("workers");
     expect(ids).not.toContain("files");
   });
 
@@ -44,11 +44,13 @@ describe("visibleNavGroups", () => {
     expect(member).toContain("integrations");
     expect(member).not.toContain("soul");
     expect(member).not.toContain("organization");
+    expect(member).not.toContain("workers");
 
     const viewer = pageIdsFor(false, "viewer");
     expect(viewer).not.toContain("integrations");
     expect(viewer).not.toContain("soul");
     expect(viewer).not.toContain("organization");
+    expect(viewer).not.toContain("workers");
   });
 
   test("groups left with no reachable item are dropped", () => {
@@ -60,32 +62,16 @@ describe("visibleNavGroups", () => {
   });
 });
 
-describe("agent work navigation", () => {
-  test("defaults the unified page to automations", () => {
-    expect(agentWorkTabFromSearchParams(new URLSearchParams())).toBe(
-      "automations"
-    );
-    expect(
-      agentWorkTabFromSearchParams(new URLSearchParams("tab=unknown"))
-    ).toBe("automations");
-  });
-
-  test("reads the tasks tab from the URL", () => {
-    expect(agentWorkTabFromSearchParams(new URLSearchParams("tab=tasks"))).toBe(
-      "tasks"
-    );
-  });
-
-  test("builds canonical tab URLs", () => {
-    expect(agentWorkTabPath("automations")).toBe(
-      "/automations?tab=automations"
-    );
-    expect(agentWorkTabPath("tasks")).toBe("/automations?tab=tasks");
-  });
-
-  test("maps the legacy tasks path to the unified page", () => {
+describe("automations navigation", () => {
+  test("maps the automations path and the legacy tasks redirect target", () => {
     expect(pageIdFromPath("/tasks")).toBe("automations");
     expect(pageIdFromPath("/automations")).toBe("automations");
+  });
+});
+
+describe("workers navigation", () => {
+  test("maps the workers path", () => {
+    expect(pageIdFromPath("/workers")).toBe("workers");
   });
 });
 

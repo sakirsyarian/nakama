@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { AGENT_CHANNELS } from "@nakama/core";
 import { buildChatSystemPrompt } from "./chat-prompt";
 
 test("buildChatSystemPrompt includes automation skill pointer when create_automation is available", () => {
@@ -16,6 +17,39 @@ test("buildChatSystemPrompt includes automation skill pointer when create_automa
   expect(prompt).toContain("create-automation skill");
   expect(prompt).not.toContain("5-field cron syntax");
   expect(prompt).not.toContain("runAt");
+});
+
+test("buildChatSystemPrompt includes workflow tool pointer when list_workflows is available", () => {
+  const prompt = buildChatSystemPrompt(
+    [
+      {
+        description: "List workflows",
+        name: "list_workflows",
+        parameters: { properties: {}, type: "object" },
+      },
+    ],
+    { enableToolLoop: true }
+  );
+
+  expect(prompt).toContain("list_workflows");
+  expect(prompt).toContain("create-workflow skill");
+  expect(prompt).toContain("Never invent or edit a workflow id");
+});
+
+test("buildChatSystemPrompt omits workflow guidance when list_workflows is unavailable", () => {
+  const prompt = buildChatSystemPrompt(
+    [
+      {
+        description: "Write",
+        name: "write_file",
+        parameters: { properties: {}, type: "object" },
+      },
+    ],
+    { enableToolLoop: true }
+  );
+
+  expect(prompt).not.toContain("list_workflows");
+  expect(prompt).not.toContain("create-workflow skill");
 });
 
 test("buildChatSystemPrompt omits automation guidance when create_automation is unavailable", () => {
@@ -220,4 +254,16 @@ test("buildChatSystemPrompt tells Telegram not to invent attach refusals", () =>
 
   expect(prompt).toContain("do not say you cannot attach");
   expect(prompt).toContain("Telegram document");
+});
+
+// Every channel, so flipping one entry of MESSAGING_CHANNEL_PROMPT between a
+// config and null fails here rather than silently changing the reply style.
+test("buildChatSystemPrompt gives the messaging style to three channels only", () => {
+  const withStyle = AGENT_CHANNELS.filter((channel) =>
+    buildChatSystemPrompt([], { channel, enableToolLoop: true }).includes(
+      "Write like texting a friend"
+    )
+  );
+
+  expect(withStyle).toEqual(["telegram", "whatsapp", "discord"]);
 });

@@ -177,6 +177,7 @@ describe("data portability routes", () => {
           email: "admin@acme.test",
           password: created.adminMember.temporaryPassword,
         }),
+        headers: { "Content-Type": "application/json" },
         method: "POST",
       })
     );

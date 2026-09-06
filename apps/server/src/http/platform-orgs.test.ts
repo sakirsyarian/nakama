@@ -25,7 +25,6 @@ function createPlatformApp() {
       mcpService: {} as any,
       orgService: new OrgService(databaseAdapter, authService),
       systemStatus: { getStatus: async () => ({ ok: true }) } as any,
-      taskService: {} as any,
       webDistDir: null,
       workerManager: {} as any,
     }),
@@ -71,9 +70,11 @@ describe("platform org routes", () => {
         createdAt: expect.any(String),
         id: expect.stringMatching(/^org_/),
         name: "Acme Corp",
+        skillsCuratorArchiveAfterDays: 90,
         skillsCuratorConsolidateEnabled: false,
         skillsCuratorEnabled: false,
         skillsCuratorLastRunAt: null,
+        skillsCuratorStaleAfterDays: 30,
         skillsPostTurnReview: false,
         skillsWriteApproval: false,
         slug: "acme-corp",
@@ -132,6 +133,7 @@ describe("platform org routes", () => {
           email: "admin@acme.com",
           password: created.adminMember.temporaryPassword,
         }),
+        headers: { "Content-Type": "application/json" },
         method: "POST",
       })
     );
@@ -273,6 +275,7 @@ describe("platform org routes", () => {
           email: "admin@acme.com",
           password: created.adminMember.temporaryPassword,
         }),
+        headers: { "Content-Type": "application/json" },
         method: "POST",
       })
     );

@@ -51,7 +51,6 @@ function createMockApp(webDistDir: string | null) {
     systemStatus: {
       getStatus: async () => ({ ok: true }),
     } as any,
-    taskService: {} as any,
     webDistDir,
     workerManager: {} as any,
   });
@@ -70,7 +69,6 @@ function createBrowserAuthApp() {
     systemStatus: {
       getStatus: async () => ({ ok: true }),
     } as any,
-    taskService: {} as any,
     webDistDir: null,
     workerManager: {
       isValidWorker: () => true,
@@ -202,6 +200,7 @@ describe("browser session auth", () => {
           email: "admin@example.com",
           password: "password123",
         }),
+        headers: { "Content-Type": "application/json" },
         method: "POST",
       })
     );
@@ -338,6 +337,7 @@ describe("browser session auth", () => {
           email: "member@example.com",
           password: "password123",
         }),
+        headers: { "Content-Type": "application/json" },
         method: "POST",
       })
     );
@@ -374,7 +374,6 @@ describe("GET /v1/workers/{name}/logs", () => {
       systemStatus: {
         getStatus: async () => ({ ok: true }),
       } as any,
-      taskService: {} as any,
       webDistDir: null,
       workerManager,
     });
@@ -432,6 +431,28 @@ describe("GET /v1/workers/{name}/logs", () => {
     expect(body2.stdout).toBe("2000");
   });
 
+  test("rejects non-numeric lines and falls back to the default", async () => {
+    const getWorkerLogs = async (_name: string, lines: number) => ({
+      stderr: "",
+      stdout: String(lines),
+    });
+    const { app, session } = await createMockAppWithWorkerManager({
+      getWorkerLogs,
+      isValidWorker: (name: string) => name === "whatsapp",
+    });
+
+    const request = new Request(
+      "http://localhost:4310/v1/workers/whatsapp/logs?lines=abc",
+      {
+        headers: session.headers(),
+      }
+    );
+    const response = await app.fetch(request);
+    const body = await response.json();
+    expect(response.status).toBe(200);
+    expect(body.stdout).toBe("200");
+  });
+
   test("returns 400 for unknown worker", async () => {
     const { app, session } = await createMockAppWithWorkerManager({
       isValidWorker: () => false,
@@ -484,7 +505,6 @@ describe("POST /v1/workers/{name}/clear-logs", () => {
       systemStatus: {
         getStatus: async () => ({ ok: true }),
       } as any,
-      taskService: {} as any,
       webDistDir: null,
       workerManager,
     });

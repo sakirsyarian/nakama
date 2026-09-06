@@ -46,6 +46,9 @@ export async function seedDatabase(db: DatabaseAdapter): Promise<void> {
   await removeDeprecatedServerTools(db);
   await removeUnsupportedTools(db);
   await ensureBuiltinToolDefinitions(db);
+  for (const profile of await db.listProfiles()) {
+    await db.assignToolToProfile(profile.id, BUILTIN_TOOL_IDS.sqlite);
+  }
   await ensureSubAgentToolDefinition(db);
   await ensureSessionToolDefinitions(db);
   await ensureBashToolDefinition(db);
@@ -55,86 +58,58 @@ export async function seedDatabase(db: DatabaseAdapter): Promise<void> {
   await ensureOrgSuperBotProfiles(db);
 }
 
-export async function removeLegacyBuiltinTools(
-  db: DatabaseAdapter
+async function removeToolsMatching(
+  db: DatabaseAdapter,
+  shouldRemove: (tool: { handlerType: string; name: string }) => boolean
 ): Promise<void> {
-  const profiles = await db.listProfiles();
   const tools = await db.listTools();
 
   for (const tool of tools) {
-    if (
-      tool.handlerType !== "builtin" ||
-      !LEGACY_BUILTIN_TOOL_NAMES.has(tool.name)
-    ) {
+    if (!shouldRemove(tool)) {
       continue;
     }
 
-    for (const profile of profiles) {
-      await db.unassignToolFromProfile(profile.id, tool.id);
-    }
-
+    // deleteTool unassigns every profile + deletes in one SQLite transaction.
     await db.deleteTool(tool.id);
   }
+}
+
+export async function removeLegacyBuiltinTools(
+  db: DatabaseAdapter
+): Promise<void> {
+  await removeToolsMatching(
+    db,
+    (tool) =>
+      tool.handlerType === "builtin" && LEGACY_BUILTIN_TOOL_NAMES.has(tool.name)
+  );
 }
 
 export async function removeDeprecatedBuiltinTools(
   db: DatabaseAdapter
 ): Promise<void> {
-  const profiles = await db.listProfiles();
-  const tools = await db.listTools();
-
-  for (const tool of tools) {
-    if (
-      tool.handlerType !== "builtin" ||
-      !DEPRECATED_BUILTIN_TOOL_NAMES.has(tool.name)
-    ) {
-      continue;
-    }
-
-    for (const profile of profiles) {
-      await db.unassignToolFromProfile(profile.id, tool.id);
-    }
-
-    await db.deleteTool(tool.id);
-  }
+  await removeToolsMatching(
+    db,
+    (tool) =>
+      tool.handlerType === "builtin" &&
+      DEPRECATED_BUILTIN_TOOL_NAMES.has(tool.name)
+  );
 }
 
 export async function removeDeprecatedServerTools(
   db: DatabaseAdapter
 ): Promise<void> {
-  const profiles = await db.listProfiles();
-  const tools = await db.listTools();
-
-  for (const tool of tools) {
-    if (!DEPRECATED_SERVER_TOOL_NAMES.has(tool.name)) {
-      continue;
-    }
-
-    for (const profile of profiles) {
-      await db.unassignToolFromProfile(profile.id, tool.id);
-    }
-
-    await db.deleteTool(tool.id);
-  }
+  await removeToolsMatching(db, (tool) =>
+    DEPRECATED_SERVER_TOOL_NAMES.has(tool.name)
+  );
 }
 
 export async function removeUnsupportedTools(
   db: DatabaseAdapter
 ): Promise<void> {
-  const profiles = await db.listProfiles();
-  const tools = await db.listTools();
-
-  for (const tool of tools) {
-    if (SUPPORTED_TOOL_HANDLER_TYPES.has(tool.handlerType)) {
-      continue;
-    }
-
-    for (const profile of profiles) {
-      await db.unassignToolFromProfile(profile.id, tool.id);
-    }
-
-    await db.deleteTool(tool.id);
-  }
+  await removeToolsMatching(
+    db,
+    (tool) => !SUPPORTED_TOOL_HANDLER_TYPES.has(tool.handlerType)
+  );
 }
 
 export async function ensureBuiltinToolDefinitions(

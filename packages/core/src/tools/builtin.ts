@@ -26,6 +26,7 @@ import {
   trimmedOptionalString,
 } from "./schema";
 import { searchFilesTool } from "./search-files";
+import { sqliteTool } from "./sqlite";
 import { webFetchTool } from "./web-fetch";
 import { webSearchTool } from "./web-search";
 
@@ -893,6 +894,7 @@ export const builtinTools: ToolDefinition[] = [
   readFileTool,
   searchFilesTool,
   knowledgeBaseSearchTool,
+  sqliteTool,
   webSearchTool,
   webFetchTool,
   emailTool,

@@ -9,6 +9,78 @@ Entries marked *(in review)* come from a pull request that is open but not merge
 
 ## [Unreleased]
 
+## [0.4.8] - 2026-09-06
+
+### Added
+
+- User-triggered workflow recipes with receipt-bound summarize ([#826])
+- Workspace worker polling interval is configurable ([#788])
+- Settings and the sidebar show the installed Nakama version
+- `web_search` can run through Exa or Firecrawl instead of the hosted provider
+
+### Changed
+
+- Automations Tasks board and API are gone; Automations is the work page ([#846])
+- Web search settings offer Exa and Firecrawl only — no free-form endpoint ([#845])
+- Shared worker boot and unused wrappers trimmed ([#848], [#849], [#850], [#851], [#852])
+
+### Fixed
+
+- Setup claims the first admin in one transaction; import archives are size-capped ([#819], [#820])
+- Origin, Composio OAuth hosts, and `web_fetch` addresses stay on allowlists ([#813], [#821], [#822])
+- Tool delete unassigns profiles in the same transaction ([#804])
+- Discord stream cleanup, Telegram `$` replacements, and WhatsApp outbound port/token survive pairing ([#809], [#824])
+- Knowledge preview stays in the attachment panel; chat actions stay visible on touch ([#814], [#815], [#855], [#859])
+- Route errors show the runtime message; data URLs with parameters still parse ([#854], [#856], [#858], [#860])
+- CLI retained transcripts cap at 1000 messages ([#853])
+- Backup-import preview cleanup is tied to generation ([#808])
+- Legacy `users.user_context` is no longer read ([#816])
+- Skill-suggestion queries use one prepared statement ([#806], [#811])
+
+
+
+### Added
+
+- Automations can run as a chosen profile ([#716])
+- Organization is its own sidebar page ([#728])
+- Knowledge lives under Profiles; org skills UI is leaner ([#732])
+- Workers live on their own System page ([#773])
+- Profile edits keep an append-only change history ([#760])
+
+### Changed
+
+- Learn-after-a-turn is a switch, not an inherit dropdown ([#734])
+- Removing an MCP server asks for confirmation ([#752])
+- Settings confirms LLM provider remove in-app ([#782])
+- Docs: worker env-var contract ([#748])
+
+### Fixed
+
+- Session, message, profile, and migration writes are atomic ([#675], [#735], [#738], [#739], [#741], [#784])
+- Chat, scheduler, and channel streams no longer leak locks or race on shutdown ([#713], [#743], [#753], [#759], [#761], [#762], [#778])
+- Discord stays quiet for unlinked guild users ([#727])
+- Chat Retry stays after a failed turn ([#758])
+- Skill save failures toast on the skill page ([#721])
+- Automations page still scrolls when expanded runs are tall ([#723])
+- Markdown artifact preview fills the panel ([#729])
+- Invalid session timestamps are not echoed in the UI ([#779])
+- Duplicate knowledge-base uploads are deduped ([#754])
+- GET /v1/sessions requires a channel ([#720])
+- Malformed API keys are rejected on create/update ([#730])
+- Profile avatar reads stay in the caller's org ([#740])
+- Tool catalog requires auth ([#736])
+- Telegram bot token stays out of error logs and is encoded in the URL path ([#737], [#744])
+- Member names reject control chars and overlong values ([#747])
+- Archived orgs reject member and org-memory writes ([#764])
+- removeMember validates userId without leaking membership ([#756])
+- Public web URL is set from the request body only; Setup Wizard no longer pushes it on mount ([#772], [#777])
+- Theme bootstrap is pinned by hash; login trims the password ([#785])
+- Integrations validate bot tokens before save ([#775])
+- Small link, log, and CLI escape gaps closed ([#757])
+- CLI rejects unknown ini keys, masks the soul path unless `--verbose`, ends sticky exit, shows busy feedback, caches macOS theme, and writes config atomically ([#746], [#749], [#750], [#751], [#755], [#763])
+- Cursor Agent streams are detected structurally ([#724])
+- History token estimate and prune are copy-on-write; thinking tokens are counted on the chat-completions path ([#765], [#774])
+
 ## [0.4.6] - 2026-08-28
 
 ### Added
@@ -615,7 +687,9 @@ First tagged release. The baseline it established:
 - Export and import for data portability
 - Docker image published from GitHub Actions, and a VitePress documentation site
 
-[Unreleased]: https://github.com/ahmadrosid/nakama/compare/v0.4.6...main
+[Unreleased]: https://github.com/ahmadrosid/nakama/compare/v0.4.8...main
+[0.4.8]: https://github.com/ahmadrosid/nakama/compare/v0.4.7...v0.4.8
+[0.4.7]: https://github.com/ahmadrosid/nakama/compare/v0.4.6...v0.4.7
 [0.4.6]: https://github.com/ahmadrosid/nakama/compare/v0.4.5...v0.4.6
 [0.4.5]: https://github.com/ahmadrosid/nakama/compare/v0.4.4...v0.4.5
 [0.4.4]: https://github.com/ahmadrosid/nakama/compare/v0.4.3...v0.4.4
@@ -820,3 +894,85 @@ First tagged release. The baseline it established:
 [#711]: https://github.com/ahmadrosid/nakama/pull/711
 [#712]: https://github.com/ahmadrosid/nakama/pull/712
 [#715]: https://github.com/ahmadrosid/nakama/pull/715
+[#675]: https://github.com/ahmadrosid/nakama/pull/675
+[#713]: https://github.com/ahmadrosid/nakama/pull/713
+[#716]: https://github.com/ahmadrosid/nakama/pull/716
+[#720]: https://github.com/ahmadrosid/nakama/pull/720
+[#721]: https://github.com/ahmadrosid/nakama/pull/721
+[#723]: https://github.com/ahmadrosid/nakama/pull/723
+[#724]: https://github.com/ahmadrosid/nakama/pull/724
+[#727]: https://github.com/ahmadrosid/nakama/pull/727
+[#728]: https://github.com/ahmadrosid/nakama/pull/728
+[#729]: https://github.com/ahmadrosid/nakama/pull/729
+[#730]: https://github.com/ahmadrosid/nakama/pull/730
+[#732]: https://github.com/ahmadrosid/nakama/pull/732
+[#734]: https://github.com/ahmadrosid/nakama/pull/734
+[#735]: https://github.com/ahmadrosid/nakama/pull/735
+[#736]: https://github.com/ahmadrosid/nakama/pull/736
+[#737]: https://github.com/ahmadrosid/nakama/pull/737
+[#738]: https://github.com/ahmadrosid/nakama/pull/738
+[#739]: https://github.com/ahmadrosid/nakama/pull/739
+[#740]: https://github.com/ahmadrosid/nakama/pull/740
+[#741]: https://github.com/ahmadrosid/nakama/pull/741
+[#743]: https://github.com/ahmadrosid/nakama/pull/743
+[#744]: https://github.com/ahmadrosid/nakama/pull/744
+[#746]: https://github.com/ahmadrosid/nakama/pull/746
+[#747]: https://github.com/ahmadrosid/nakama/pull/747
+[#748]: https://github.com/ahmadrosid/nakama/pull/748
+[#749]: https://github.com/ahmadrosid/nakama/pull/749
+[#750]: https://github.com/ahmadrosid/nakama/pull/750
+[#751]: https://github.com/ahmadrosid/nakama/pull/751
+[#752]: https://github.com/ahmadrosid/nakama/pull/752
+[#753]: https://github.com/ahmadrosid/nakama/pull/753
+[#754]: https://github.com/ahmadrosid/nakama/pull/754
+[#755]: https://github.com/ahmadrosid/nakama/pull/755
+[#756]: https://github.com/ahmadrosid/nakama/pull/756
+[#757]: https://github.com/ahmadrosid/nakama/pull/757
+[#758]: https://github.com/ahmadrosid/nakama/pull/758
+[#759]: https://github.com/ahmadrosid/nakama/pull/759
+[#760]: https://github.com/ahmadrosid/nakama/pull/760
+[#761]: https://github.com/ahmadrosid/nakama/pull/761
+[#762]: https://github.com/ahmadrosid/nakama/pull/762
+[#763]: https://github.com/ahmadrosid/nakama/pull/763
+[#764]: https://github.com/ahmadrosid/nakama/pull/764
+[#765]: https://github.com/ahmadrosid/nakama/pull/765
+[#772]: https://github.com/ahmadrosid/nakama/pull/772
+[#773]: https://github.com/ahmadrosid/nakama/pull/773
+[#774]: https://github.com/ahmadrosid/nakama/pull/774
+[#775]: https://github.com/ahmadrosid/nakama/pull/775
+[#777]: https://github.com/ahmadrosid/nakama/pull/777
+[#778]: https://github.com/ahmadrosid/nakama/pull/778
+[#779]: https://github.com/ahmadrosid/nakama/pull/779
+[#782]: https://github.com/ahmadrosid/nakama/pull/782
+[#784]: https://github.com/ahmadrosid/nakama/pull/784
+[#785]: https://github.com/ahmadrosid/nakama/pull/785
+[#788]: https://github.com/ahmadrosid/nakama/pull/788
+[#804]: https://github.com/ahmadrosid/nakama/pull/804
+[#806]: https://github.com/ahmadrosid/nakama/pull/806
+[#808]: https://github.com/ahmadrosid/nakama/pull/808
+[#809]: https://github.com/ahmadrosid/nakama/pull/809
+[#811]: https://github.com/ahmadrosid/nakama/pull/811
+[#813]: https://github.com/ahmadrosid/nakama/pull/813
+[#814]: https://github.com/ahmadrosid/nakama/pull/814
+[#815]: https://github.com/ahmadrosid/nakama/pull/815
+[#816]: https://github.com/ahmadrosid/nakama/pull/816
+[#819]: https://github.com/ahmadrosid/nakama/pull/819
+[#820]: https://github.com/ahmadrosid/nakama/pull/820
+[#821]: https://github.com/ahmadrosid/nakama/pull/821
+[#822]: https://github.com/ahmadrosid/nakama/pull/822
+[#824]: https://github.com/ahmadrosid/nakama/pull/824
+[#826]: https://github.com/ahmadrosid/nakama/pull/826
+[#845]: https://github.com/ahmadrosid/nakama/pull/845
+[#846]: https://github.com/ahmadrosid/nakama/pull/846
+[#848]: https://github.com/ahmadrosid/nakama/pull/848
+[#849]: https://github.com/ahmadrosid/nakama/pull/849
+[#850]: https://github.com/ahmadrosid/nakama/pull/850
+[#851]: https://github.com/ahmadrosid/nakama/pull/851
+[#852]: https://github.com/ahmadrosid/nakama/pull/852
+[#853]: https://github.com/ahmadrosid/nakama/pull/853
+[#854]: https://github.com/ahmadrosid/nakama/pull/854
+[#855]: https://github.com/ahmadrosid/nakama/pull/855
+[#856]: https://github.com/ahmadrosid/nakama/pull/856
+[#858]: https://github.com/ahmadrosid/nakama/pull/858
+[#859]: https://github.com/ahmadrosid/nakama/pull/859
+[#860]: https://github.com/ahmadrosid/nakama/pull/860

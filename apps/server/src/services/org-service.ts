@@ -45,6 +45,16 @@ const LAST_ORGANIZATION_MESSAGE =
 const SLUG_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const PHONE_PATTERN = /^[+0-9()\-\s]{6,32}$/;
+const MAX_MEMBER_NAME_LENGTH = 120;
+const MEMBER_NAME_CONTROL_CHARS = /[\u0000-\u001F\u007F]/;
+/** Path `userId` for org member routes — matches minted ids (`user_` + hex) and seeded ones. */
+const ORG_MEMBER_USER_ID_PATTERN = /^user_[A-Za-z0-9_]{1,64}$/;
+
+function assertOrgMemberUserIdShape(userId: string): void {
+  if (!ORG_MEMBER_USER_ID_PATTERN.test(userId)) {
+    throw new NakamaApiError("Invalid user id.", 400);
+  }
+}
 
 export class OrgService {
   constructor(
@@ -120,9 +130,22 @@ export class OrgService {
     }
 
     const now = new Date().toISOString();
+    const skillsCuratorStaleAfterDays =
+      request.skillsCuratorStaleAfterDays === undefined
+        ? (org.skillsCuratorStaleAfterDays ?? 30)
+        : request.skillsCuratorStaleAfterDays;
+    const skillsCuratorArchiveAfterDays =
+      request.skillsCuratorArchiveAfterDays === undefined
+        ? (org.skillsCuratorArchiveAfterDays ?? 90)
+        : request.skillsCuratorArchiveAfterDays;
+    assertSkillCuratorFreshnessClocks(
+      skillsCuratorStaleAfterDays,
+      skillsCuratorArchiveAfterDays
+    );
     const updated: StoredOrganizationRecord = {
       ...org,
       name,
+      skillsCuratorArchiveAfterDays,
       skillsCuratorConsolidateEnabled:
         request.skillsCuratorConsolidateEnabled === undefined
           ? (org.skillsCuratorConsolidateEnabled ?? false)
@@ -132,6 +155,7 @@ export class OrgService {
           ? (org.skillsCuratorEnabled ?? false)
           : request.skillsCuratorEnabled,
       skillsCuratorLastRunAt: org.skillsCuratorLastRunAt ?? null,
+      skillsCuratorStaleAfterDays,
       skillsPostTurnReview:
         request.skillsPostTurnReview === undefined
           ? (org.skillsPostTurnReview ?? false)
@@ -383,18 +407,13 @@ export class OrgService {
     phone: string;
     role: OrgRole;
   }): Promise<AddOrgMemberResponse> {
-    const org = await this.databaseAdapter.getOrganizationById(input.orgId);
-    if (!org) {
-      throw new NakamaApiError("Not found", 404);
-    }
+    await this.requireActiveOrganization(input.orgId);
 
     const name = input.name.trim();
     const email = normalizeEmail(input.email);
     const phone = normalizeOptionalPhone(input.phone);
 
-    if (!name) {
-      throw new NakamaApiError("Member name is required.", 400);
-    }
+    assertMemberName(name);
 
     if (!EMAIL_PATTERN.test(email)) {
       throw new NakamaApiError("A valid email address is required.", 400);
@@ -466,11 +485,8 @@ export class OrgService {
       passwordHash: string;
     };
   }): Promise<{ user: StoredUserRecord; organization: OrganizationSummary }> {
-    const organization = await this.insertOrganization({
-      name: input.organization.name,
-      slug: input.organization.slug,
-    });
-
+    // Validate before the insert: a rejected admin used to leave the org behind,
+    // and the retry then failed on the slug it had just taken.
     const name = input.admin.name.trim();
     const email = normalizeEmail(input.admin.email);
     const phone = normalizeOptionalPhone(input.admin.phone);
@@ -483,6 +499,7 @@ export class OrgService {
       throw new NakamaApiError("A valid email address is required.", 400);
     }
 
+    const organization = await this.buildOrganizationRecord(input.organization);
     const now = new Date().toISOString();
     const user: StoredUserRecord = {
       createdAt: now,
@@ -495,15 +512,27 @@ export class OrgService {
       updatedAt: now,
     };
 
-    await this.databaseAdapter.createUser(user);
-    await this.databaseAdapter.upsertOrgMember({
-      createdAt: now,
-      orgId: organization.id,
-      role: "admin",
-      userId: user.id,
+    // One transaction, so a second concurrent setup that also passed the
+    // route's human-user check loses here instead of committing an org it
+    // can never become a member of.
+    const claimed = await this.databaseAdapter.bootstrapInitialSetup({
+      member: {
+        createdAt: now,
+        orgId: organization.id,
+        role: "admin",
+        userId: user.id,
+      },
+      organization,
+      user,
     });
+    if (!claimed) {
+      throw new NakamaApiError("Admin user already exists", 409);
+    }
 
-    return { organization, user };
+    await this.seedOrgProfiles(organization.id);
+    await ensureLocalClientAccess(this.databaseAdapter);
+
+    return { organization: toOrganizationSummary(organization), user };
   }
 
   async listMembers(orgId: string): Promise<ListOrgMembersResponse> {
@@ -532,12 +561,26 @@ export class OrgService {
   }
 
   async removeMember(orgId: string, userId: string): Promise<void> {
+    assertOrgMemberUserIdShape(userId);
+    await this.requireActiveOrganization(orgId);
     await this.assertCanChangeAdminMembership(orgId, userId);
 
     const deleted = await this.databaseAdapter.deleteOrgMember(orgId, userId);
     if (!deleted) {
+      // The delete carries the last-admin guard, so a concurrent change between
+      // the check above and here lands here rather than emptying the org.
+      await this.assertCanChangeAdminMembership(orgId, userId);
       throw new NakamaApiError("Not found", 404);
     }
+
+    // The org middleware stops org routes for a non-member, but the cookie stays
+    // valid on /v1/auth/* until it expires. Revoke like changePassword does: all
+    // of the user's sessions, so a multi-org user re-authenticates rather than
+    // keeping a session whose active org they were just removed from.
+    await this.databaseAdapter.revokeBrowserSessionsForUser(
+      userId,
+      new Date().toISOString()
+    );
   }
 
   async updateMember(
@@ -545,6 +588,8 @@ export class OrgService {
     userId: string,
     input: UpdateOrgMemberRequest
   ): Promise<OrgMemberResponse> {
+    await this.requireActiveOrganization(orgId);
+
     const nextRole = input.role;
     if (nextRole !== undefined && !ORG_ROLES.includes(nextRole)) {
       throw new NakamaApiError("Invalid org role.", 400);
@@ -580,12 +625,15 @@ export class OrgService {
     }
 
     if (member.role !== role) {
-      await this.databaseAdapter.upsertOrgMember({
-        createdAt: member.createdAt,
+      const updated = await this.databaseAdapter.updateOrgMemberRole(
         orgId,
-        role,
         userId,
-      });
+        role
+      );
+      if (!updated) {
+        await this.assertCanChangeAdminMembership(orgId, userId, role);
+        throw new NakamaApiError("Not found", 404);
+      }
     }
 
     return {
@@ -813,9 +861,10 @@ export class OrgService {
     return member;
   }
 
-  private async insertOrganization(
-    request: CreateOrganizationRequest
-  ): Promise<OrganizationSummary> {
+  private async buildOrganizationRecord(request: {
+    name: string;
+    slug: string;
+  }): Promise<StoredOrganizationRecord> {
     const name = request.name.trim();
     const slug = request.slug.trim().toLowerCase();
 
@@ -830,6 +879,26 @@ export class OrgService {
       );
     }
 
+    const existing = await this.databaseAdapter.getOrganizationBySlug(slug);
+    if (existing) {
+      throw new NakamaApiError("Organization slug already exists.", 409);
+    }
+
+    const now = new Date().toISOString();
+    return {
+      createdAt: now,
+      id: `org_${crypto.randomUUID().replace(/-/g, "")}`,
+      name,
+      skillsCuratorArchiveAfterDays: 90,
+      skillsCuratorStaleAfterDays: 30,
+      slug,
+      updatedAt: now,
+    };
+  }
+
+  private async insertOrganization(
+    request: CreateOrganizationRequest
+  ): Promise<OrganizationSummary> {
     if (
       request.admin &&
       !(request.admin.name.trim() && request.admin.email.trim())
@@ -837,20 +906,7 @@ export class OrgService {
       throw new NakamaApiError("Admin name and email are required.", 400);
     }
 
-    const existing = await this.databaseAdapter.getOrganizationBySlug(slug);
-    if (existing) {
-      throw new NakamaApiError("Organization slug already exists.", 409);
-    }
-
-    const now = new Date().toISOString();
-    const record: StoredOrganizationRecord = {
-      createdAt: now,
-      id: `org_${crypto.randomUUID().replace(/-/g, "")}`,
-      name,
-      slug,
-      updatedAt: now,
-    };
-
+    const record = await this.buildOrganizationRecord(request);
     await this.databaseAdapter.upsertOrganization(record);
     await this.seedOrgProfiles(record.id);
     await ensureLocalClientAccess(this.databaseAdapter);
@@ -869,6 +925,20 @@ export class OrgService {
       orgId
     );
     await initSoulDirectory(getProfileSoulDir(orgId, superBotProfile.id));
+  }
+}
+
+function assertMemberName(name: string): void {
+  if (!name) {
+    throw new NakamaApiError("Member name is required.", 400);
+  }
+
+  if (name.length > MAX_MEMBER_NAME_LENGTH) {
+    throw new NakamaApiError("Member name is too long.", 400);
+  }
+
+  if (MEMBER_NAME_CONTROL_CHARS.test(name)) {
+    throw new NakamaApiError("Member name contains invalid characters.", 400);
   }
 }
 
@@ -914,6 +984,24 @@ function assertInviteUsable(invite: StoredOrgInviteRecord): void {
   }
 }
 
+function assertSkillCuratorFreshnessClocks(
+  staleAfterDays: number,
+  archiveAfterDays: number
+): void {
+  if (
+    !(Number.isInteger(staleAfterDays) && Number.isInteger(archiveAfterDays)) ||
+    staleAfterDays <= 0 ||
+    archiveAfterDays <= 0 ||
+    staleAfterDays >= archiveAfterDays ||
+    archiveAfterDays > 3650
+  ) {
+    throw new NakamaApiError(
+      "Skill curator days must be positive integers with stale before archive and archive at most 3650 days.",
+      400
+    );
+  }
+}
+
 function assertNewPassword(password: string): void {
   if (password.length < 8) {
     throw new NakamaApiError("Password must be at least 8 characters.", 400);
@@ -928,10 +1016,12 @@ function toOrganizationSummary(
     createdAt: record.createdAt,
     id: record.id,
     name: record.name,
+    skillsCuratorArchiveAfterDays: record.skillsCuratorArchiveAfterDays ?? 90,
     skillsCuratorConsolidateEnabled:
       record.skillsCuratorConsolidateEnabled ?? false,
     skillsCuratorEnabled: record.skillsCuratorEnabled ?? false,
     skillsCuratorLastRunAt: record.skillsCuratorLastRunAt ?? null,
+    skillsCuratorStaleAfterDays: record.skillsCuratorStaleAfterDays ?? 30,
     skillsPostTurnReview: record.skillsPostTurnReview ?? false,
     skillsWriteApproval: record.skillsWriteApproval ?? false,
     slug: record.slug,

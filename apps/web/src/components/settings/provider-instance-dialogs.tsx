@@ -1,6 +1,11 @@
-import type { ProviderInstanceSummary, WireApi } from "@nakama/core/contract";
+import type {
+  ChatgptOAuthCredentials,
+  ProviderInstanceSummary,
+  WireApi,
+} from "@nakama/core/contract";
 import { ViewIcon, ViewOffIcon } from "hugeicons-react";
 import type { ReactNode } from "react";
+import { ChatgptSignInPanel } from "@/components/ChatgptSignInPanel";
 import { CustomProviderFields } from "@/components/CustomProviderFields";
 import type { ModelListRow } from "@/components/ModelListEditor";
 import { Button } from "@/components/ui/button";
@@ -27,10 +32,12 @@ export function ProviderReplaceKeyDialog({
   providerType,
   apiKey,
   showApiKey,
+  chatgptOAuth,
   busy,
   dialogError,
   onOpenChange,
   onApiKeyChange,
+  onChatgptOAuthChange,
   onToggleShowApiKey,
   onSave,
 }: {
@@ -39,41 +46,54 @@ export function ProviderReplaceKeyDialog({
   providerType: SelectedProvider;
   apiKey: string;
   showApiKey: boolean;
+  chatgptOAuth?: ChatgptOAuthCredentials | null;
   busy: boolean;
   dialogError: string | null;
   onOpenChange: (open: boolean) => void;
   onApiKeyChange: (value: string) => void;
+  onChatgptOAuthChange?: (oauth: ChatgptOAuthCredentials | null) => void;
   onToggleShowApiKey: () => void;
   onSave: () => void;
 }) {
+  const isChatgpt = providerType === "chatgpt";
+
   return (
     <Dialog onOpenChange={onOpenChange} open={open}>
       <DialogContent className="sm:max-w-md">
         <DialogHeader>
           <DialogTitle>
-            {instance.hasApiKey ? "Update API key" : "Add API key"} for{" "}
-            {instance.label}
+            {isChatgpt
+              ? `Reconnect ${instance.label}`
+              : `${instance.hasApiKey ? "Update API key" : "Add API key"} for ${instance.label}`}
           </DialogTitle>
         </DialogHeader>
-        <InputGroup>
-          <InputGroupInput
-            autoComplete="off"
+        {isChatgpt ? (
+          <ChatgptSignInPanel
             disabled={busy}
-            onChange={(event) => onApiKeyChange(event.target.value)}
-            placeholder={apiKeyPlaceholder(providerType)}
-            type={showApiKey ? "text" : "password"}
-            value={apiKey}
+            oauth={chatgptOAuth ?? null}
+            onOAuthChange={onChatgptOAuthChange ?? (() => {})}
           />
-          <InputGroupAddon align="inline-end">
-            <InputGroupButton
-              aria-label={showApiKey ? "Hide API key" : "Show API key"}
-              onClick={onToggleShowApiKey}
-              size="icon-sm"
-            >
-              {showApiKey ? <ViewOffIcon /> : <ViewIcon />}
-            </InputGroupButton>
-          </InputGroupAddon>
-        </InputGroup>
+        ) : (
+          <InputGroup>
+            <InputGroupInput
+              autoComplete="off"
+              disabled={busy}
+              onChange={(event) => onApiKeyChange(event.target.value)}
+              placeholder={apiKeyPlaceholder(providerType)}
+              type={showApiKey ? "text" : "password"}
+              value={apiKey}
+            />
+            <InputGroupAddon align="inline-end">
+              <InputGroupButton
+                aria-label={showApiKey ? "Hide API key" : "Show API key"}
+                onClick={onToggleShowApiKey}
+                size="icon-sm"
+              >
+                {showApiKey ? <ViewOffIcon /> : <ViewIcon />}
+              </InputGroupButton>
+            </InputGroupAddon>
+          </InputGroup>
+        )}
         {dialogError ? (
           <p className="text-destructive text-sm" role="alert">
             {dialogError}
@@ -89,7 +109,7 @@ export function ProviderReplaceKeyDialog({
             Cancel
           </Button>
           <Button
-            disabled={busy || !apiKey.trim()}
+            disabled={busy || (isChatgpt ? !chatgptOAuth : !apiKey.trim())}
             onClick={onSave}
             type="button"
           >
@@ -225,6 +245,61 @@ export function ProviderCompatibleEditDialog({
         wireApi={wireApi}
       />
     </ProviderModelsDialogShell>
+  );
+}
+
+export function ProviderRemoveDialog({
+  open,
+  label,
+  isSole,
+  busy,
+  onOpenChange,
+  onConfirm,
+}: {
+  open: boolean;
+  label: string;
+  isSole: boolean;
+  busy: boolean;
+  onOpenChange: (open: boolean) => void;
+  onConfirm: () => void;
+}) {
+  return (
+    <Dialog
+      onOpenChange={(nextOpen) => {
+        if (!(nextOpen || busy)) {
+          onOpenChange(false);
+        }
+      }}
+      open={open}
+    >
+      <DialogContent className="sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle>Remove provider?</DialogTitle>
+          <DialogDescription>
+            {isSole ? "This is your only LLM provider. " : null}
+            Models using {label} will stop working. This cannot be undone.
+          </DialogDescription>
+        </DialogHeader>
+        <DialogFooter>
+          <Button
+            disabled={busy}
+            onClick={() => onOpenChange(false)}
+            type="button"
+            variant="outline"
+          >
+            Cancel
+          </Button>
+          <Button
+            disabled={busy}
+            onClick={onConfirm}
+            type="button"
+            variant="destructive"
+          >
+            {busy ? <Spinner className="size-4" /> : "Remove"}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 

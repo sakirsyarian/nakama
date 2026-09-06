@@ -10,6 +10,7 @@ import {
   type DiscordSettingsResponse,
   type DiscoverModelsRequest,
   type EmailSettingsResponse,
+  formatServerError,
   type GenerateImageRequest,
   type GenerateImageResponse,
   type ImageGenerationSettingsResponse,
@@ -37,10 +38,17 @@ import {
   type UpdateTimezoneRequest,
   type UpdateTranscriptionRequest,
   type UpdateVisionRequest,
+  type UpdateWebSearchSettingsRequest,
   type UpdateWhatsAppSettingsRequest,
   type VisionSettingsResponse,
+  type WebSearchSettingsResponse,
   type WhatsAppSettingsResponse,
 } from "@nakama/core";
+import {
+  completeChatgptOAuthDeviceSession,
+  fetchChatgptCodexModels,
+  startChatgptOAuthDeviceSession,
+} from "../../providers/chatgpt/oauth";
 import { installAgentBrowser } from "../../services/agent-browser-service";
 import {
   getExternalModelCatalog,
@@ -167,6 +175,17 @@ export function registerModelRoutes(
     .object({})
     .passthrough()
     .openapi("EmailSettingsResponse");
+  const webSearchSettingsSchema = z
+    .object({})
+    .passthrough()
+    .openapi("WebSearchSettingsResponse");
+  const updateWebSearchRequestSchema = z
+    .object({
+      apiKey: z.string().optional(),
+      endpoint: z.string().optional(),
+      provider: z.enum(["exa", "firecrawl"]).nullable().optional(),
+    })
+    .openapi("UpdateWebSearchSettingsRequest");
   const agentBrowserStatusSchema = z
     .object({})
     .passthrough()
@@ -1051,6 +1070,56 @@ export function registerModelRoutes(
   app.openAPIRegistry.registerPath(
     createRoute({
       method: "get",
+      operationId: "getWebSearchSettings",
+      path: "/v1/settings/web-search",
+      responses: {
+        200: {
+          content: { "application/json": { schema: webSearchSettingsSchema } },
+          description: "Web search settings",
+        },
+        403: {
+          content: { "application/json": { schema: errorSchema } },
+          description: "Forbidden",
+        },
+      },
+      summary: "Get web search settings",
+      tags: ["Models"],
+    })
+  );
+  app.openAPIRegistry.registerPath(
+    createRoute({
+      method: "put",
+      operationId: "setWebSearchSettings",
+      path: "/v1/settings/web-search",
+      request: {
+        body: {
+          content: {
+            "application/json": { schema: updateWebSearchRequestSchema },
+          },
+          required: true,
+        },
+      },
+      responses: {
+        200: {
+          content: { "application/json": { schema: webSearchSettingsSchema } },
+          description: "Web search settings",
+        },
+        400: {
+          content: { "application/json": { schema: errorSchema } },
+          description: "Error",
+        },
+        403: {
+          content: { "application/json": { schema: errorSchema } },
+          description: "Forbidden",
+        },
+      },
+      summary: "Update web search settings",
+      tags: ["Models"],
+    })
+  );
+  app.openAPIRegistry.registerPath(
+    createRoute({
+      method: "get",
       operationId: "getAgentBrowserStatus",
       path: "/v1/settings/agent-browser",
       responses: {
@@ -1184,8 +1253,7 @@ export function registerModelRoutes(
     try {
       return json(await getExternalModelCatalog(catalogId));
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      return errorResponse(message, 502);
+      return errorResponse(formatServerError(error), 502);
     }
   });
 
@@ -1202,14 +1270,8 @@ export function registerModelRoutes(
   app.post("/v1/models/discover", async (c) => {
     requireOrgAdminOrPlatformAdminFromContext(c);
     const body = await readJson<DiscoverModelsRequest>(c.req.raw);
-
-    try {
-      const result = await agent.discoverModels(body);
-      return json<ModelsResponse>(result);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      return errorResponse(message, 400);
-    }
+    const result = await agent.discoverModels(body);
+    return json<ModelsResponse>(result);
   });
 
   app.get("/v1/providers", async (c) => {
@@ -1220,18 +1282,38 @@ export function registerModelRoutes(
   app.post("/v1/providers", async (c) => {
     requireOrgAdminOrPlatformAdminFromContext(c);
     const body = await readJson<CreateProviderRequest>(c.req.raw);
-    return json<CreateProviderResponse>(await agent.createProvider(body));
+
+    try {
+      return json<CreateProviderResponse>(await agent.createProvider(body));
+    } catch (error) {
+      if (error instanceof NakamaApiError) {
+        return errorResponse(error.message, error.status);
+      }
+
+      const message = error instanceof Error ? error.message : String(error);
+      return errorResponse(message, 400);
+    }
   });
 
   app.patch("/v1/providers/:providerId", async (c) => {
     requireOrgAdminOrPlatformAdminFromContext(c);
     const body = await readJson<UpdateProviderRequest>(c.req.raw);
-    return json<UpdateProviderResponse>(
-      await agent.updateProvider(
-        decodeURIComponent(c.req.param("providerId")),
-        body
-      )
-    );
+
+    try {
+      return json<UpdateProviderResponse>(
+        await agent.updateProvider(
+          decodeURIComponent(c.req.param("providerId")),
+          body
+        )
+      );
+    } catch (error) {
+      if (error instanceof NakamaApiError) {
+        return errorResponse(error.message, error.status);
+      }
+
+      const message = error instanceof Error ? error.message : String(error);
+      return errorResponse(message, 400);
+    }
   });
 
   app.delete("/v1/providers/:providerId", async (c) => {
@@ -1239,6 +1321,46 @@ export function registerModelRoutes(
     return json<DeleteProviderResponse>(
       await agent.deleteProvider(decodeURIComponent(c.req.param("providerId")))
     );
+  });
+
+  app.post("/v1/chatgpt-oauth/device/start", async (c) => {
+    requireOrgAdminOrPlatformAdminFromContext(c);
+
+    try {
+      return json(await startChatgptOAuthDeviceSession());
+    } catch (error) {
+      if (error instanceof NakamaApiError) {
+        return errorResponse(error.message, error.status);
+      }
+
+      const message = error instanceof Error ? error.message : String(error);
+      return errorResponse(message, 400);
+    }
+  });
+
+  app.post("/v1/chatgpt-oauth/device/complete", async (c) => {
+    requireOrgAdminOrPlatformAdminFromContext(c);
+    const body = await readJson<{ sessionId?: string }>(c.req.raw);
+    const sessionId = body.sessionId?.trim();
+
+    if (!sessionId) {
+      return errorResponse("sessionId is required.", 400);
+    }
+
+    try {
+      const chatgptOAuth = await completeChatgptOAuthDeviceSession(sessionId);
+      const models = await fetchChatgptCodexModels(chatgptOAuth).catch(
+        () => []
+      );
+      return json({ chatgptOAuth, models });
+    } catch (error) {
+      if (error instanceof NakamaApiError) {
+        return errorResponse(error.message, error.status);
+      }
+
+      const message = error instanceof Error ? error.message : String(error);
+      return errorResponse(message, 400);
+    }
   });
 
   app.put("/v1/settings/provider", async (c) => {
@@ -1410,6 +1532,28 @@ export function registerModelRoutes(
     try {
       return json<SendEmailTestResponse>(
         await agent.sendEmailTest(body.to?.trim() || auth.user.email)
+      );
+    } catch (error) {
+      if (error instanceof NakamaApiError) {
+        return errorResponse(error.message, error.status);
+      }
+      const message = error instanceof Error ? error.message : String(error);
+      return errorResponse(message, 400);
+    }
+  });
+
+  app.get("/v1/settings/web-search", async (c) => {
+    requireOrgAdminFromContext(c);
+    return json<WebSearchSettingsResponse>(await agent.getWebSearchSettings());
+  });
+
+  app.put("/v1/settings/web-search", async (c) => {
+    requireOrgAdminFromContext(c);
+    const body = await readJson<UpdateWebSearchSettingsRequest>(c.req.raw);
+
+    try {
+      return json<WebSearchSettingsResponse>(
+        await agent.setWebSearchSettings(body)
       );
     } catch (error) {
       if (error instanceof NakamaApiError) {

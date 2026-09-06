@@ -1,4 +1,5 @@
 import type {
+  ChatgptOAuthCredentials,
   ProviderInstanceSummary,
   ProviderModelOption,
   UpdateProviderRequest,
@@ -36,7 +37,6 @@ export function useProviderInstanceCard({
   onUpdate,
   onDelete,
   onError,
-  isSole = false,
 }: {
   instance: ProviderInstanceSummary;
   catalog: ProviderModelOption[];
@@ -46,14 +46,16 @@ export function useProviderInstanceCard({
   ) => Promise<void>;
   onDelete: (providerId: string) => Promise<void>;
   onError: (error: string | null) => void;
-  isSole?: boolean;
 }) {
   const [replaceKeyOpen, setReplaceKeyOpen] = useState(false);
   const [editOpen, setEditOpen] = useState(false);
   const [manageOpen, setManageOpen] = useState(false);
+  const [deleteOpen, setDeleteOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [dialogError, setDialogError] = useState<string | null>(null);
   const [apiKey, setApiKey] = useState("");
+  const [chatgptOAuth, setChatgptOAuth] =
+    useState<ChatgptOAuthCredentials | null>(null);
   const [showApiKey, setShowApiKey] = useState(false);
   const [editLabel, setEditLabel] = useState("");
   const [editBaseUrl, setEditBaseUrl] = useState("");
@@ -61,6 +63,7 @@ export function useProviderInstanceCard({
   const [manageModels, setManageModels] = useState<ModelListRow[]>([]);
 
   const providerType = instance.type as SelectedProvider;
+  const isChatgpt = providerType === "chatgpt";
   const isOllama = providerType === "ollama";
   // Discovery providers (OpenAI-compatible, MiniMax, …) fetch model lists
   // live from the platform's /models endpoint, so their instances use the
@@ -145,6 +148,19 @@ export function useProviderInstanceCard({
   };
 
   const handleReplaceKey = async () => {
+    if (isChatgpt) {
+      if (!chatgptOAuth) {
+        setDialogError("Sign in with ChatGPT before saving.");
+        return;
+      }
+
+      await runUpdate({ chatgptOAuth }, () => {
+        setReplaceKeyOpen(false);
+        setChatgptOAuth(null);
+      });
+      return;
+    }
+
     const nextError = validateApiKeyForProvider(apiKey, providerType, {
       ollamaHostMode: instance.hostMode ?? undefined,
     });
@@ -162,19 +178,12 @@ export function useProviderInstanceCard({
   };
 
   const handleDelete = async () => {
-    if (
-      !window.confirm(
-        `${isSole ? "This is your only/default LLM provider. " : ""}Remove ${instance.label} (${instance.type})? Models using this provider will stop working. This cannot be undone.`
-      )
-    ) {
-      return;
-    }
-
     setBusy(true);
     onError(null);
 
     try {
       await onDelete(instance.id);
+      setDeleteOpen(false);
     } catch (error) {
       onError(formatError(error));
     } finally {
@@ -245,6 +254,8 @@ export function useProviderInstanceCard({
     apiKey,
     busy,
     catalogModelsForType,
+    chatgptOAuth,
+    deleteOpen,
     dialogError,
     editBaseUrl,
     editLabel,
@@ -255,6 +266,7 @@ export function useProviderInstanceCard({
     handleManageModelsChange,
     handleReplaceKey,
     isCatalogShortlist,
+    isChatgpt,
     isCompatibleLike,
     isOllama,
     isOpenRouter,
@@ -268,6 +280,8 @@ export function useProviderInstanceCard({
     saveCompatible,
     saveManageModels,
     setApiKey,
+    setChatgptOAuth,
+    setDeleteOpen,
     setEditBaseUrl,
     setEditLabel,
     setEditOpen,

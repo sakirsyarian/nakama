@@ -24,6 +24,7 @@ import type {
   StoredOrgInviteRecord,
   StoredOrgMemberRecord,
   StoredOrgMemoryProposal,
+  StoredProfileChangeEvent,
   StoredProfileComposioToolkitRecord,
   StoredProfileRecord,
   StoredSessionMessageRecord,
@@ -33,11 +34,12 @@ import type {
   StoredSkillRecord,
   StoredSkillSuggestion,
   StoredSkillUsageRecord,
-  StoredTaskRecord,
-  StoredTaskRunRecord,
   StoredToolRecord,
   StoredUserOrganizationRecord,
   StoredUserRecord,
+  StoredWorkflowRecord,
+  StoredWorkflowRunRecord,
+  StoredWorkflowRunStepRecord,
   StoredWorkspaceSettingsRecord,
 } from "../types";
 
@@ -69,6 +71,43 @@ interface AutomationRunRow {
   output: string | null;
   started_at: string;
   status: string;
+}
+
+interface WorkflowRow {
+  created_at: string;
+  definition: string;
+  enabled: number;
+  id: string;
+  name: string;
+  org_id: string | null;
+  profile_id: string;
+  updated_at: string;
+  version: number;
+}
+
+interface WorkflowRunRow {
+  completed_at: string | null;
+  error: string | null;
+  id: string;
+  input: string | null;
+  output: string | null;
+  started_at: string;
+  status: string;
+  workflow_id: string;
+}
+
+interface WorkflowRunStepRow {
+  completed_at: string | null;
+  error: string | null;
+  id: string;
+  input: string | null;
+  kind: string;
+  output: string | null;
+  position: number;
+  run_id: string;
+  started_at: string;
+  status: string;
+  step_id: string;
 }
 
 interface ProfileRow {
@@ -133,30 +172,6 @@ interface AttachmentRow {
   storage_path: string;
 }
 
-interface TaskRow {
-  created_at: string;
-  description: string;
-  id: string;
-  org_id: string | null;
-  position: number;
-  profile_id: string;
-  prompt: string;
-  session_id: string | null;
-  status: string;
-  title: string;
-  updated_at: string;
-}
-
-interface TaskRunRow {
-  completed_at: string | null;
-  error: string | null;
-  id: string;
-  output: string | null;
-  started_at: string;
-  status: string;
-  task_id: string;
-}
-
 interface SessionSummaryRow {
   channel: string;
   created_at: string;
@@ -189,6 +204,7 @@ interface LlmUsageModelStatsRow {
 }
 
 interface WorkspaceSettingsRow {
+  automation_worker_poll_interval_ms: number;
   coding_agent_harnesses: string;
   coding_agent_provider_passthrough: number | null;
   id: string;
@@ -316,9 +332,11 @@ interface OrganizationRow {
   created_at: string;
   id: string;
   name: string;
+  skills_curator_archive_after_days: number;
   skills_curator_consolidate_enabled: number;
   skills_curator_enabled: number;
   skills_curator_last_run_at: string | null;
+  skills_curator_stale_after_days: number;
   skills_post_turn_review: number;
   skills_write_approval: number;
   slug: string;
@@ -350,6 +368,18 @@ interface OrgMemoryProposalRow {
   reviewer_user_id: string | null;
   session_id: string | null;
   status: string;
+}
+
+interface ProfileChangeEventRow {
+  actor_user_id: string | null;
+  after_value: string | null;
+  before_value: string | null;
+  created_at: string;
+  field: string;
+  id: string;
+  org_id: string;
+  profile_id: string;
+  source: string;
 }
 
 interface SkillProposalRow {
@@ -418,6 +448,18 @@ export function openPrivateDatabase(databasePath: string): Database {
   }
 
   return db;
+}
+
+/**
+ * Sync sqlite `:memory:` adapter for tests. Prefer `createSqliteDatabase` when you need `close()`.
+ * Foreign keys stay off so existing tests that omit parent rows (org/user/tool) keep working —
+ * same permissiveness as the deleted Map adapter. Production/`createSqliteDatabase` keep FKs on.
+ */
+export function createSqliteMemoryAdapter(): DatabaseAdapter {
+  const db = openPrivateDatabase(":memory:");
+  migrateDatabase(db);
+  db.exec("PRAGMA foreign_keys = OFF");
+  return createSqliteDatabaseAdapter(db);
 }
 
 export async function createSqliteDatabase(
@@ -506,6 +548,63 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
     WHERE automation_id = ? AND id = ?
   `);
 
+  const listWorkflowsForOrgStmt = db.prepare(
+    "SELECT * FROM workflows WHERE org_id = ? ORDER BY updated_at DESC"
+  );
+  const getWorkflowStmt = db.prepare("SELECT * FROM workflows WHERE id = ?");
+  const upsertWorkflowStmt = db.prepare(`
+    INSERT INTO workflows (id, name, version, definition, profile_id, org_id, enabled, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET
+      name = excluded.name,
+      version = excluded.version,
+      definition = excluded.definition,
+      profile_id = excluded.profile_id,
+      org_id = excluded.org_id,
+      enabled = excluded.enabled,
+      updated_at = excluded.updated_at
+  `);
+  const deleteWorkflowStmt = db.prepare("DELETE FROM workflows WHERE id = ?");
+
+  const listWorkflowRunsStmt = db.prepare(`
+    SELECT * FROM workflow_runs
+    WHERE workflow_id = ?
+    ORDER BY started_at DESC
+    LIMIT ?
+  `);
+  const getWorkflowRunStmt = db.prepare(`
+    SELECT * FROM workflow_runs
+    WHERE workflow_id = ? AND id = ?
+  `);
+  const insertWorkflowRunStmt = db.prepare(`
+    INSERT INTO workflow_runs (id, workflow_id, status, input, started_at, completed_at, output, error)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+  const updateWorkflowRunStmt = db.prepare(`
+    UPDATE workflow_runs
+    SET status = ?, input = ?, completed_at = ?, output = ?, error = ?
+    WHERE id = ?
+  `);
+  const deleteWorkflowRunStmt = db.prepare(`
+    DELETE FROM workflow_runs
+    WHERE workflow_id = ? AND id = ?
+  `);
+
+  const listWorkflowRunStepsStmt = db.prepare(`
+    SELECT * FROM workflow_run_steps
+    WHERE run_id = ?
+    ORDER BY position ASC
+  `);
+  const insertWorkflowRunStepStmt = db.prepare(`
+    INSERT INTO workflow_run_steps (id, run_id, step_id, kind, status, input, output, error, started_at, completed_at, position)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+  const updateWorkflowRunStepStmt = db.prepare(`
+    UPDATE workflow_run_steps
+    SET status = ?, input = ?, output = ?, error = ?, completed_at = ?
+    WHERE id = ?
+  `);
+
   const getAutomationRunReadThroughStmt = db.prepare(`
     SELECT read_through_at
     FROM automation_run_read_state
@@ -577,6 +676,42 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
       skills_curator_consolidate_enabled = excluded.skills_curator_consolidate_enabled,
       updated_at = excluded.updated_at
   `);
+  const runUpsertProfileStmt = (record: StoredProfileRecord) => {
+    upsertProfileStmt.run(
+      record.id,
+      record.name,
+      record.systemPrompt,
+      record.model,
+      record.thinkingEnabled == null ? null : record.thinkingEnabled ? 1 : 0,
+      record.thinkingEffort ?? null,
+      record.isSuper ? 1 : 0,
+      record.orgId ?? null,
+      record.isDefault ? 1 : 0,
+      record.skillsWriteApproval == null
+        ? null
+        : record.skillsWriteApproval
+          ? 1
+          : 0,
+      record.skillsPostTurnReview == null
+        ? null
+        : record.skillsPostTurnReview
+          ? 1
+          : 0,
+      record.skillsCuratorConsolidateEnabled == null
+        ? null
+        : record.skillsCuratorConsolidateEnabled
+          ? 1
+          : 0,
+      record.createdAt,
+      record.updatedAt ?? record.createdAt
+    );
+  };
+  const upsertDefaultProfileTransaction = db.transaction(
+    (record: StoredProfileRecord) => {
+      clearDefaultProfileForOrgStmt.run(record.orgId!, record.id);
+      runUpsertProfileStmt(record);
+    }
+  );
   const deleteProfileStmt = db.prepare("DELETE FROM profiles WHERE id = ?");
 
   const listToolsStmt = db.prepare("SELECT * FROM tools");
@@ -609,6 +744,14 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
     DELETE FROM profile_tools
     WHERE profile_id = ? AND tool_id = ?
   `);
+  const unassignToolFromAllProfilesStmt = db.prepare(`
+    DELETE FROM profile_tools
+    WHERE tool_id = ?
+  `);
+  const deleteToolEverywhereTransaction = db.transaction((toolId: string) => {
+    unassignToolFromAllProfilesStmt.run(toolId);
+    return deleteToolStmt.run(toolId);
+  });
 
   const listSessionsStmt = db.prepare("SELECT * FROM sessions");
   const getSessionStmt = db.prepare("SELECT * FROM sessions WHERE id = ?");
@@ -653,8 +796,36 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
     INSERT INTO session_messages (id, session_id, seq, payload, created_at)
     VALUES (?, ?, ?, ?, ?)
   `);
+  const insertMessages = (
+    sessionId: string,
+    messages: StoredSessionMessageRecord[]
+  ): void => {
+    for (const message of messages) {
+      appendMessageStmt.run(
+        message.id,
+        sessionId,
+        message.seq,
+        JSON.stringify(message.payload),
+        message.createdAt
+      );
+    }
+  };
+  const appendMessagesTransaction = db.transaction(insertMessages);
   const deleteMessagesForSessionStmt = db.prepare(
     "DELETE FROM session_messages WHERE session_id = ?"
+  );
+  const replaceMessagesForSessionTransaction = db.transaction(
+    (sessionId: string, messages: StoredSessionMessageRecord[]) => {
+      deleteMessagesForSessionStmt.run(sessionId);
+      insertMessages(sessionId, messages);
+
+      const updatedAt = messages.reduce(
+        (latest, message) =>
+          message.createdAt > latest ? message.createdAt : latest,
+        new Date().toISOString()
+      );
+      updateSessionUpdatedAtStmt.run(updatedAt, sessionId);
+    }
   );
   const insertAttachmentStmt = db.prepare(`
     INSERT INTO attachments (
@@ -695,53 +866,6 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
     GROUP BY s.id
     HAVING COUNT(m.id) > 0
     ORDER BY updated_at DESC, s.created_at DESC
-  `);
-
-  const listTasksStmt = db.prepare(
-    "SELECT * FROM tasks ORDER BY status ASC, position ASC"
-  );
-  const listTasksForOrgStmt = db.prepare(`
-    SELECT * FROM tasks
-    WHERE org_id = ?
-    ORDER BY status ASC, position ASC
-  `);
-  const getTaskStmt = db.prepare("SELECT * FROM tasks WHERE id = ?");
-  const upsertTaskStmt = db.prepare(`
-    INSERT INTO tasks (id, title, description, prompt, profile_id, org_id, status, position, session_id, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ON CONFLICT(id) DO UPDATE SET
-      title = excluded.title,
-      description = excluded.description,
-      prompt = excluded.prompt,
-      profile_id = excluded.profile_id,
-      org_id = excluded.org_id,
-      status = excluded.status,
-      position = excluded.position,
-      session_id = excluded.session_id,
-      updated_at = excluded.updated_at
-  `);
-  const deleteTaskStmt = db.prepare("DELETE FROM tasks WHERE id = ?");
-
-  const listTaskRunsStmt = db.prepare(`
-    SELECT * FROM task_runs
-    WHERE task_id = ?
-    ORDER BY started_at DESC
-    LIMIT ?
-  `);
-  const getActiveTaskRunStmt = db.prepare(`
-    SELECT * FROM task_runs
-    WHERE task_id = ? AND status = 'running'
-    ORDER BY started_at DESC
-    LIMIT 1
-  `);
-  const insertTaskRunStmt = db.prepare(`
-    INSERT INTO task_runs (id, task_id, status, started_at, completed_at, output, error)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
-  `);
-  const updateTaskRunStmt = db.prepare(`
-    UPDATE task_runs
-    SET status = ?, completed_at = ?, output = ?, error = ?
-    WHERE id = ?
   `);
 
   const getLlmUsageStatsStmt = db.prepare(
@@ -958,9 +1082,10 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
       selected_coding_agent_harness,
       token_optimizer_enabled,
       coding_agent_provider_passthrough,
+      automation_worker_poll_interval_ms,
       updated_at
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(id) DO UPDATE SET
       vision_model = excluded.vision_model,
       transcription_model = excluded.transcription_model,
@@ -969,6 +1094,7 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
       selected_coding_agent_harness = excluded.selected_coding_agent_harness,
       token_optimizer_enabled = excluded.token_optimizer_enabled,
       coding_agent_provider_passthrough = excluded.coding_agent_provider_passthrough,
+      automation_worker_poll_interval_ms = excluded.automation_worker_poll_interval_ms,
       updated_at = excluded.updated_at
   `);
   const listNotificationDestinationsForOrgStmt = db.prepare(`
@@ -1102,6 +1228,21 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
     INSERT INTO profile_composio_toolkits (profile_id, toolkit_id, allowed_actions)
     VALUES (?, ?, ?)
   `);
+  const replaceProfileComposioToolkitsTransaction = db.transaction(
+    (profileId: string, assignments: StoredProfileComposioToolkitRecord[]) => {
+      deleteProfileComposioToolkitsStmt.run(profileId);
+
+      for (const assignment of assignments) {
+        insertProfileComposioToolkitStmt.run(
+          assignment.profileId,
+          assignment.toolkitId,
+          assignment.allowedActions
+            ? JSON.stringify(assignment.allowedActions)
+            : null
+        );
+      }
+    }
+  );
   const listComposioUserConnectionsForUserStmt = db.prepare(`
     SELECT
       id,
@@ -1200,10 +1341,12 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
     SET password_hash = ?, updated_at = ?
     WHERE id = ?
   `);
+  // Per-org context lives on org_members only. users.user_context is a legacy
+  // column left in place for existing installs; migrateLegacyUserContextToOrgMembers
+  // copies any remaining values once, and this read path must not use it (#550).
   const getUserContextStmt = db.prepare(`
-    SELECT COALESCE(om.user_context, u.user_context) AS user_context
+    SELECT om.user_context AS user_context
     FROM org_members om
-    INNER JOIN users u ON u.id = om.user_id
     WHERE om.org_id = ? AND om.user_id = ?
   `);
   const setUserContextStmt = db.prepare(`
@@ -1263,14 +1406,16 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
       AND (SELECT COUNT(*) FROM organizations WHERE archived_at IS NULL) > 1
   `);
   const upsertOrganizationStmt = db.prepare(`
-    INSERT INTO organizations (id, name, slug, skills_write_approval, skills_post_turn_review, skills_curator_enabled, skills_curator_consolidate_enabled, skills_curator_last_run_at, archived_at, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO organizations (id, name, slug, skills_write_approval, skills_post_turn_review, skills_curator_enabled, skills_curator_stale_after_days, skills_curator_archive_after_days, skills_curator_consolidate_enabled, skills_curator_last_run_at, archived_at, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(id) DO UPDATE SET
       name = excluded.name,
       slug = excluded.slug,
       skills_write_approval = excluded.skills_write_approval,
       skills_post_turn_review = excluded.skills_post_turn_review,
       skills_curator_enabled = excluded.skills_curator_enabled,
+      skills_curator_stale_after_days = excluded.skills_curator_stale_after_days,
+      skills_curator_archive_after_days = excluded.skills_curator_archive_after_days,
       skills_curator_consolidate_enabled = excluded.skills_curator_consolidate_enabled,
       skills_curator_last_run_at = excluded.skills_curator_last_run_at,
       archived_at = excluded.archived_at,
@@ -1325,6 +1470,21 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
       id, org_id, profile_id, session_id, proposed_by_user_id,
       bullet, status, pinned, reviewer_user_id, reviewed_at, created_at
     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+  const createProfileChangeEventStmt = db.prepare(`
+    INSERT INTO profile_change_events (
+      id, org_id, profile_id, actor_user_id, source, field,
+      before_value, after_value, created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+  const listProfileChangeEventsStmt = db.prepare(`
+    SELECT
+      id, org_id, profile_id, actor_user_id, source, field,
+      before_value, after_value, created_at
+    FROM profile_change_events
+    WHERE org_id = ? AND profile_id = ?
+    ORDER BY created_at DESC, id DESC
+    LIMIT ? OFFSET ?
   `);
   const listOrgMemoryProposalsStmt = db.prepare(`
     SELECT
@@ -1493,6 +1653,18 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
     SET status = 'applied', applied_at = ?
     WHERE org_id = ? AND id = ?
   `);
+  const listSkillSuggestionsStmt = db.prepare(`
+    SELECT
+      id, org_id, profile_id, session_id, proposed_by_user_id,
+      action, skill_name, content, patch_old_string, patch_new_string,
+      status, source, warnings, created_at, applied_at
+    FROM skill_suggestions
+    WHERE org_id = ?
+      AND (? IS NULL OR session_id = ?)
+      AND (? IS NULL OR status = ?)
+      AND (? IS NULL OR profile_id = ?)
+    ORDER BY created_at DESC
+  `);
   const createArtifactShareStmt = db.prepare(`
     INSERT INTO artifact_shares (
       id, org_id, profile_id, source_path, filename, mime_type, size_bytes,
@@ -1545,6 +1717,63 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
     ON CONFLICT(org_id, user_id) DO UPDATE SET
       role = excluded.role
   `);
+  const runCreateUserStmt = (record: StoredUserRecord) => {
+    createUserStmt.run(
+      record.id,
+      record.email,
+      record.passwordHash,
+      record.name ?? null,
+      record.phone ?? null,
+      record.isPlatformAdmin ? 1 : 0,
+      record.createdAt,
+      record.updatedAt
+    );
+  };
+  const runUpsertOrganizationStmt = (record: StoredOrganizationRecord) => {
+    upsertOrganizationStmt.run(
+      record.id,
+      record.name,
+      record.slug,
+      record.skillsWriteApproval ? 1 : 0,
+      record.skillsPostTurnReview ? 1 : 0,
+      record.skillsCuratorEnabled ? 1 : 0,
+      record.skillsCuratorStaleAfterDays ?? 30,
+      record.skillsCuratorArchiveAfterDays ?? 90,
+      record.skillsCuratorConsolidateEnabled ? 1 : 0,
+      record.skillsCuratorLastRunAt ?? null,
+      record.archivedAt ?? null,
+      record.createdAt,
+      record.updatedAt
+    );
+  };
+  const runUpsertOrgMemberStmt = (record: StoredOrgMemberRecord) => {
+    upsertOrgMemberStmt.run(
+      record.orgId,
+      record.userId,
+      record.role,
+      record.userContext ?? null,
+      record.createdAt
+    );
+  };
+  const bootstrapInitialSetupTransaction = db.transaction(
+    (input: {
+      member: StoredOrgMemberRecord;
+      organization: StoredOrganizationRecord;
+      user: StoredUserRecord;
+    }) => {
+      const row = countHumanUsersStmt.get(LOCAL_CLIENT_USER_ID) as {
+        count: number;
+      };
+      if (row.count > 0) {
+        return false;
+      }
+
+      runUpsertOrganizationStmt(input.organization);
+      runCreateUserStmt(input.user);
+      runUpsertOrgMemberStmt(input.member);
+      return true;
+    }
+  );
   const listOrgMembersStmt = db.prepare(`
     SELECT org_id, user_id, role, user_context, created_at
     FROM org_members
@@ -1572,22 +1801,26 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
       AND o.archived_at IS NULL
     ORDER BY o.name ASC
   `);
+  // The last-admin guard lives in the statement so two concurrent removals
+  // cannot both pass a read-then-write check and leave the org with no admin.
   const deleteOrgMemberStmt = db.prepare(`
     DELETE FROM org_members
     WHERE org_id = ? AND user_id = ?
+      AND (role != 'admin'
+        OR (SELECT COUNT(*) FROM org_members
+            WHERE org_id = ? AND role = 'admin') > 1)
+  `);
+  const updateOrgMemberRoleStmt = db.prepare(`
+    UPDATE org_members SET role = ?
+    WHERE org_id = ? AND user_id = ?
+      AND (? = 'admin' OR role != 'admin'
+        OR (SELECT COUNT(*) FROM org_members
+            WHERE org_id = ? AND role = 'admin') > 1)
   `);
 
   return {
     async appendMessagesForSession(sessionId, messages) {
-      for (const message of messages) {
-        appendMessageStmt.run(
-          message.id,
-          sessionId,
-          message.seq,
-          JSON.stringify(message.payload),
-          message.createdAt
-        );
-      }
+      appendMessagesTransaction(sessionId, messages);
     },
 
     async assignMcpServerToProfile(profileId, serverId) {
@@ -1600,6 +1833,10 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
 
     async assignToolToProfile(profileId, toolId) {
       assignToolStmt.run(profileId, toolId);
+    },
+
+    async bootstrapInitialSetup(input) {
+      return bootstrapInitialSetupTransaction.immediate(input);
     },
 
     async countHumanUsers() {
@@ -1706,6 +1943,20 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
       );
     },
 
+    async createProfileChangeEvent(record) {
+      createProfileChangeEventStmt.run(
+        record.id,
+        record.orgId,
+        record.profileId,
+        record.actorUserId,
+        record.source,
+        record.field,
+        record.beforeValue,
+        record.afterValue,
+        record.createdAt
+      );
+    },
+
     async createSkillProposal(record) {
       createSkillProposalStmt.run(
         record.id,
@@ -1750,16 +2001,7 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
     },
 
     async createUser(record) {
-      createUserStmt.run(
-        record.id,
-        record.email,
-        record.passwordHash,
-        record.name ?? null,
-        record.phone ?? null,
-        record.isPlatformAdmin ? 1 : 0,
-        record.createdAt,
-        record.updatedAt
-      );
+      runCreateUserStmt(record);
     },
 
     async deleteAttachment(id) {
@@ -1802,7 +2044,7 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
     },
 
     async deleteOrgMember(orgId, userId) {
-      const result = deleteOrgMemberStmt.run(orgId, userId);
+      const result = deleteOrgMemberStmt.run(orgId, userId, orgId);
       return result.changes > 0;
     },
 
@@ -1821,13 +2063,20 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
       return result.changes > 0;
     },
 
-    async deleteTask(id) {
-      const result = deleteTaskStmt.run(id);
+    async deleteTool(id) {
+      // FK cascade is off (PRAGMA foreign_keys = OFF), so unassign + delete
+      // must be one transaction or seed/admin delete can leave partial state.
+      const result = deleteToolEverywhereTransaction(id);
       return result.changes > 0;
     },
 
-    async deleteTool(id) {
-      const result = deleteToolStmt.run(id);
+    async deleteWorkflow(id) {
+      const result = deleteWorkflowStmt.run(id);
+      return result.changes > 0;
+    },
+
+    async deleteWorkflowRun(workflowId, runId) {
+      const result = deleteWorkflowRunStmt.run(workflowId, runId);
       return result.changes > 0;
     },
 
@@ -1845,11 +2094,6 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
         automationId
       ) as AutomationRunRow | null;
       return row ? toAutomationRunRecord(row) : null;
-    },
-
-    async getActiveTaskRun(taskId) {
-      const row = getActiveTaskRunStmt.get(taskId) as TaskRunRow | null;
-      return row ? toTaskRunRecord(row) : null;
     },
 
     async getArtifactShareById(orgId, profileId, shareId) {
@@ -2120,11 +2364,6 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
       return row ? toSkillUsageRecord(row) : null;
     },
 
-    async getTask(id) {
-      const row = getTaskStmt.get(id) as TaskRow | null;
-      return row ? toTaskRecord(row) : null;
-    },
-
     async getTool(id) {
       const row = getToolStmt.get(id) as ToolRow | null;
       return row ? toToolRecord(row) : null;
@@ -2149,6 +2388,19 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
         user_context?: string | null;
       } | null;
       return row?.user_context ?? null;
+    },
+
+    async getWorkflow(id) {
+      const row = getWorkflowStmt.get(id) as WorkflowRow | null;
+      return row ? toWorkflowRecord(row) : null;
+    },
+
+    async getWorkflowRun(workflowId, runId) {
+      const row = getWorkflowRunStmt.get(
+        workflowId,
+        runId
+      ) as WorkflowRunRow | null;
+      return row ? toWorkflowRunRecord(row) : null;
     },
 
     async getWorkspaceSettings() {
@@ -2258,15 +2510,32 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
       );
     },
 
-    async insertTaskRun(record) {
-      insertTaskRunStmt.run(
+    async insertWorkflowRun(record) {
+      insertWorkflowRunStmt.run(
         record.id,
-        record.taskId,
+        record.workflowId,
         record.status,
+        record.input,
         record.startedAt,
         record.completedAt,
         record.output,
         record.error
+      );
+    },
+
+    async insertWorkflowRunStep(record) {
+      insertWorkflowRunStepStmt.run(
+        record.id,
+        record.runId,
+        record.stepId,
+        record.kind,
+        record.status,
+        record.input,
+        record.output,
+        record.error,
+        record.startedAt,
+        record.completedAt,
+        record.position
       );
     },
 
@@ -2404,6 +2673,18 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
       return rows.map(toOrgMemoryProposalRecord);
     },
 
+    async listProfileChangeEvents(orgId, profileId, options = {}) {
+      const limit = options.limit ?? 100;
+      const offset = options.offset ?? 0;
+      const rows = listProfileChangeEventsStmt.all(
+        orgId,
+        profileId,
+        limit,
+        offset
+      ) as ProfileChangeEventRow[];
+      return rows.map(toProfileChangeEventRecord);
+    },
+
     async listProfileComposioToolkits(profileId) {
       return listProfileComposioToolkitsStmt
         .all(profileId)
@@ -2473,32 +2754,18 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
 
     async listSkillSuggestions(orgId, options = {}) {
       const { sessionId, status, profileId } = options;
-      const conditions = ["org_id = ?"];
-      const params: string[] = [orgId];
-
-      if (sessionId) {
-        conditions.push("session_id = ?");
-        params.push(sessionId);
-      }
-      if (status) {
-        conditions.push("status = ?");
-        params.push(status);
-      }
-      if (profileId) {
-        conditions.push("profile_id = ?");
-        params.push(profileId);
-      }
-
-      const sql = `
-        SELECT
-          id, org_id, profile_id, session_id, proposed_by_user_id,
-          action, skill_name, content, patch_old_string, patch_new_string,
-          status, source, warnings, created_at, applied_at
-        FROM skill_suggestions
-        WHERE ${conditions.join(" AND ")}
-        ORDER BY created_at DESC
-      `;
-      const rows = db.query(sql).all(...params) as SkillSuggestionRow[];
+      const sessionFilter = sessionId ?? null;
+      const statusFilter = status ?? null;
+      const profileFilter = profileId ?? null;
+      const rows = listSkillSuggestionsStmt.all(
+        orgId,
+        sessionFilter,
+        sessionFilter,
+        statusFilter,
+        statusFilter,
+        profileFilter,
+        profileFilter
+      ) as SkillSuggestionRow[];
       return rows.map(toSkillSuggestionRecord);
     },
 
@@ -2516,22 +2783,6 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
       return listSkillUsageForProfileStmt
         .all(profileId)
         .map((row) => toSkillUsageRecord(row as SkillUsageRow));
-    },
-
-    async listTaskRuns(taskId, limit = 20) {
-      return listTaskRunsStmt
-        .all(taskId, limit)
-        .map((row) => toTaskRunRecord(row as TaskRunRow));
-    },
-
-    async listTasks() {
-      return listTasksStmt.all().map((row) => toTaskRecord(row as TaskRow));
-    },
-
-    async listTasksForOrg(orgId) {
-      return listTasksForOrgStmt
-        .all(orgId)
-        .map((row) => toTaskRecord(row as TaskRow));
     },
 
     async listToolOutputSavings(orgId) {
@@ -2585,6 +2836,24 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
       });
     },
 
+    async listWorkflowRunSteps(runId) {
+      return listWorkflowRunStepsStmt
+        .all(runId)
+        .map((row) => toWorkflowRunStepRecord(row as WorkflowRunStepRow));
+    },
+
+    async listWorkflowRuns(workflowId, limit = 20) {
+      return listWorkflowRunsStmt
+        .all(workflowId, limit)
+        .map((row) => toWorkflowRunRecord(row as WorkflowRunRow));
+    },
+
+    async listWorkflowsForOrg(orgId) {
+      return listWorkflowsForOrgStmt
+        .all(orgId)
+        .map((row) => toWorkflowRecord(row as WorkflowRow));
+    },
+
     async markOrgInviteAccepted(id, acceptedAt) {
       markOrgInviteAcceptedStmt.run(acceptedAt, id);
     },
@@ -2595,38 +2864,11 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
     },
 
     async replaceMessagesForSession(sessionId, messages) {
-      deleteMessagesForSessionStmt.run(sessionId);
-
-      for (const message of messages) {
-        appendMessageStmt.run(
-          message.id,
-          sessionId,
-          message.seq,
-          JSON.stringify(message.payload),
-          message.createdAt
-        );
-      }
-
-      const updatedAt = messages.reduce(
-        (latest, message) =>
-          message.createdAt > latest ? message.createdAt : latest,
-        new Date().toISOString()
-      );
-      updateSessionUpdatedAtStmt.run(updatedAt, sessionId);
+      replaceMessagesForSessionTransaction(sessionId, messages);
     },
 
     async replaceProfileComposioToolkits(profileId, assignments) {
-      deleteProfileComposioToolkitsStmt.run(profileId);
-
-      for (const assignment of assignments) {
-        insertProfileComposioToolkitStmt.run(
-          assignment.profileId,
-          assignment.toolkitId,
-          assignment.allowedActions
-            ? JSON.stringify(assignment.allowedActions)
-            : null
-        );
-      }
+      replaceProfileComposioToolkitsTransaction(profileId, assignments);
     },
 
     async revokeArtifactShare(id, revokedAt) {
@@ -2706,6 +2948,17 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
       updateBrowserSessionLastUsedAtStmt.run(lastUsedAt, id);
     },
 
+    async updateOrgMemberRole(orgId, userId, role) {
+      const result = updateOrgMemberRoleStmt.run(
+        role,
+        orgId,
+        userId,
+        role,
+        orgId
+      );
+      return result.changes > 0;
+    },
+
     async updateOrgMemoryProposalStatus(orgId, id, update) {
       const result = updateOrgMemoryProposalStatusStmt.run(
         update.status,
@@ -2750,16 +3003,6 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
       return result.changes > 0;
     },
 
-    async updateTaskRun(record) {
-      updateTaskRunStmt.run(
-        record.status,
-        record.completedAt,
-        record.output,
-        record.error,
-        record.id
-      );
-    },
-
     async updateUserPassword(id, passwordHash, updatedAt) {
       updateUserPasswordStmt.run(passwordHash, updatedAt, id);
     },
@@ -2771,6 +3014,28 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
         profile.email ?? null,
         updatedAt,
         id
+      );
+    },
+
+    async updateWorkflowRun(record) {
+      updateWorkflowRunStmt.run(
+        record.status,
+        record.input,
+        record.completedAt,
+        record.output,
+        record.error,
+        record.id
+      );
+    },
+
+    async updateWorkflowRunStep(record) {
+      updateWorkflowRunStepStmt.run(
+        record.status,
+        record.input,
+        record.output,
+        record.error,
+        record.completedAt,
+        record.id
       );
     },
 
@@ -2866,66 +3131,21 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
     },
 
     async upsertOrganization(record) {
-      upsertOrganizationStmt.run(
-        record.id,
-        record.name,
-        record.slug,
-        record.skillsWriteApproval ? 1 : 0,
-        record.skillsPostTurnReview ? 1 : 0,
-        record.skillsCuratorEnabled ? 1 : 0,
-        record.skillsCuratorConsolidateEnabled ? 1 : 0,
-        record.skillsCuratorLastRunAt ?? null,
-        record.archivedAt ?? null,
-        record.createdAt,
-        record.updatedAt
-      );
+      runUpsertOrganizationStmt(record);
     },
 
     async upsertOrgMember(record) {
-      upsertOrgMemberStmt.run(
-        record.orgId,
-        record.userId,
-        record.role,
-        record.userContext ?? null,
-        record.createdAt
-      );
+      runUpsertOrgMemberStmt(record);
     },
 
     async upsertProfile(record) {
       if (record.isDefault && record.orgId) {
-        clearDefaultProfileForOrgStmt.run(record.orgId, record.id);
+        upsertDefaultProfileTransaction.immediate(record);
+        return;
       }
 
-      upsertProfileStmt.run(
-        record.id,
-        record.name,
-        record.systemPrompt,
-        record.model,
-        record.thinkingEnabled == null ? null : record.thinkingEnabled ? 1 : 0,
-        record.thinkingEffort ?? null,
-        record.isSuper ? 1 : 0,
-        record.orgId ?? null,
-        record.isDefault ? 1 : 0,
-        record.skillsWriteApproval == null
-          ? null
-          : record.skillsWriteApproval
-            ? 1
-            : 0,
-        record.skillsPostTurnReview == null
-          ? null
-          : record.skillsPostTurnReview
-            ? 1
-            : 0,
-        record.skillsCuratorConsolidateEnabled == null
-          ? null
-          : record.skillsCuratorConsolidateEnabled
-            ? 1
-            : 0,
-        record.createdAt,
-        record.updatedAt
-      );
+      runUpsertProfileStmt(record);
     },
-
     async upsertSession(record) {
       upsertSessionStmt.run(
         record.id,
@@ -2954,24 +3174,6 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
       );
     },
 
-    async upsertTask(record) {
-      const existing = await this.getTask(record.id);
-
-      upsertTaskStmt.run(
-        record.id,
-        record.title,
-        record.description,
-        record.prompt,
-        record.profileId,
-        record.orgId ?? null,
-        record.status,
-        record.position,
-        record.sessionId ?? null,
-        existing?.createdAt ?? record.createdAt,
-        record.updatedAt
-      );
-    },
-
     async upsertTool(record) {
       upsertToolStmt.run(
         record.id,
@@ -2984,9 +3186,25 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
       );
     },
 
+    async upsertWorkflow(record) {
+      const existing = await this.getWorkflow(record.id);
+
+      upsertWorkflowStmt.run(
+        record.id,
+        record.name,
+        record.version,
+        JSON.stringify(record.definition),
+        record.profileId,
+        record.orgId ?? null,
+        record.enabled ? 1 : 0,
+        existing?.createdAt ?? record.createdAt,
+        record.updatedAt
+      );
+    },
+
     async upsertWorkspaceSettings(record) {
       upsertWorkspaceSettingsStmt.run(
-        record.id,
+        WORKSPACE_SETTINGS_ID,
         record.visionModel,
         record.transcriptionModel,
         record.imageModel,
@@ -2997,6 +3215,7 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
           ? null
           : Number(record.tokenOptimizerEnabled),
         record.codingAgentProviderPassthrough === false ? 0 : 1,
+        record.automationWorkerPollIntervalMs ?? 5 * 60 * 1000,
         record.updatedAt
       );
     },
@@ -3030,6 +3249,51 @@ function toAutomationRunRecord(
     output: row.output,
     startedAt: row.started_at,
     status: row.status as StoredAutomationRunRecord["status"],
+  };
+}
+
+function toWorkflowRecord(row: WorkflowRow): StoredWorkflowRecord {
+  return {
+    createdAt: row.created_at,
+    definition: parseJson(row.definition),
+    enabled: row.enabled !== 0,
+    id: row.id,
+    name: row.name,
+    orgId: row.org_id ?? null,
+    profileId: row.profile_id,
+    updatedAt: row.updated_at,
+    version: row.version,
+  };
+}
+
+function toWorkflowRunRecord(row: WorkflowRunRow): StoredWorkflowRunRecord {
+  return {
+    completedAt: row.completed_at,
+    error: row.error,
+    id: row.id,
+    input: row.input,
+    output: row.output,
+    startedAt: row.started_at,
+    status: row.status as StoredWorkflowRunRecord["status"],
+    workflowId: row.workflow_id,
+  };
+}
+
+function toWorkflowRunStepRecord(
+  row: WorkflowRunStepRow
+): StoredWorkflowRunStepRecord {
+  return {
+    completedAt: row.completed_at,
+    error: row.error,
+    id: row.id,
+    input: row.input,
+    kind: row.kind,
+    output: row.output,
+    position: row.position,
+    runId: row.run_id,
+    startedAt: row.started_at,
+    status: row.status,
+    stepId: row.step_id,
   };
 }
 
@@ -3262,34 +3526,6 @@ function toAttachmentRecord(row: AttachmentRow): StoredAttachmentRecord {
   };
 }
 
-function toTaskRecord(row: TaskRow): StoredTaskRecord {
-  return {
-    createdAt: row.created_at,
-    description: row.description,
-    id: row.id,
-    orgId: row.org_id ?? null,
-    position: row.position,
-    profileId: row.profile_id,
-    prompt: row.prompt,
-    sessionId: row.session_id,
-    status: row.status,
-    title: row.title,
-    updatedAt: row.updated_at,
-  };
-}
-
-function toTaskRunRecord(row: TaskRunRow): StoredTaskRunRecord {
-  return {
-    completedAt: row.completed_at,
-    error: row.error,
-    id: row.id,
-    output: row.output,
-    startedAt: row.started_at,
-    status: row.status as StoredTaskRunRecord["status"],
-    taskId: row.task_id,
-  };
-}
-
 function previewFromFirstUserPayload(
   payloadJson: string | null
 ): string | null {
@@ -3358,6 +3594,7 @@ function toWorkspaceSettingsRecord(
   row: WorkspaceSettingsRow
 ): StoredWorkspaceSettingsRecord {
   return {
+    automationWorkerPollIntervalMs: row.automation_worker_poll_interval_ms,
     codingAgentHarnesses: parseCodingAgentHarnesses(row.coding_agent_harnesses),
     codingAgentProviderPassthrough: row.coding_agent_provider_passthrough !== 0,
     id: row.id,
@@ -3575,10 +3812,12 @@ function toOrganizationRecord(row: OrganizationRow): StoredOrganizationRecord {
     createdAt: row.created_at,
     id: row.id,
     name: row.name,
+    skillsCuratorArchiveAfterDays: row.skills_curator_archive_after_days,
     skillsCuratorConsolidateEnabled:
       row.skills_curator_consolidate_enabled !== 0,
     skillsCuratorEnabled: row.skills_curator_enabled !== 0,
     skillsCuratorLastRunAt: row.skills_curator_last_run_at,
+    skillsCuratorStaleAfterDays: row.skills_curator_stale_after_days,
     skillsPostTurnReview: row.skills_post_turn_review !== 0,
     skillsWriteApproval: row.skills_write_approval !== 0,
     slug: row.slug,
@@ -3616,6 +3855,22 @@ function toOrgMemoryProposalRecord(
     reviewerUserId: row.reviewer_user_id,
     sessionId: row.session_id,
     status: row.status as OrgMemoryProposalStatus,
+  };
+}
+
+function toProfileChangeEventRecord(
+  row: ProfileChangeEventRow
+): StoredProfileChangeEvent {
+  return {
+    actorUserId: row.actor_user_id,
+    afterValue: row.after_value,
+    beforeValue: row.before_value,
+    createdAt: row.created_at,
+    field: row.field as StoredProfileChangeEvent["field"],
+    id: row.id,
+    orgId: row.org_id,
+    profileId: row.profile_id,
+    source: row.source as StoredProfileChangeEvent["source"],
   };
 }
 

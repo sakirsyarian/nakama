@@ -13,7 +13,7 @@ import {
   isGlobalSkillSourcePath,
   pathExists,
   readTextIfExists,
-  resolveSkillCuratorConsolidateEnabled,
+  resolveProfileOrgBooleanOverride,
   restoreArchivedSkillDirectory,
   writeTextFile,
 } from "@nakama/core";
@@ -146,6 +146,9 @@ export class SkillCuratorService {
       ...emptyCounts,
       restoreMisses: [],
     };
+    const org = await this.db.getOrganizationById(orgId);
+    const staleAfterDays = org?.skillsCuratorStaleAfterDays ?? 30;
+    const archiveAfterDays = org?.skillsCuratorArchiveAfterDays ?? 90;
     const profiles = await this.db.listProfilesForOrg(orgId);
     for (const profile of profiles) {
       if (profile.orgId !== orgId) {
@@ -177,9 +180,11 @@ export class SkillCuratorService {
 
         const usage = usageBySkillId.get(skill.id);
         const freshness = classifySkillFreshness({
+          archiveAfterDays,
           createdAt: skill.createdAt,
           lastUsedAt: usage?.lastUsedAt,
           now,
+          staleAfterDays,
         });
 
         if (freshness === "active") {
@@ -251,12 +256,10 @@ export class SkillCuratorService {
     const org = await this.db.getOrganizationById(input.orgId);
 
     for (const profile of input.profiles) {
-      const consolidateEnabled = resolveSkillCuratorConsolidateEnabled({
-        orgSkillsCuratorConsolidateEnabled:
-          org?.skillsCuratorConsolidateEnabled ?? false,
-        profileSkillsCuratorConsolidateEnabled:
-          profile.skillsCuratorConsolidateEnabled ?? null,
-      });
+      const consolidateEnabled = resolveProfileOrgBooleanOverride(
+        profile.skillsCuratorConsolidateEnabled ?? null,
+        org?.skillsCuratorConsolidateEnabled ?? false
+      );
       if (!consolidateEnabled) {
         continue;
       }

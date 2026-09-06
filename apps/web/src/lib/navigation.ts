@@ -2,6 +2,7 @@ import {
   Brain03Icon,
   Building03Icon,
   Chat01Icon,
+  DashboardSquare01Icon,
   Folder01Icon,
   Notification01Icon,
   PlusSignSquareIcon,
@@ -20,11 +21,11 @@ export type PageId =
   | "profiles"
   | "soul"
   | "automations"
-  | "tasks"
   | "integrations"
   | "organization"
   | "settings"
-  | "notifications";
+  | "notifications"
+  | "workers";
 
 export interface NavItem {
   description: string;
@@ -80,7 +81,7 @@ export const NAV_GROUPS: NavGroup[] = [
       navItem(
         "automations",
         "Automations",
-        "Manage automations and agent tasks",
+        "Manage scheduled automations",
         SharedWifiIcon
       ),
     ],
@@ -102,6 +103,12 @@ export const NAV_GROUPS: NavGroup[] = [
     collapsible: true,
     id: "system",
     items: [
+      navItem(
+        "workers",
+        "Workers",
+        "Automation and channel workers",
+        DashboardSquare01Icon
+      ),
       navItem(
         "integrations",
         "Integrations",
@@ -148,8 +155,6 @@ export const NAV_ITEM_ICONS: Record<PageId, NavIcon> = {
   ...(Object.fromEntries(
     navItemsWithIcons.map((item) => [item.id, item.icon])
   ) as Record<PageId, NavIcon>),
-  tasks:
-    NAV_ITEMS.find((item) => item.id === "automations")?.icon ?? SharedWifiIcon,
 };
 
 export const SETUP_PATH = "/setup";
@@ -190,7 +195,8 @@ export function visibleNavGroups(access: {
       if (
         item.id === "soul" ||
         item.id === "profiles" ||
-        item.id === "organization"
+        item.id === "organization" ||
+        item.id === "workers"
       ) {
         return canAccessSystemPage(access.isPlatformAdmin, access.orgRole);
       }
@@ -215,9 +221,6 @@ const queryPath = (path: string, params: Record<string, string>): string =>
 
 export const toolsTabPath = (): string =>
   queryPath(PAGE_PATHS.soul, { tab: "tools" });
-
-export const statusTabPath = (): string =>
-  queryPath(PAGE_PATHS.soul, { tab: "status" });
 
 export const profilePath = (profileId: string): string =>
   queryPath(PAGE_PATHS.profiles, { profile: profileId });
@@ -295,7 +298,7 @@ export const PAGE_PATHS: Record<PageId, string> = {
   profiles: "/profiles",
   settings: "/settings",
   soul: "/system",
-  tasks: "/tasks",
+  workers: "/workers",
 };
 
 const PREFIX_PAGE_IDS: readonly [string, PageId][] = [
@@ -305,12 +308,12 @@ const PREFIX_PAGE_IDS: readonly [string, PageId][] = [
   [PAGE_PATHS.files, "files"],
 ];
 
-export type AgentWorkTab = "automations" | "tasks";
+export type AgentWorkTab = "automations" | "workflows";
 
 export function agentWorkTabFromSearchParams(
   searchParams: URLSearchParams
 ): AgentWorkTab {
-  return searchParams.get("tab") === "tasks" ? "tasks" : "automations";
+  return searchParams.get("tab") === "workflows" ? "workflows" : "automations";
 }
 
 export function agentWorkTabPath(tab: AgentWorkTab): string {
@@ -343,7 +346,7 @@ export function findNavItem(pageId: PageId): NavItem | undefined {
 }
 
 export function pageIdFromPath(pathname: string): PageId | null {
-  if (pathname === PAGE_PATHS.tasks) {
+  if (pathname === "/tasks") {
     return "automations";
   }
 

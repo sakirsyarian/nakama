@@ -388,4 +388,33 @@ describe("buildProviderInstanceFromCreateRequest", () => {
       }
     }
   });
+
+  test("rejects an obviously malformed OpenAI API key instead of persisting it", () => {
+    expect(() =>
+      buildProviderInstanceFromCreateRequest(
+        { apiKey: "sk-junk-qa-123", model: "gpt-junk", type: "openai" },
+        []
+      )
+    ).toThrow(/valid OpenAI API key/i);
+  });
+
+  test("creates a chatgpt provider from oauth credentials", () => {
+    const instance = buildProviderInstanceFromCreateRequest(
+      {
+        apiKey: "",
+        chatgptOAuth: {
+          accessToken: "access",
+          accountId: "acct_1",
+          expiresAt: "2026-01-01T01:00:00.000Z",
+          refreshToken: "refresh",
+        },
+        type: "chatgpt",
+      },
+      []
+    );
+
+    expect(instance.type).toBe("chatgpt");
+    expect(instance.chatgptRefreshToken).toBe("refresh");
+    expect(instance.chatgptAccountId).toBe("acct_1");
+  });
 });

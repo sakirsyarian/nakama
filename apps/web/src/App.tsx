@@ -9,7 +9,7 @@ import { SetupGuard } from "@/components/SetupGuard";
 import { AppProvider } from "@/context/app-context";
 import { AuthProvider } from "@/context/auth-context";
 import { AppQueryPrefetch } from "@/hooks/use-app-queries";
-import { statusTabPath } from "@/lib/navigation";
+import { PAGE_PATHS } from "@/lib/navigation";
 import { onGlobalQueryError, queryClient } from "@/lib/query-client";
 
 const lazyPage = <Name extends string>(
@@ -60,12 +60,12 @@ const SkillDetailPage = lazyPage(
   () => import("@/pages/SkillDetailPage"),
   "SkillDetailPage"
 );
+const StatusPage = lazyPage(() => import("@/pages/StatusPage"), "StatusPage");
 const SystemPage = lazyPage(() => import("@/pages/SystemPage"), "SystemPage");
 const ToolPlaygroundPage = lazyPage(
   () => import("@/pages/ToolPlaygroundPage"),
   "ToolPlaygroundPage"
 );
-
 function QueryCacheListener() {
   useEffect(() => {
     const unsub = queryClient.getQueryCache().subscribe(onGlobalQueryError);
@@ -111,9 +111,12 @@ function AppShell() {
                 <Route element={<Layout />}>
                   <Route element={<Navigate replace to="/chat" />} index />
                   <Route
-                    element={<Navigate replace to={statusTabPath()} />}
+                    element={<Navigate replace to={PAGE_PATHS.workers} />}
                     path="/status"
                   />
+                  <Route element={<PlatformAdminGuard allowOrgAdmin />}>
+                    <Route element={<StatusPage />} path="/workers" />
+                  </Route>
                   <Route element={<ChatPage />} path="/chat" />
                   <Route
                     element={<ChatPage />}
@@ -139,7 +142,7 @@ function AppShell() {
                   </Route>
                   <Route element={<AutomationsPage />} path="/automations" />
                   <Route
-                    element={<Navigate replace to="/automations?tab=tasks" />}
+                    element={<Navigate replace to="/automations" />}
                     path="/tasks"
                   />
                   <Route element={<IntegrationsPage />} path="/integrations" />

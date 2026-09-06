@@ -1,15 +1,17 @@
 import { createRoute, z } from "@hono/zod-openapi";
-import type {
-  AssignToolRequest,
-  CreateToolRequest,
-  ListToolsResponse,
-  ProfileResponse,
-  RunToolRequest,
-  RunToolResponse,
-  SuggestToolParamsRequest,
-  SuggestToolParamsResponse,
-  ToolResponse,
-  ToolSourceResponse,
+import {
+  type AssignToolRequest,
+  type CreateToolRequest,
+  formatServerError,
+  type ListToolsResponse,
+  NakamaApiError,
+  type ProfileResponse,
+  type RunToolRequest,
+  type RunToolResponse,
+  type SuggestToolParamsRequest,
+  type SuggestToolParamsResponse,
+  type ToolResponse,
+  type ToolSourceResponse,
 } from "@nakama/core";
 import type { ServerOptions } from "../context";
 import {
@@ -349,9 +351,8 @@ export function registerToolRoutes(app: HonoApp, options: ServerOptions): void {
         })
       );
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      const status = message.includes("not found") ? 404 : 400;
-      return json({ error: message }, status);
+      const status = error instanceof NakamaApiError ? error.status : 400;
+      return json({ error: formatServerError(error) }, status);
     }
   });
 
@@ -365,9 +366,8 @@ export function registerToolRoutes(app: HonoApp, options: ServerOptions): void {
         await agent.suggestToolPlaygroundParams(toolId, body.prompt ?? "")
       );
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      const status = message.includes("not found") ? 404 : 400;
-      return json({ error: message }, status);
+      const status = error instanceof NakamaApiError ? error.status : 400;
+      return json({ error: formatServerError(error) }, status);
     }
   });
 
@@ -383,26 +383,28 @@ export function registerToolRoutes(app: HonoApp, options: ServerOptions): void {
   });
 
   app.post("/v1/profiles/:profileId/tools", async (c) => {
-    requirePlatformAdminFromContext(c);
+    const auth = requirePlatformAdminFromContext(c);
     const orgId = requireActiveOrgIdFromContext(c);
     const body = await readJson<AssignToolRequest>(c.req.raw);
     return json<ProfileResponse>(
       await agent.assignTool(
         orgId,
         decodeURIComponent(c.req.param("profileId")),
-        body
+        body,
+        { actorUserId: auth.user.id, source: "dashboard" }
       )
     );
   });
 
   app.delete("/v1/profiles/:profileId/tools/:toolId", async (c) => {
-    requirePlatformAdminFromContext(c);
+    const auth = requirePlatformAdminFromContext(c);
     const orgId = requireActiveOrgIdFromContext(c);
     return json<ProfileResponse>(
       await agent.unassignTool(
         orgId,
         decodeURIComponent(c.req.param("profileId")),
-        decodeURIComponent(c.req.param("toolId"))
+        decodeURIComponent(c.req.param("toolId")),
+        { actorUserId: auth.user.id, source: "dashboard" }
       )
     );
   });

@@ -213,10 +213,6 @@ describe("profile service avatar", () => {
     expect(avatar.mediaType).toBe("image/png");
     expect(avatar.bytes.length).toBeGreaterThan(0);
 
-    const publicAvatar = await service.getProfileAvatarByProfileId(profileId);
-    expect(publicAvatar.mediaType).toBe("image/png");
-    expect(publicAvatar.bytes.length).toBeGreaterThan(0);
-
     await service.deleteProfileAvatar(ORG_ID, profileId);
 
     const afterDelete = await service.getProfile(ORG_ID, profileId);
@@ -603,6 +599,7 @@ describe("profile service knowledge base", () => {
     );
 
     expect(uploaded.document.status).toBe("ready");
+    expect(uploaded.outcome).toBe("created");
     expect(uploaded.profileId).toBe(profileId);
 
     const listed = await service.listKnowledgeBase(ORG_ID, profileId);
@@ -618,6 +615,42 @@ describe("profile service knowledge base", () => {
 
     const afterDelete = await service.listKnowledgeBase(ORG_ID, profileId);
     expect(afterDelete.documents).toHaveLength(0);
+  });
+
+  test("rejects duplicate knowledge base uploads with 409 and supports replace", async () => {
+    tempConfigDir = await mkdtemp(path.join(os.tmpdir(), "nakama-profile-kb-"));
+    process.env.NAKAMA_CONFIG_DIR = tempConfigDir;
+
+    const service = new ProfileService(createInMemoryDatabaseAdapter());
+    const created = await service.createProfile(ORG_ID, { name: "KB Bot" });
+    const profileId = created.profile.id;
+    const attachment = {
+      data: Buffer.from("project fact", "utf8").toString("base64"),
+      filename: "notes.txt",
+      mediaType: "text/plain",
+    };
+
+    const first = await service.uploadKnowledgeBaseDocument(
+      ORG_ID,
+      profileId,
+      attachment
+    );
+
+    await expect(
+      service.uploadKnowledgeBaseDocument(ORG_ID, profileId, attachment)
+    ).rejects.toMatchObject({ status: 409 });
+
+    const replaced = await service.uploadKnowledgeBaseDocument(
+      ORG_ID,
+      profileId,
+      attachment,
+      "replace"
+    );
+    expect(replaced.outcome).toBe("replaced");
+    expect(replaced.document.id).not.toBe(first.document.id);
+
+    const listed = await service.listKnowledgeBase(ORG_ID, profileId);
+    expect(listed.documents).toHaveLength(1);
   });
 
   test("readKnowledgeBaseDocument returns preview text and download bytes", async () => {
@@ -856,5 +889,84 @@ describe("profile service cloneProfile", () => {
     await expect(
       service.cloneProfile(ORG_ID, "does-not-exist", {})
     ).rejects.toThrow(/not found/i);
+  });
+});
+
+describe("profile service deleteProfile", () => {
+  let tempConfigDir = "";
+
+  afterEach(async () => {
+    if (originalConfigDir === undefined) {
+      delete process.env.NAKAMA_CONFIG_DIR;
+    } else {
+      process.env.NAKAMA_CONFIG_DIR = originalConfigDir;
+    }
+
+    if (tempConfigDir) {
+      await rm(tempConfigDir, { force: true, recursive: true });
+      tempConfigDir = "";
+    }
+  });
+
+  async function setup() {
+    tempConfigDir = await mkdtemp(
+      path.join(os.tmpdir(), "nakama-profile-delete-")
+    );
+    process.env.NAKAMA_CONFIG_DIR = tempConfigDir;
+    const db = createInMemoryDatabaseAdapter();
+    return { db, service: new ProfileService(db) };
+  }
+
+  async function markDefault(
+    db: ReturnType<typeof createInMemoryDatabaseAdapter>,
+    profileId: string
+  ) {
+    const profile = await db.getProfile(profileId);
+    await db.upsertProfile({ ...profile!, isDefault: true });
+  }
+
+  test("blocks deleting the default when the org has fewer than 3 profiles", async () => {
+    const { db, service } = await setup();
+    const first = await service.createProfile(ORG_ID, { name: "Default Bot" });
+    await service.createProfile(ORG_ID, { name: "Second" });
+    await markDefault(db, first.profile.id);
+
+    await expect(
+      service.deleteProfile(ORG_ID, first.profile.id)
+    ).rejects.toThrow(/at least 3 profiles/);
+
+    expect((await db.getProfile(first.profile.id))?.isDefault).toBe(true);
+  });
+
+  test("deletes the default when the org has 3 profiles and promotes a successor", async () => {
+    const { db, service } = await setup();
+    const first = await service.createProfile(ORG_ID, { name: "Default Bot" });
+    const second = await service.createProfile(ORG_ID, { name: "Second" });
+    await service.createProfile(ORG_ID, { name: "Third" });
+    await markDefault(db, first.profile.id);
+
+    await service.deleteProfile(ORG_ID, first.profile.id);
+
+    expect(await db.getProfile(first.profile.id)).toBeNull();
+    expect((await db.getDefaultProfileForOrg(ORG_ID))?.id).toBe(
+      second.profile.id
+    );
+  });
+
+  test("does not promote Super Bot as the new default", async () => {
+    const { db, service } = await setup();
+    const first = await service.createProfile(ORG_ID, { name: "Default Bot" });
+    await service.createProfile(ORG_ID, {
+      isSuper: true,
+      name: "Super Bot",
+    });
+    const third = await service.createProfile(ORG_ID, { name: "Writer" });
+    await markDefault(db, first.profile.id);
+
+    await service.deleteProfile(ORG_ID, first.profile.id);
+
+    expect((await db.getDefaultProfileForOrg(ORG_ID))?.id).toBe(
+      third.profile.id
+    );
   });
 });

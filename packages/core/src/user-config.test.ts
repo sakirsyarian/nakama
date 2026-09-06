@@ -5,15 +5,20 @@ import { join } from "node:path";
 import { NakamaApiError } from "./api-error";
 import { pathExists } from "./fs";
 import {
+  applyChatgptOAuthToInstance,
+  chatgptOAuthNeedsRefresh,
   createProviderInstanceId,
   ensureUserConfigDir,
   getUserConfigPath,
+  isChatgptProviderConnected,
   loadUserConfig,
   loadUserWebPublicUrl,
   normalizeProviderInstanceLabel,
+  readChatgptOAuthFromInstance,
   saveUserConfig,
   saveUserTimezone,
   saveUserWebPublicUrl,
+  validateProviderApiKeyFormat,
 } from "./user-config";
 
 describe("saveUserTimezone", () => {
@@ -36,6 +41,34 @@ describe("saveUserTimezone", () => {
         expect((error as NakamaApiError).status).toBe(400);
       }
     }
+  });
+});
+
+describe("validateProviderApiKeyFormat", () => {
+  test("rejects a key that is far too short for its provider", () => {
+    expect(() =>
+      validateProviderApiKeyFormat("sk-junk-qa-123", "openai")
+    ).toThrow(/valid OpenAI API key/i);
+  });
+
+  test("rejects a key with a mismatched prefix", () => {
+    expect(() =>
+      validateProviderApiKeyFormat(`AIza${"a".repeat(40)}`, "openai")
+    ).toThrow(/valid OpenAI API key/i);
+  });
+
+  test("accepts a well-formed key", () => {
+    const key = `sk-${"a".repeat(48)}`;
+    expect(validateProviderApiKeyFormat(key, "openai")).toBe(key);
+  });
+
+  test("skips format checks for providers without a documented key format", () => {
+    expect(validateProviderApiKeyFormat("short", "fireworks")).toBe("short");
+    expect(validateProviderApiKeyFormat("short", "ollama")).toBe("short");
+  });
+
+  test("returns an empty string unchanged instead of throwing", () => {
+    expect(validateProviderApiKeyFormat("", "openai")).toBe("");
   });
 });
 
@@ -250,5 +283,71 @@ created_at=2026-06-15T00:00:00.000Z
     await expect(loadUserWebPublicUrl()).resolves.toBe(
       "https://gateway.devscale.id/v1"
     );
+  });
+});
+
+describe("chatgpt oauth helpers", () => {
+  test("isChatgptProviderConnected requires refresh token and account id", () => {
+    expect(
+      isChatgptProviderConnected({
+        apiKey: "",
+        chatgptAccountId: "acct_1",
+        chatgptRefreshToken: "refresh",
+        createdAt: "2026-01-01T00:00:00.000Z",
+        id: "chatgpt-1",
+        label: "ChatGPT",
+        type: "chatgpt",
+      })
+    ).toBe(true);
+  });
+
+  test("readChatgptOAuthFromInstance returns null when fields are missing", () => {
+    expect(
+      readChatgptOAuthFromInstance({
+        apiKey: "",
+        chatgptRefreshToken: "refresh",
+        createdAt: "2026-01-01T00:00:00.000Z",
+        id: "chatgpt-1",
+        label: "ChatGPT",
+        type: "chatgpt",
+      })
+    ).toBeNull();
+  });
+
+  test("applyChatgptOAuthToInstance stores oauth fields and clears api key", () => {
+    const updated = applyChatgptOAuthToInstance(
+      {
+        apiKey: "sk-old",
+        createdAt: "2026-01-01T00:00:00.000Z",
+        id: "chatgpt-1",
+        label: "ChatGPT",
+        type: "chatgpt",
+      },
+      {
+        accessToken: "access",
+        accountId: "acct_1",
+        expiresAt: "2026-01-02T00:00:00.000Z",
+        refreshToken: "refresh",
+      }
+    );
+
+    expect(updated.apiKey).toBe("");
+    expect(updated.chatgptAccountId).toBe("acct_1");
+  });
+
+  test("chatgptOAuthNeedsRefresh is true within five minutes of expiry", () => {
+    const expiresAt = new Date("2026-01-01T00:04:00.000Z").toISOString();
+
+    expect(
+      chatgptOAuthNeedsRefresh(
+        {
+          accessToken: "access",
+          accountId: "acct_1",
+          expiresAt,
+          refreshToken: "refresh",
+        },
+        Date.parse("2026-01-01T00:00:00.000Z")
+      )
+    ).toBe(true);
   });
 });

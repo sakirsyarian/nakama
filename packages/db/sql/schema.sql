@@ -125,39 +125,52 @@ CREATE TABLE IF NOT EXISTS automation_run_read_state (
   FOREIGN KEY (automation_id) REFERENCES automations (id) ON DELETE CASCADE
 );
 
-CREATE TABLE IF NOT EXISTS tasks (
+CREATE TABLE IF NOT EXISTS workflows (
   id TEXT PRIMARY KEY NOT NULL,
-  title TEXT NOT NULL,
-  description TEXT DEFAULT '' NOT NULL,
-  prompt TEXT NOT NULL,
+  name TEXT NOT NULL,
+  version INTEGER NOT NULL,
+  definition TEXT NOT NULL,
   profile_id TEXT NOT NULL,
   org_id TEXT,
-  status TEXT NOT NULL DEFAULT 'backlog',
-  position INTEGER NOT NULL DEFAULT 0,
-  session_id TEXT,
+  enabled INTEGER DEFAULT 1 NOT NULL,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   FOREIGN KEY (profile_id) REFERENCES profiles (id) ON DELETE CASCADE,
-  FOREIGN KEY (org_id) REFERENCES organizations (id) ON DELETE CASCADE,
-  FOREIGN KEY (session_id) REFERENCES sessions (id) ON DELETE SET NULL
+  FOREIGN KEY (org_id) REFERENCES organizations (id) ON DELETE CASCADE
 );
 
-CREATE INDEX IF NOT EXISTS tasks_status_position
-  ON tasks (status, position);
-
-CREATE TABLE IF NOT EXISTS task_runs (
+CREATE TABLE IF NOT EXISTS workflow_runs (
   id TEXT PRIMARY KEY NOT NULL,
-  task_id TEXT NOT NULL,
+  workflow_id TEXT NOT NULL,
   status TEXT NOT NULL,
+  input TEXT,
   started_at TEXT NOT NULL,
   completed_at TEXT,
   output TEXT,
   error TEXT,
-  FOREIGN KEY (task_id) REFERENCES tasks (id) ON DELETE CASCADE
+  FOREIGN KEY (workflow_id) REFERENCES workflows (id) ON DELETE CASCADE
 );
 
-CREATE INDEX IF NOT EXISTS task_runs_task_started
-  ON task_runs (task_id, started_at DESC);
+CREATE INDEX IF NOT EXISTS workflow_runs_workflow_started
+  ON workflow_runs (workflow_id, started_at DESC);
+
+CREATE TABLE IF NOT EXISTS workflow_run_steps (
+  id TEXT PRIMARY KEY NOT NULL,
+  run_id TEXT NOT NULL,
+  step_id TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  status TEXT NOT NULL,
+  input TEXT,
+  output TEXT,
+  error TEXT,
+  started_at TEXT NOT NULL,
+  completed_at TEXT,
+  position INTEGER NOT NULL,
+  FOREIGN KEY (run_id) REFERENCES workflow_runs (id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS workflow_run_steps_run_position
+  ON workflow_run_steps (run_id, position);
 
 CREATE TABLE IF NOT EXISTS notification_destinations (
   id TEXT PRIMARY KEY NOT NULL,
@@ -247,6 +260,7 @@ CREATE TABLE IF NOT EXISTS users (
   name TEXT,
   phone TEXT,
   is_platform_admin INTEGER DEFAULT 0 NOT NULL,
+  -- Legacy: pre-org USER.md; migrateLegacyUserContextToOrgMembers copies into org_members (#550).
   user_context TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
@@ -261,6 +275,8 @@ CREATE TABLE IF NOT EXISTS organizations (
   skills_write_approval INTEGER NOT NULL DEFAULT 0,
   skills_post_turn_review INTEGER NOT NULL DEFAULT 0,
   skills_curator_enabled INTEGER NOT NULL DEFAULT 0,
+  skills_curator_stale_after_days INTEGER NOT NULL DEFAULT 30,
+  skills_curator_archive_after_days INTEGER NOT NULL DEFAULT 90,
   skills_curator_consolidate_enabled INTEGER NOT NULL DEFAULT 0,
   skills_curator_last_run_at TEXT,
   archived_at TEXT,
@@ -495,3 +511,21 @@ CREATE UNIQUE INDEX IF NOT EXISTS artifact_shares_token_hash_unique ON artifact_
 CREATE UNIQUE INDEX IF NOT EXISTS artifact_shares_active_path_unique
   ON artifact_shares (org_id, profile_id, source_path)
   WHERE revoked_at IS NULL;
+
+-- Append-only profile change ledger (no UPDATE/DELETE API; cascade only with org/profile cleanup).
+CREATE TABLE IF NOT EXISTS profile_change_events (
+  id TEXT PRIMARY KEY NOT NULL,
+  org_id TEXT NOT NULL,
+  profile_id TEXT NOT NULL,
+  actor_user_id TEXT,
+  source TEXT NOT NULL,
+  field TEXT NOT NULL,
+  before_value TEXT,
+  after_value TEXT,
+  created_at TEXT NOT NULL,
+  FOREIGN KEY (org_id) REFERENCES organizations (id) ON DELETE CASCADE,
+  FOREIGN KEY (profile_id) REFERENCES profiles (id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS profile_change_events_profile_created
+  ON profile_change_events (profile_id, created_at DESC);

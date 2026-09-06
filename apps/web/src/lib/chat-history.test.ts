@@ -1,7 +1,14 @@
 import { describe, expect, test } from "bun:test";
 import type { ChatMessage, SessionMessageMeta } from "@nakama/core/contract";
+import { AGENT_CHANNELS } from "@nakama/core/contract";
 import { extractTurnArtifacts } from "./chat-artifacts";
-import { chatMessagesToListItems } from "./chat-history";
+import {
+  chatMessagesToListItems,
+  formatSessionRelativeTime,
+  formatSessionTimestamp,
+  HISTORY_SESSION_CHANNELS,
+  isReadOnlySessionChannel,
+} from "./chat-history";
 
 const tinyPngBase64 =
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
@@ -413,5 +420,43 @@ describe("chatMessagesToListItems", () => {
     const items = chatMessagesToListItems(messages);
 
     expect(items.filter((item) => item.tool === "web_search")).toHaveLength(0);
+  });
+});
+
+describe("formatSessionTimestamp", () => {
+  test("formats a valid ISO timestamp", () => {
+    const formatted = formatSessionTimestamp("2026-06-14T10:00:00.000Z");
+    expect(formatted).not.toBe("Unknown time");
+    expect(formatted.length).toBeGreaterThan(0);
+  });
+
+  test("does not echo invalid or attacker-controlled date strings", () => {
+    expect(formatSessionTimestamp("not-a-date")).toBe("Unknown time");
+    expect(formatSessionTimestamp("<img src=x onerror=alert(1)>")).toBe(
+      "Unknown time"
+    );
+    expect(formatSessionRelativeTime("totally-bogus")).toBe("Unknown time");
+  });
+});
+
+// Both web channel tables, every channel named. Flipping one value in either
+// table fails one of these, which is what the tables are for: a channel that
+// joins AGENT_CHANNELS has to be decided rather than dropping out in silence.
+describe("session channel tables", () => {
+  test("lists the four channels that have a web history", () => {
+    expect(HISTORY_SESSION_CHANNELS).toEqual([
+      "web",
+      "telegram",
+      "whatsapp",
+      "discord",
+    ]);
+  });
+
+  test("marks the three messaging channels read only and no others", () => {
+    const readOnly = AGENT_CHANNELS.filter((channel) =>
+      isReadOnlySessionChannel(channel)
+    );
+
+    expect(readOnly).toEqual(["telegram", "whatsapp", "discord"]);
   });
 });

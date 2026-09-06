@@ -16,57 +16,12 @@ import {
   InputGroupInput,
 } from "@/components/ui/input-group";
 import { Textarea } from "@/components/ui/textarea";
-import { useSaveTelegramSettings } from "@/hooks/use-telegram-settings";
+import { useSaveTelegramSettings } from "@/hooks/use-app-queries";
 import { formatError } from "@/lib/client";
-
-export interface AllowedTelegramUser {
-  id: string;
-  username?: string;
-}
-
-function parseAllowedTelegramUsers(input: string): AllowedTelegramUser[] {
-  const trimmed = input.trim();
-
-  if (!trimmed) {
-    return [];
-  }
-
-  if (trimmed.startsWith("{")) {
-    try {
-      const payload = JSON.parse(trimmed) as {
-        from?: { id?: unknown; username?: unknown };
-        message?: { from?: { id?: unknown; username?: unknown } };
-      };
-      const user = payload.message?.from ?? payload.from;
-      const id =
-        typeof user?.id === "number"
-          ? String(user.id)
-          : String(user?.id ?? "").trim();
-      const username =
-        typeof user?.username === "string" ? user.username.trim() : "";
-
-      if (!/^[1-9]\d*$/.test(id)) {
-        throw new Error("Missing Telegram from.id.");
-      }
-
-      return [{ id, ...(username ? { username } : {}) }];
-    } catch {
-      throw new Error("Paste valid Telegram JSON or a numeric user ID.");
-    }
-  }
-
-  return trimmed
-    .split(/[,\s]+/)
-    .map((id) => id.trim())
-    .filter(Boolean)
-    .map((id) => {
-      if (!/^[1-9]\d*$/.test(id)) {
-        throw new Error("Telegram user IDs must be positive numbers.");
-      }
-
-      return { id };
-    });
-}
+import {
+  type AllowedTelegramUser,
+  parseAllowedTelegramUsers,
+} from "@/lib/parse-allowed-telegram-users";
 
 interface TelegramAllowedUsersDialogProps {
   allowedUsers: AllowedTelegramUser[];

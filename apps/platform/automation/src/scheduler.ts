@@ -1,18 +1,14 @@
 import type { NakamaClient } from "@nakama/client";
 import {
   AutomationScheduler,
-  type AutomationSchedulerDelegate,
   type AutomationSchedulerStatus,
 } from "@nakama/core/automation-scheduler";
 import type { AutomationSchedule } from "@nakama/core/contract";
 import { tickSkillCurator } from "./curator-tick";
 
-export interface AutomationWorkerSchedulerDelegate
-  extends AutomationSchedulerDelegate {}
-
 export class AutomationWorkerScheduler {
   private readonly scheduler: AutomationScheduler;
-  private pollInFlight = false;
+  private pollIntervalMs: number | null = null;
   private pollTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(
@@ -42,6 +38,7 @@ export class AutomationWorkerScheduler {
 
   beginPolling(intervalMs: number): void {
     this.stopPolling();
+    this.pollIntervalMs = intervalMs;
 
     this.pollTimer = setInterval(async () => {
       if (this.pollInFlight) {
@@ -50,6 +47,15 @@ export class AutomationWorkerScheduler {
 
       this.pollInFlight = true;
       try {
+        const settings = await this.client
+          .getAutomationWorkerSettings()
+          .catch(() => null);
+        const nextIntervalMs = settings
+          ? settings.pollIntervalMinutes * 60 * 1000
+          : (this.pollIntervalMs ?? intervalMs);
+        if (nextIntervalMs !== this.pollIntervalMs) {
+          this.beginPolling(nextIntervalMs);
+        }
         await this.scheduler.reload();
         await this.tickCurator();
         this.notifyStatus();

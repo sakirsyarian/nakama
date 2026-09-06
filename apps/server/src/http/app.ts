@@ -7,6 +7,7 @@ import { serializeHttpOpenApiSpec } from "./openapi";
 import { createOrgContextMiddleware } from "./org-middleware";
 import { registerArtifactShareRoutes } from "./routes/artifact-shares";
 import { registerAuthRoutes } from "./routes/auth";
+import { registerAutomationWorkerSettingsRoutes } from "./routes/automation-worker-settings";
 import { registerAutomationRoutes } from "./routes/automations";
 import { registerCodingHarnessSettingsRoutes } from "./routes/coding-harnesses";
 import {
@@ -32,13 +33,22 @@ import { registerSkillProposalRoutes } from "./routes/skill-proposals";
 import { registerSkillSuggestionRoutes } from "./routes/skill-suggestions";
 import { registerSkillRoutes } from "./routes/skills";
 import { registerSystemRoutes } from "./routes/system";
-import { registerTaskRoutes } from "./routes/tasks";
 import { registerTokenOptimizationRoutes } from "./routes/token-optimization";
 import { registerToolRoutes } from "./routes/tools";
 import { registerUserContextRoutes } from "./routes/user-context";
 import { registerWorkerRoutes } from "./routes/workers";
-import { errorResponse } from "./shared";
+import { registerWorkflowRoutes } from "./routes/workflows";
+import { errorResponse, isSecureRequest } from "./shared";
 import type { HonoApp } from "./types";
+
+/**
+ * Hash of the theme bootstrap inlined in `apps/web/index.html`, which has to run
+ * before first paint and so cannot be an external file. Editing that script
+ * changes this value; `app.test.ts` recomputes it from the file and fails when
+ * the two drift, which is the only thing keeping this constant honest.
+ */
+const THEME_BOOTSTRAP_SCRIPT_HASH =
+  "sha256-rQ5OTxagyMHDDSQ6k5wlUK8gtuYxXBrpQGqjAcYBz2w=";
 
 export function createHonoApp(options: ServerOptions) {
   const app: HonoApp = new OpenAPIHono();
@@ -64,17 +74,16 @@ export function createHonoApp(options: ServerOptions) {
       const headers = new Headers(response.headers);
       headers.set("X-Content-Type-Options", "nosniff");
       headers.set("X-Frame-Options", "DENY");
-      headers.set("X-XSS-Protection", "1; mode=block");
       // Only set Referrer-Policy if it's not already set
       if (!headers.has("Referrer-Policy")) {
         headers.set("Referrer-Policy", "strict-origin-when-cross-origin");
       }
       headers.set(
         "Content-Security-Policy",
-        "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; font-src 'self' data:; connect-src 'self';"
+        `default-src 'self'; script-src 'self' '${THEME_BOOTSTRAP_SCRIPT_HASH}'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; font-src 'self' data:; connect-src 'self';`
       );
-      // Only enable HSTS if the request is secure (HTTPS)
-      if (new URL(c.req.url).protocol === "https:") {
+      // Also true behind a TLS terminator, which is where HSTS matters most.
+      if (isSecureRequest(c.req.raw)) {
         headers.set(
           "Strict-Transport-Security",
           "max-age=31536000; includeSubDomains"
@@ -121,11 +130,12 @@ export function createHonoApp(options: ServerOptions) {
   registerSkillRoutes(app, options);
   registerToolRoutes(app, options);
   registerAutomationRoutes(app, options);
+  registerWorkflowRoutes(app, options);
   registerNotificationDestinationRoutes(app, options);
   registerTokenOptimizationRoutes(app, options);
+  registerAutomationWorkerSettingsRoutes(app, options);
   registerCodingHarnessSettingsRoutes(app, options);
   registerComposioRoutes(app, options);
-  registerTaskRoutes(app, options);
   registerPlatformOrgRoutes(app, options);
   registerDataPortabilityRoutes(app, options);
   registerOrgMemberRoutes(app, options);

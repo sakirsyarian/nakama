@@ -5,11 +5,13 @@ import { ProviderSettingsCard } from "@/components/settings/ProviderSettingsCard
 import { TranscriptionSettingsCard } from "@/components/settings/TranscriptionSettingsCard";
 import { VisionSettingsCard } from "@/components/settings/VisionSettingsCard";
 import { WebPublicUrlSettingsRow } from "@/components/settings/WebPublicUrlSettingsRow";
+import { WebSearchSettingsCard } from "@/components/settings/WebSearchSettingsCard";
 import { ThemeToggle } from "@/components/ThemeToggle";
 import { TimezoneSelect } from "@/components/TimezoneSelect";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Spinner } from "@/components/ui/spinner";
+import { useAppContext } from "@/context/use-app-context";
 import { useAuth } from "@/context/use-auth";
 import { useSaveUserTimezone, useUserTimezone } from "@/hooks/use-timezones";
 import { formatError } from "@/lib/client";
@@ -17,6 +19,7 @@ import { getBrowserTimezone } from "@/lib/timezones";
 
 export function SettingsPage() {
   const { user, activeOrg } = useAuth();
+  const { health } = useAppContext();
   const isPlatformAdmin = user?.isPlatformAdmin === true;
   const isOrgAdmin = activeOrg?.role === "admin";
   const [formError, setFormError] = useState<string | null>(null);
@@ -24,6 +27,7 @@ export function SettingsPage() {
   const [timezoneHint, setTimezoneHint] = useState<string | null>(null);
   const { data: savedTimezone } = useUserTimezone();
   const saveTimezoneMutation = useSaveUserTimezone();
+  const version = health?.version?.trim();
 
   useEffect(() => {
     if (savedTimezone) {
@@ -54,6 +58,15 @@ export function SettingsPage() {
             <p className="font-medium text-foreground text-sm">Appearance</p>
             <ThemeToggle />
           </div>
+
+          {version ? (
+            <div className="flex flex-wrap items-center justify-between gap-3 px-4 py-3">
+              <p className="font-medium text-foreground text-sm">Version</p>
+              <p className="font-mono text-muted-foreground text-sm tabular-nums">
+                {version}
+              </p>
+            </div>
+          ) : null}
 
           {isOrgAdmin ? (
             <>
@@ -123,6 +136,7 @@ export function SettingsPage() {
               <VisionSettingsCard />
               <TranscriptionSettingsCard />
               <ImageGenerationSettingsCard />
+              <WebSearchSettingsCard />
             </CardContent>
           </Card>
 

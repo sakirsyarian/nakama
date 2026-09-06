@@ -6,8 +6,10 @@ import {
   promptForProviderConfig,
   type UserProviderName,
 } from "@nakama/core";
+import { formatCliDisplayPath, isCliVerbose } from "./display-path";
+import { printLine } from "./terminal-safe";
 
-function readPassword(prompt: string): Promise<string> {
+export function readPassword(prompt: string): Promise<string> {
   return new Promise((resolve, reject) => {
     const stdin = process.stdin;
     const stdout = process.stdout;
@@ -20,26 +22,27 @@ function readPassword(prompt: string): Promise<string> {
     stdout.write(prompt);
 
     const wasPaused = stdin.isPaused();
-    stdin.setRawMode(true);
-    stdin.resume();
-    stdin.setEncoding("utf8");
-
-    let password = "";
+    let rawModeEnabled = false;
 
     const restoreStdin = () => {
-      stdin.setRawMode(false);
+      if (rawModeEnabled) {
+        stdin.setRawMode(false);
+        rawModeEnabled = false;
+      }
       if (wasPaused) {
         stdin.pause();
       }
       stdin.removeListener("data", onData);
-      stdout.write("\n");
     };
+
+    let password = "";
 
     const onData = (chunk: string) => {
       for (const char of chunk) {
         if (char === "\n" || char === "\r" || char === "\u0004") {
           // Enter or EOF
           restoreStdin();
+          stdout.write("\n");
           resolve(password);
           return;
         }
@@ -47,6 +50,7 @@ function readPassword(prompt: string): Promise<string> {
         if (char === "\u0003") {
           // Ctrl+C
           restoreStdin();
+          stdout.write("\n");
           process.exit(130);
         }
 
@@ -64,7 +68,16 @@ function readPassword(prompt: string): Promise<string> {
       }
     };
 
-    stdin.on("data", onData);
+    try {
+      stdin.setRawMode(true);
+      rawModeEnabled = true;
+      stdin.resume();
+      stdin.setEncoding("utf8");
+      stdin.on("data", onData);
+    } catch (error) {
+      restoreStdin();
+      reject(error instanceof Error ? error : new Error(String(error)));
+    }
   });
 }
 
@@ -110,7 +123,7 @@ export async function ensureUserConfiguredViaCli(
     return true;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    console.log(`Failed to create admin user: ${message}`);
+    printLine(`Failed to create admin user: ${message}`);
     return false;
   }
 }
@@ -136,7 +149,7 @@ export async function ensureProviderConfiguredViaCli(
   try {
     const config = await promptForProviderConfig({
       question: (prompt) => rl.question(prompt),
-      writeLine: (line) => console.log(line),
+      writeLine: (line) => printLine(line),
       ...modelHelpers,
     });
 
@@ -157,10 +170,12 @@ export async function ensureProviderConfiguredViaCli(
       provider: instance.type,
     });
 
-    console.log(
+    printLine(
       `\nProvider configured (${result.provider}, ${result.currentModel}).`
     );
-    console.log(`Saved to ${getUserConfigPath()}\n`);
+    console.log(
+      `Saved to ${formatCliDisplayPath(getUserConfigPath(), isCliVerbose())}\n`
+    );
 
     return true;
   } finally {

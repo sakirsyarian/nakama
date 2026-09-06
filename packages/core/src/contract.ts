@@ -87,6 +87,17 @@ export const AGENT_CHANNELS = [
 
 export type AgentChannel = (typeof AGENT_CHANNELS)[number];
 
+/**
+ * Narrow a stored channel string to `AgentChannel`. Session rows keep the
+ * column as `string`, so this is the one place that decides what an unknown
+ * value means: `null`, never a silent pass.
+ */
+export function parseAgentChannel(value: string): AgentChannel | null {
+  return AGENT_CHANNELS.includes(value as AgentChannel)
+    ? (value as AgentChannel)
+    : null;
+}
+
 export const NAKAMA_API_VERSION = 1;
 
 export interface HealthResponse {
@@ -102,6 +113,8 @@ export interface HealthResponse {
   ok: true;
   providerConfigured: boolean;
   userConfigured: boolean;
+  /** App version (`NAKAMA_VERSION` or package.json). Not `apiVersion`. */
+  version: string;
 }
 
 export interface AutomationSchedule {
@@ -122,12 +135,6 @@ export interface AutomationWorkerStatus {
   providerConfigured: boolean;
   running: boolean;
   scheduledJobs: number;
-}
-
-export interface TaskWorkerStatus {
-  activeRuns: number;
-  ok: boolean;
-  providerConfigured: boolean;
 }
 
 export interface WorkerProcessInfo {
@@ -268,6 +275,14 @@ export interface CodingHarnessLoginCommand {
   name: string;
 }
 
+export interface AutomationWorkerSettingsResponse {
+  pollIntervalMinutes: number;
+}
+
+export interface UpdateAutomationWorkerSettingsRequest {
+  pollIntervalMinutes: number;
+}
+
 export interface CodingHarnessSettingsResponse {
   loginCommands: CodingHarnessLoginCommand[];
   providerPassthroughEnabled: boolean;
@@ -300,7 +315,6 @@ export interface SystemStatusResponse {
   llmUsage: LlmUsageStatus;
   mcp: McpStatus;
   server: HealthResponse;
-  taskWorker: TaskWorkerStatus;
   telegramWorker: TelegramWorkerStatus;
   whatsappWorker: WhatsAppWorkerStatus;
 }
@@ -467,9 +481,11 @@ export interface OrganizationSummary {
   createdAt: string;
   id: string;
   name: string;
+  skillsCuratorArchiveAfterDays?: number;
   skillsCuratorConsolidateEnabled?: boolean;
   skillsCuratorEnabled?: boolean;
   skillsCuratorLastRunAt?: string | null;
+  skillsCuratorStaleAfterDays?: number;
   skillsPostTurnReview?: boolean;
   skillsWriteApproval?: boolean;
   slug: string;
@@ -488,8 +504,10 @@ export interface CreateOrganizationRequest {
 
 export interface UpdateOrganizationRequest {
   name?: string;
+  skillsCuratorArchiveAfterDays?: number;
   skillsCuratorConsolidateEnabled?: boolean;
   skillsCuratorEnabled?: boolean;
+  skillsCuratorStaleAfterDays?: number;
   skillsPostTurnReview?: boolean;
   skillsWriteApproval?: boolean;
 }
@@ -1101,86 +1119,168 @@ export interface MarkAutomationRunsReadResponse {
   readThroughAt: string;
 }
 
-export const TASK_STATUSES = [
-  "backlog",
-  "todo",
-  "in_progress",
-  "done",
-  "failed",
-] as const;
+export type WorkflowStepKind =
+  | "tool"
+  | "compare"
+  | "assert"
+  | "template"
+  | "summarize";
 
-export type TaskStatus = (typeof TASK_STATUSES)[number];
+export type WorkflowCompareOp = "eq" | "near" | "contains";
 
-export interface StoredTask {
-  createdAt: string;
+export interface WorkflowToolStep {
+  id: string;
+  input: Record<string, unknown>;
+  kind: "tool";
+  tool: string;
+}
+
+export interface WorkflowCompareStep {
+  id: string;
+  kind: "compare";
+  left: unknown;
+  op: WorkflowCompareOp;
+  right: unknown;
+  tolerance?: number;
+}
+
+export interface WorkflowAssertStep {
+  expected: unknown;
+  id: string;
+  kind: "assert";
+  path: string;
+}
+
+export interface WorkflowTemplateStep {
+  id: string;
+  kind: "template";
+  template: string;
+}
+
+export interface WorkflowSummarizeStep {
+  id: string;
+  kind: "summarize";
+  prompt: string;
+}
+
+export type WorkflowStep =
+  | WorkflowToolStep
+  | WorkflowCompareStep
+  | WorkflowAssertStep
+  | WorkflowTemplateStep
+  | WorkflowSummarizeStep;
+
+export interface WorkflowDefinition {
   description: string;
   id: string;
-  position: number;
+  name: string;
+  steps: WorkflowStep[];
+  version: number;
+}
+
+export interface StoredWorkflow extends WorkflowDefinition {
+  createdAt: string;
+  enabled: boolean;
+  lastRunAt?: string | null;
+  orgId?: string | null;
   profileId: string;
-  prompt: string;
-  sessionId: string | null;
-  status: TaskStatus;
-  title: string;
   updatedAt: string;
 }
 
-export interface DraftTaskPromptRequest {
-  description?: string;
-  title: string;
+export type WorkflowRunStatus = "running" | "completed" | "failed";
+
+export type WorkflowRunStepStatus =
+  | "pending"
+  | "running"
+  | "completed"
+  | "failed"
+  | "skipped";
+
+export interface WorkflowReceiptBag {
+  input: Record<string, unknown>;
+  steps: Record<string, unknown>;
 }
 
-export interface DraftTaskPromptResponse {
-  prompt: string;
-}
-
-export interface CreateTaskRequest {
-  description?: string;
-  profileId?: string;
-  prompt: string;
-  status?: TaskStatus;
-  title: string;
-}
-
-export interface UpdateTaskRequest {
-  description?: string;
-  position?: number;
-  profileId?: string;
-  prompt?: string;
-  status?: TaskStatus;
-  title?: string;
-}
-
-export interface ListTasksResponse {
-  tasks: StoredTask[];
-}
-
-export interface TaskResponse {
-  task: StoredTask;
-}
-
-export type TaskRunStatus = "running" | "completed" | "failed";
-
-export interface TaskRunRecord {
+export interface WorkflowRunStepRecord {
   completedAt: string | null;
   error: string | null;
   id: string;
+  input: unknown;
+  kind: WorkflowStepKind;
+  output: unknown;
+  runId: string;
+  startedAt: string;
+  status: WorkflowRunStepStatus;
+  stepId: string;
+}
+
+export interface WorkflowRunRecord {
+  completedAt: string | null;
+  error: string | null;
+  id: string;
+  input: Record<string, unknown> | null;
   output: string | null;
   startedAt: string;
-  status: TaskRunStatus;
-  taskId: string;
+  status: WorkflowRunStatus;
+  steps?: WorkflowRunStepRecord[];
+  workflowId: string;
 }
 
-export interface RunTaskResponse {
-  run: TaskRunRecord;
+export interface ListWorkflowsResponse {
+  workflows: StoredWorkflow[];
 }
 
-export interface ListTaskRunsResponse {
-  runs: TaskRunRecord[];
+export interface WorkflowResponse {
+  workflow: StoredWorkflow;
 }
 
-export interface TaskMessagesResponse {
-  messages: ChatMessage[];
-  sessionId: string;
+export interface CreateWorkflowRequest {
+  description: string;
+  enabled?: boolean;
+  name: string;
+  profileId?: string;
+  steps: WorkflowStep[];
+}
+
+export interface UpdateWorkflowRequest {
+  description?: string;
+  enabled?: boolean;
+  name?: string;
+  profileId?: string;
+  steps?: WorkflowStep[];
+}
+
+export interface RunWorkflowRequest {
+  input?: Record<string, unknown>;
+}
+
+export interface RunWorkflowResponse {
+  run: WorkflowRunRecord;
+}
+
+export interface ListWorkflowRunsResponse {
+  runs: WorkflowRunRecord[];
+}
+
+export interface GetWorkflowRunResponse {
+  run: WorkflowRunRecord;
+}
+
+export interface WorkflowSqliteTableInfo {
+  name: string;
+  rowCount: number;
+}
+
+export interface WorkflowSqlitePreview {
+  columns: string[];
+  rows: Record<string, unknown>[];
+  table: string;
+  total: number;
+}
+
+export interface WorkflowSqliteInspectResponse {
+  preview: WorkflowSqlitePreview | null;
+  tables: WorkflowSqliteTableInfo[];
 }
 
 export interface TimezoneSettingsResponse {
@@ -1251,6 +1351,24 @@ export interface ImageGenerationSettingsResponse {
 
 export interface UpdateImageGenerationRequest {
   model: string | null;
+}
+
+/** Search back-end that replaces the provider-hosted `web_search` tool. */
+export type WebSearchProvider = "exa" | "firecrawl";
+
+export interface WebSearchSettingsResponse {
+  apiKeyMasked: string | null;
+  /** false means the active LLM provider's own hosted web search is used. */
+  configured: boolean;
+  endpoint: string | null;
+  provider: WebSearchProvider | null;
+}
+
+export interface UpdateWebSearchSettingsRequest {
+  apiKey?: string;
+  endpoint?: string;
+  /** null clears the override and restores the built-in hosted search. */
+  provider?: WebSearchProvider | null;
 }
 
 export interface GenerateImageRequest {
@@ -1452,12 +1570,14 @@ export interface WhatsAppSettingsResponse {
   pairingCode: string | null;
   phoneNumberMasked: string | null;
   profileId: string;
+  requireGroupMention: boolean;
 }
 
 export interface UpdateWhatsAppSettingsRequest {
   allowedPhones?: string;
   phoneNumber?: string;
   profileId?: string;
+  requireGroupMention?: boolean;
 }
 
 export interface TimezoneCatalogEntry {
@@ -1539,6 +1659,7 @@ export interface ListProvidersResponse {
 export interface CreateProviderRequest {
   apiKey: string;
   baseUrl?: string;
+  chatgptOAuth?: ChatgptOAuthCredentials;
   customModels?: CustomModelEntry[];
   hostMode?: OllamaHostMode;
   label?: string;
@@ -1556,6 +1677,7 @@ export interface CreateProviderResponse {
 export interface UpdateProviderRequest {
   apiKey?: string;
   baseUrl?: string;
+  chatgptOAuth?: ChatgptOAuthCredentials;
   customModels?: CustomModelEntry[];
   hostMode?: OllamaHostMode;
   label?: string;
@@ -1845,6 +1967,39 @@ export interface UpdateProfileRequest {
   systemPrompt?: string;
 }
 
+export type ProfileChangeSource =
+  | "dashboard"
+  | "super_bot"
+  | "skill_manage"
+  | "pack_import";
+
+export type ProfileChangeField =
+  | "system_prompt"
+  | "soul.soul"
+  | "soul.style"
+  | "soul.instructions"
+  | "soul.memory"
+  | "tools"
+  | "skills"
+  | "mcp"
+  | "pack_import";
+
+export interface ProfileChangeEvent {
+  actorUserId: string | null;
+  afterValue: string | null;
+  beforeValue: string | null;
+  createdAt: string;
+  field: ProfileChangeField;
+  id: string;
+  orgId: string;
+  profileId: string;
+  source: ProfileChangeSource;
+}
+
+export interface ListProfileChangeHistoryResponse {
+  events: ProfileChangeEvent[];
+}
+
 export interface CreateToolRequest {
   description: string;
   handlerConfig?: unknown;
@@ -1984,7 +2139,13 @@ export interface PublicArtifactShareResponse {
 
 export type KnowledgeBaseDocumentStatus = "ready" | "failed";
 
+export type KnowledgeBaseDuplicateAction = "error" | "skip" | "replace";
+
+export type KnowledgeBaseUploadOutcome = "created" | "skipped" | "replaced";
+
 export interface KnowledgeBaseDocument {
+  /** SHA-256 hex of the stored file bytes. Optional on legacy manifests. */
+  contentHash?: string;
   error?: string;
   filename: string;
   id: string;
@@ -2012,10 +2173,13 @@ export interface ListKnowledgeBaseResponse {
 
 export interface UploadKnowledgeBaseRequest {
   document: DocumentAttachment;
+  /** Default `error` — reject duplicates so clients can warn / choose skip or replace. */
+  onDuplicate?: KnowledgeBaseDuplicateAction;
 }
 
 export interface UploadKnowledgeBaseResponse {
   document: KnowledgeBaseDocument;
+  outcome: KnowledgeBaseUploadOutcome;
   profileId: string;
 }
 
@@ -2050,11 +2214,35 @@ export type ProviderName =
   | "openai_compatible"
   | "opencode_go"
   | "cloudflare"
+  | "chatgpt"
   | "minimax"
   | "minimax_cn"
   | "zhipu"
   | "zhipu_cn"
   | "xai";
+
+export interface ChatgptOAuthCredentials {
+  accessToken: string;
+  accountId: string;
+  expiresAt: string;
+  refreshToken: string;
+}
+
+export interface ChatgptOAuthDeviceStartResponse {
+  intervalSeconds: number;
+  sessionId: string;
+  userCode: string;
+  verificationUri: string;
+}
+
+export interface ChatgptOAuthDeviceCompleteRequest {
+  sessionId: string;
+}
+
+export interface ChatgptOAuthDeviceCompleteResponse {
+  chatgptOAuth: ChatgptOAuthCredentials;
+  models?: CustomModelEntry[];
+}
 
 export type OllamaHostMode = "local" | "cloud";
 
@@ -2204,6 +2392,8 @@ export interface ToolContext {
   isPlatformAdmin?: boolean;
   /** Loads a provider-neutral document/image reference scoped to this execution. */
   loadAttachment?: LoadAttachmentBytes;
+  /** Invalidates the cached skills catalog after a live skill mutation. */
+  onSkillCatalogChange?: () => void;
   orgId?: string;
   /** Org role of the invoking user. Org-memory tools gate on this; undefined means deny-by-default. */
   orgRole?: OrgRole;
@@ -2240,12 +2430,20 @@ export interface ToolContext {
    */
   tokenOptimizerEnabled?: boolean | null;
   userId?: string;
+  workflowId?: string;
+  workflowRunId?: string;
   /** Profile workspace root (~/.nakama/orgs/{orgId}/profiles/{profileId}/). */
   workspaceRoot?: string;
 }
 
 export interface ToolDefinition<Input = unknown, Output = unknown> {
   description: string;
+  /**
+   * When true, the LLM provider runs this tool itself and `run` is never
+   * called. Only `web_search` uses it today: the built-in stub is hosted, a
+   * custom search back-end is not. Undefined is treated as local.
+   */
+  hosted?: boolean;
   name: string;
   /** When true, this tool may run concurrently with other parallelSafe tools in the same turn. */
   parallelSafe?: boolean;

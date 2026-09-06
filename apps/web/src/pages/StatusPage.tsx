@@ -35,11 +35,12 @@ import {
   type StatusTone,
 } from "@/pages/status-page.shared";
 
-const sectionClass = "rounded-md border border-border bg-card";
+const sectionClass =
+  "min-w-0 overflow-hidden rounded-md border border-border bg-card";
 const iconTileClass =
   "flex size-10 shrink-0 items-center justify-center rounded-md border border-border bg-muted/40";
 
-export function StatusPage({ embedded = false }: { embedded?: boolean } = {}) {
+export function StatusPage() {
   const { data: status, error, isLoading } = useSystemStatusQuery();
   const { user } = useAuth();
   const refreshSystemStatus = useRefreshSystemStatus();
@@ -47,18 +48,10 @@ export function StatusPage({ embedded = false }: { embedded?: boolean } = {}) {
   const canManageWorkers = user?.isPlatformAdmin === true;
 
   return (
-    <div
-      className={cn(
-        "min-w-0",
-        embedded ? "divide-y divide-border" : "space-y-6"
-      )}
-    >
+    <div className="min-w-0 space-y-6">
       {errorMessage ? (
         <div
-          className={cn(
-            "flex flex-wrap items-start justify-between gap-3 border-destructive/40 bg-destructive/10 px-4 py-3",
-            embedded ? "border-b" : "rounded-md border"
-          )}
+          className="flex flex-wrap items-start justify-between gap-3 rounded-md border border-destructive/40 bg-destructive/10 px-4 py-3"
           role="alert"
         >
           <p className="min-w-0 flex-1 text-destructive text-sm">
@@ -77,16 +70,9 @@ export function StatusPage({ embedded = false }: { embedded?: boolean } = {}) {
       ) : null}
 
       {isLoading && !status ? (
-        <StatusSkeleton embedded={embedded} />
+        <StatusSkeleton />
       ) : status ? (
-        <>
-          <StatusDashboard
-            canManageWorkers={canManageWorkers}
-            embedded={embedded}
-            status={status}
-          />
-          <LlmUsageSection embedded={embedded} usage={status.llmUsage} />
-        </>
+        <StatusDashboard canManageWorkers={canManageWorkers} status={status} />
       ) : null}
     </div>
   );
@@ -95,11 +81,9 @@ export function StatusPage({ embedded = false }: { embedded?: boolean } = {}) {
 function StatusDashboard({
   status,
   canManageWorkers,
-  embedded = false,
 }: {
   status: SystemStatusResponse;
   canManageWorkers: boolean;
-  embedded?: boolean;
 }) {
   const summary = useMemo(() => deriveSummary(status), [status]);
   const services = useMemo(() => buildServiceColumns(status), [status]);
@@ -138,9 +122,7 @@ function StatusDashboard({
   }));
 
   return (
-    <section
-      className={cn("min-w-0 overflow-hidden", !embedded && sectionClass)}
-    >
+    <section className={sectionClass}>
       <SummaryStrip status={status} summary={summary} />
 
       <div className="grid grid-cols-1 divide-y divide-border border-border border-b sm:grid-cols-2 sm:divide-x sm:divide-y-0">
@@ -202,165 +184,248 @@ function StatusDashboard({
   );
 }
 
-function LlmUsageSection({
+export function LlmUsageTab() {
+  const { data: status, error, isLoading } = useSystemStatusQuery();
+  const refreshSystemStatus = useRefreshSystemStatus();
+  const errorMessage = error ? formatError(error) : null;
+
+  return (
+    <div className="min-w-0">
+      {errorMessage ? (
+        <div
+          className="flex flex-wrap items-start justify-between gap-3 border-destructive/40 border-b bg-destructive/10 px-4 py-3"
+          role="alert"
+        >
+          <p className="min-w-0 flex-1 text-destructive text-sm">
+            Could not load usage: {errorMessage}
+          </p>
+          <Button
+            className="shrink-0 border-destructive/30 bg-background text-destructive hover:bg-destructive/10"
+            onClick={() => void refreshSystemStatus()}
+            size="sm"
+            type="button"
+            variant="outline"
+          >
+            Try again
+          </Button>
+        </div>
+      ) : null}
+
+      {isLoading && !status ? (
+        <div
+          aria-busy="true"
+          aria-label="Loading LLM usage"
+          className="h-80 animate-pulse bg-muted/40"
+        />
+      ) : status ? (
+        <LlmUsageSection usage={status.llmUsage} />
+      ) : null}
+    </div>
+  );
+}
+
+function usesSavedModelPricing(provider: LlmUsageStatus["provider"]): boolean {
+  return (
+    provider === "openai_compatible" ||
+    provider === "openrouter" ||
+    provider === "cerebras" ||
+    provider === "fireworks"
+  );
+}
+
+function usesBrowsePricingHint(provider: LlmUsageStatus["provider"]): boolean {
+  return (
+    provider === "openrouter" ||
+    provider === "cerebras" ||
+    provider === "fireworks"
+  );
+}
+
+function llmUsageCostNote(
+  usage: LlmUsageStatus,
+  modelLabel: string,
+  trackedModelCount: number
+): string {
+  if (usage.costEstimated) {
+    if (trackedModelCount > 1) {
+      return `Based on tracked usage across ${trackedModelCount} models. Actual billing may differ.`;
+    }
+
+    if (usesSavedModelPricing(usage.provider)) {
+      return `Based on pricing saved in Settings for ${modelLabel}. Actual billing may differ.`;
+    }
+
+    return `Based on catalog pricing for ${modelLabel}. Actual billing may differ.`;
+  }
+
+  if (usesBrowsePricingHint(usage.provider)) {
+    return "Browse or add models in Settings → Manage model to save pricing for cost estimates.";
+  }
+
+  return "Add input/output $/1M per model in Settings → Manage models to estimate cost.";
+}
+
+function LlmUsageHeader({ usage }: { usage: LlmUsageStatus }) {
+  return (
+    <div className="flex flex-wrap items-start justify-between gap-4 border-border border-b px-5 py-4">
+      <div className="min-w-0 space-y-1">
+        <div className="flex items-center gap-2">
+          <h2 className="type-section-title">LLM usage</h2>
+          {usage.providerConfigured ? (
+            <span className="inline-flex items-center gap-1 rounded-full bg-emerald-500/10 px-2 py-0.5 font-medium text-2xs text-emerald-700 dark:text-emerald-300">
+              <span
+                aria-hidden
+                className="size-1.5 rounded-full bg-emerald-500"
+              />
+              Tracking
+            </span>
+          ) : null}
+        </div>
+        <p className="text-muted-foreground text-sm">
+          Estimated spend and token volume since the server started.
+        </p>
+      </div>
+
+      {usage.providerConfigured && usage.provider ? (
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="inline-flex items-center rounded-full border border-border bg-muted/30 px-2.5 py-1 font-medium text-foreground text-xs">
+            {formatProviderLabel(usage.provider, usage.displayName)}
+          </span>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function LlmUsageTrackedBody({
   usage,
-  embedded = false,
+  modelLabel,
 }: {
   usage: LlmUsageStatus;
-  embedded?: boolean;
+  modelLabel: string;
 }) {
-  const modelLabel =
-    usage.currentModel ??
-    (usage.providerConfigured ? "Default model" : "Not configured");
-  const hasUsage = usage.requestCount > 0;
   const trackedModelCount = usage.models.length;
   const maxModelTokens = usage.models[0]?.totalTokens ?? 0;
 
   return (
-    <section
-      className={cn("min-w-0 overflow-hidden", !embedded && sectionClass)}
-    >
-      <div className="flex flex-wrap items-start justify-between gap-4 border-border border-b px-5 py-4">
-        <div className="min-w-0 space-y-1">
-          <div className="flex items-center gap-2">
-            <h2 className="type-section-title">LLM usage</h2>
-            {usage.providerConfigured ? (
-              <span className="inline-flex items-center gap-1 rounded-full bg-emerald-500/10 px-2 py-0.5 font-medium text-2xs text-emerald-700 dark:text-emerald-300">
-                <span
-                  aria-hidden
-                  className="size-1.5 rounded-full bg-emerald-500"
-                />
-                Tracking
-              </span>
-            ) : null}
-          </div>
-          <p className="text-muted-foreground text-sm">
-            Estimated spend and token volume since the server started.
-          </p>
+    <div className="space-y-4 p-5">
+      <div className="rounded-lg border border-border bg-background/50 p-4">
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-5">
+          <CompactUsageStat
+            icon={Coins01Icon}
+            label="API cost"
+            value={
+              usage.costEstimated ? formatUsd(usage.estimatedCostUsd) : "—"
+            }
+          />
+          <CompactUsageStat
+            icon={ZapIcon}
+            label="Requests"
+            value={usage.requestCount.toLocaleString()}
+          />
+          <CompactUsageStat
+            icon={ArrowDownLeft01Icon}
+            label="Input"
+            value={usage.inputTokens.toLocaleString()}
+          />
+          <CompactUsageStat
+            icon={ArrowUpRight01Icon}
+            label="Output"
+            value={usage.outputTokens.toLocaleString()}
+          />
+          <CompactUsageStat
+            icon={SparklesIcon}
+            label="Total"
+            value={usage.totalTokens.toLocaleString()}
+          />
         </div>
 
-        {usage.providerConfigured && usage.provider ? (
-          <div className="flex flex-wrap items-center gap-2">
-            <span className="inline-flex items-center rounded-full border border-border bg-muted/30 px-2.5 py-1 font-medium text-foreground text-xs">
-              {formatProviderLabel(usage.provider, usage.displayName)}
-            </span>
+        <div className="mt-4 border-border border-t pt-4">
+          <div className="mb-2 flex items-center justify-between gap-3">
+            <p className="font-medium text-muted-foreground text-xs uppercase tracking-[0.12em]">
+              Token mix
+            </p>
+            <p className="text-muted-foreground text-xs tabular-nums">
+              {usage.inputTokens.toLocaleString()} in /{" "}
+              {usage.outputTokens.toLocaleString()} out
+            </p>
           </div>
-        ) : null}
+          <TokenMixBar
+            inputTokens={usage.inputTokens}
+            outputTokens={usage.outputTokens}
+          />
+        </div>
+
+        <p className="mt-4 text-muted-foreground text-xs leading-relaxed">
+          {llmUsageCostNote(usage, modelLabel, trackedModelCount)}
+        </p>
       </div>
 
-      {usage.providerConfigured ? (
-        hasUsage ? (
-          <div className="space-y-4 p-5">
-            <div className="rounded-lg border border-border bg-background/50 p-4">
-              <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-5">
-                <CompactUsageStat
-                  icon={Coins01Icon}
-                  label="API cost"
-                  value={
-                    usage.costEstimated
-                      ? formatUsd(usage.estimatedCostUsd)
-                      : "—"
-                  }
-                />
-                <CompactUsageStat
-                  icon={ZapIcon}
-                  label="Requests"
-                  value={usage.requestCount.toLocaleString()}
-                />
-                <CompactUsageStat
-                  icon={ArrowDownLeft01Icon}
-                  label="Input"
-                  value={usage.inputTokens.toLocaleString()}
-                />
-                <CompactUsageStat
-                  icon={ArrowUpRight01Icon}
-                  label="Output"
-                  value={usage.outputTokens.toLocaleString()}
-                />
-                <CompactUsageStat
-                  icon={SparklesIcon}
-                  label="Total"
-                  value={usage.totalTokens.toLocaleString()}
-                />
-              </div>
-
-              <div className="mt-4 border-border border-t pt-4">
-                <div className="mb-2 flex items-center justify-between gap-3">
-                  <p className="font-medium text-muted-foreground text-xs uppercase tracking-[0.12em]">
-                    Token mix
-                  </p>
-                  <p className="text-muted-foreground text-xs tabular-nums">
-                    {usage.inputTokens.toLocaleString()} in /{" "}
-                    {usage.outputTokens.toLocaleString()} out
-                  </p>
-                </div>
-                <TokenMixBar
-                  inputTokens={usage.inputTokens}
-                  outputTokens={usage.outputTokens}
-                />
-              </div>
-
-              <p className="mt-4 text-muted-foreground text-xs leading-relaxed">
-                {usage.costEstimated
-                  ? trackedModelCount > 1
-                    ? `Based on tracked usage across ${trackedModelCount} models. Actual billing may differ.`
-                    : usage.provider === "openai_compatible" ||
-                        usage.provider === "openrouter" ||
-                        usage.provider === "cerebras" ||
-                        usage.provider === "fireworks"
-                      ? `Based on pricing saved in Settings for ${modelLabel}. Actual billing may differ.`
-                      : `Based on catalog pricing for ${modelLabel}. Actual billing may differ.`
-                  : usage.provider === "openrouter" ||
-                      usage.provider === "cerebras" ||
-                      usage.provider === "fireworks"
-                    ? "Browse or add models in Settings → Manage model to save pricing for cost estimates."
-                    : "Add input/output $/1M per model in Settings → Manage models to estimate cost."}
-              </p>
-            </div>
-
-            {trackedModelCount > 0 ? (
-              <div className="space-y-3">
-                <div className="flex items-center justify-between gap-3">
-                  <p className="type-label">By model</p>
-                  <p className="text-muted-foreground text-xs">
-                    {trackedModelCount} tracked
-                  </p>
-                </div>
-                <div className="overflow-hidden rounded-lg border border-border bg-background/40">
-                  {usage.models.map((modelUsage) => (
-                    <ModelUsageRow
-                      costEstimated={usage.costEstimated}
-                      key={modelUsage.modelId}
-                      maxTokens={maxModelTokens}
-                      usage={modelUsage}
-                    />
-                  ))}
-                </div>
-              </div>
-            ) : null}
+      {trackedModelCount > 0 ? (
+        <div className="space-y-3">
+          <div className="flex items-center justify-between gap-3">
+            <p className="type-label">By model</p>
+            <p className="text-muted-foreground text-xs">
+              {trackedModelCount} tracked
+            </p>
           </div>
-        ) : (
-          <LlmUsageEmptyState
-            description="Usage appears here after chat messages, automation runs, or task executions."
-            icon={ZapIcon}
-            title="No LLM calls yet"
-          />
-        )
-      ) : (
-        <LlmUsageEmptyState
-          action={
-            <Link
-              className="inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 font-medium text-primary-foreground text-sm transition-colors hover:bg-primary/90"
-              to={PAGE_PATHS.settings}
-            >
-              Open Settings
-            </Link>
-          }
-          description="Add an API key in Settings to start estimating token usage and API cost."
-          icon={SparklesIcon}
-          title="Connect a provider to track usage"
-        />
-      )}
+          <div className="overflow-hidden rounded-lg border border-border bg-background/40">
+            {usage.models.map((modelUsage) => (
+              <ModelUsageRow
+                costEstimated={usage.costEstimated}
+                key={modelUsage.modelId}
+                maxTokens={maxModelTokens}
+                usage={modelUsage}
+              />
+            ))}
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function LlmUsageBody({ usage }: { usage: LlmUsageStatus }) {
+  const modelLabel =
+    usage.currentModel ??
+    (usage.providerConfigured ? "Default model" : "Not configured");
+
+  if (!usage.providerConfigured) {
+    return (
+      <LlmUsageEmptyState
+        action={
+          <Link
+            className="inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 font-medium text-primary-foreground text-sm transition-colors hover:bg-primary/90"
+            to={PAGE_PATHS.settings}
+          >
+            Open Settings
+          </Link>
+        }
+        description="Add an API key in Settings to start estimating token usage and API cost."
+        icon={SparklesIcon}
+        title="Connect a provider to track usage"
+      />
+    );
+  }
+
+  if (usage.requestCount === 0) {
+    return (
+      <LlmUsageEmptyState
+        description="Usage appears here after chat messages, automation runs, or task executions."
+        icon={ZapIcon}
+        title="No LLM calls yet"
+      />
+    );
+  }
+
+  return <LlmUsageTrackedBody modelLabel={modelLabel} usage={usage} />;
+}
+
+function LlmUsageSection({ usage }: { usage: LlmUsageStatus }) {
+  return (
+    <section className="min-w-0 overflow-hidden">
+      <LlmUsageHeader usage={usage} />
+      <LlmUsageBody usage={usage} />
 
       <div className="border-border border-t bg-muted/15 px-5 py-3 dark:bg-muted/10">
         <p className="text-muted-foreground text-xs">
@@ -737,15 +802,12 @@ function ToneIcon({
   );
 }
 
-function StatusSkeleton({ embedded = false }: { embedded?: boolean } = {}) {
+function StatusSkeleton() {
   return (
     <div
       aria-busy="true"
       aria-label="Loading system status"
-      className={cn(
-        "h-80 animate-pulse bg-muted/40",
-        embedded ? "border-0" : "rounded-md border border-border"
-      )}
+      className="h-80 animate-pulse rounded-md border border-border bg-muted/40"
     />
   );
 }

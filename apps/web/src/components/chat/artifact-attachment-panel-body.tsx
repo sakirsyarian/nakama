@@ -1,4 +1,4 @@
-import { type RefObject, useMemo, useRef } from "react";
+import { useMemo, useRef } from "react";
 import { CodeBlock } from "@/components/ai-elements/code-block";
 import { MessageResponse } from "@/components/ai-elements/message";
 import { ArtifactMarkdownToc } from "@/components/chat/artifact-markdown-toc";
@@ -45,7 +45,6 @@ export type ArtifactAttachmentPanelBodyProps =
       content: string | null;
       format: "markdown" | "plain";
       language: string | null;
-      markdownContentRef?: RefObject<HTMLDivElement | null>;
       streaming?: boolean;
     });
 
@@ -77,6 +76,63 @@ function renderTextContent({
       fillHeight={fillHeight}
       lang={language}
     />
+  );
+}
+
+type ArtifactBodyPhase =
+  | "loading"
+  | "error"
+  | "source"
+  | "content"
+  | "unavailable"
+  | "empty";
+
+function resolveArtifactBodyPhase({
+  canPreview,
+  error,
+  hasContent,
+  loading,
+  showSource,
+}: {
+  canPreview: boolean;
+  error: string | null;
+  hasContent: boolean;
+  loading: boolean;
+  showSource: boolean;
+}): ArtifactBodyPhase {
+  if (loading) {
+    return "loading";
+  }
+  if (error) {
+    return "error";
+  }
+  if (hasContent && showSource) {
+    return "source";
+  }
+  if (hasContent) {
+    return "content";
+  }
+  if (canPreview) {
+    return "empty";
+  }
+  return "unavailable";
+}
+
+function ArtifactBodyError({
+  compact,
+  error,
+}: {
+  compact?: boolean;
+  error: string;
+}) {
+  return (
+    <p
+      className={
+        compact ? "text-destructive text-sm" : "p-4 text-destructive text-sm"
+      }
+    >
+      {error}
+    </p>
   );
 }
 
@@ -167,6 +223,25 @@ function ArtifactAttachmentVideoBody({
   );
 }
 
+function ArtifactHtmlPreview({
+  content,
+  filename,
+  htmlSandbox,
+}: {
+  content: string;
+  filename: string;
+  htmlSandbox: string;
+}) {
+  return (
+    <iframe
+      className="min-h-0 w-full flex-1 border-0 bg-background"
+      sandbox={htmlSandbox}
+      srcDoc={htmlForArtifactPreview(content)}
+      title={filename}
+    />
+  );
+}
+
 function ArtifactAttachmentHtmlBody({
   loading,
   error,
@@ -176,13 +251,19 @@ function ArtifactAttachmentHtmlBody({
   htmlSandbox = ARTIFACT_HTML_IFRAME_SANDBOX,
   previewMode = "preview",
 }: Extract<ArtifactAttachmentPanelBodyProps, { kind: "html" }>) {
-  const showSource = previewMode === "source" && Boolean(content);
+  const phase = resolveArtifactBodyPhase({
+    canPreview,
+    error,
+    hasContent: Boolean(content),
+    loading,
+    showSource: previewMode === "source" && Boolean(content),
+  });
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      {loading ? <LoadingState /> : null}
-      {error ? <p className="p-4 text-destructive text-sm">{error}</p> : null}
-      {!(loading || error) && showSource && content
+      {phase === "loading" ? <LoadingState /> : null}
+      {phase === "error" && error ? <ArtifactBodyError error={error} /> : null}
+      {phase === "source" && content
         ? renderTextContent({
             content,
             fillHeight: true,
@@ -190,18 +271,56 @@ function ArtifactAttachmentHtmlBody({
             language: "html",
           })
         : null}
-      {!(loading || error || showSource) && content ? (
-        <iframe
-          className="min-h-0 w-full flex-1 border-0 bg-background"
-          sandbox={htmlSandbox}
-          srcDoc={htmlForArtifactPreview(content)}
-          title={artifact.filename}
+      {phase === "content" && content ? (
+        <ArtifactHtmlPreview
+          content={content}
+          filename={artifact.filename}
+          htmlSandbox={htmlSandbox}
         />
       ) : null}
-      {loading || error || content || canPreview ? null : (
-        <UnavailablePreview padded />
-      )}
+      {phase === "unavailable" ? <UnavailablePreview padded /> : null}
     </div>
+  );
+}
+
+function resolveTextSourceView(
+  previewMode: ArtifactPreviewMode,
+  format: "markdown" | "plain",
+  language: string | null
+): { sourceFormat: "markdown" | "plain"; sourceLanguage: string | null } {
+  if (previewMode === "source") {
+    return {
+      sourceFormat: "plain",
+      sourceLanguage: language ?? (format === "markdown" ? "markdown" : null),
+    };
+  }
+  return { sourceFormat: format, sourceLanguage: language };
+}
+
+function ArtifactTextRendered({
+  content,
+  rendered,
+  sourceFormat,
+}: {
+  content: string;
+  rendered: ReturnType<typeof renderTextContent>;
+  sourceFormat: "markdown" | "plain";
+}) {
+  const renderedRef = useRef<HTMLDivElement>(null);
+  const headings = useMemo(
+    () => (sourceFormat === "markdown" ? extractMarkdownHeadings(content) : []),
+    [content, sourceFormat]
+  );
+
+  if (sourceFormat !== "markdown") {
+    return rendered;
+  }
+
+  return (
+    <>
+      <ArtifactMarkdownToc contentRef={renderedRef} headings={headings} />
+      <div ref={renderedRef}>{rendered}</div>
+    </>
   );
 }
 
@@ -214,24 +333,15 @@ function ArtifactAttachmentTextBody({
   streaming = false,
   canPreview,
   previewMode = "preview",
-  markdownContentRef,
 }: Extract<ArtifactAttachmentPanelBodyProps, { kind: "text" }>) {
-  const sourceFormat = previewMode === "source" ? "plain" : format;
-  const sourceLanguage =
-    previewMode === "source"
-      ? (language ?? (format === "markdown" ? "markdown" : null))
-      : language;
-  const showCodeBlock = Boolean(content && sourceFormat !== "markdown");
-  const fallbackRenderedRef = useRef<HTMLDivElement>(null);
-  const renderedRef = markdownContentRef ?? fallbackRenderedRef;
-  const headings = useMemo(
-    () =>
-      content && sourceFormat === "markdown"
-        ? extractMarkdownHeadings(content)
-        : [],
-    [content, sourceFormat]
+  const { sourceFormat, sourceLanguage } = resolveTextSourceView(
+    previewMode,
+    format,
+    language
   );
-
+  const showCodeBlock = Boolean(content && sourceFormat !== "markdown");
+  const showContent = !(loading || error) && Boolean(content);
+  const showUnavailable = !(loading || error || canPreview);
   const rendered = content
     ? renderTextContent({
         content,
@@ -249,25 +359,32 @@ function ArtifactAttachmentTextBody({
       )}
     >
       {loading ? <LoadingState compact /> : null}
-      {error ? <p className="text-destructive text-sm">{error}</p> : null}
-      {!(loading || error) && rendered ? (
-        sourceFormat === "markdown" ? (
-          <>
-            {markdownContentRef ? null : (
-              <ArtifactMarkdownToc
-                contentRef={renderedRef}
-                headings={headings}
-              />
-            )}
-            <div ref={renderedRef}>{rendered}</div>
-          </>
-        ) : (
-          rendered
-        )
+      {error ? <ArtifactBodyError compact error={error} /> : null}
+      {showContent && content && rendered ? (
+        <ArtifactTextRendered
+          content={content}
+          rendered={rendered}
+          sourceFormat={sourceFormat}
+        />
       ) : null}
-      {loading || error || canPreview ? null : (
-        <UnavailablePreview padded={false} />
-      )}
+      {showUnavailable ? <UnavailablePreview padded={false} /> : null}
+    </div>
+  );
+}
+
+function ArtifactSpreadsheetPreview({
+  content,
+  filename,
+}: {
+  content: string;
+  filename: string;
+}) {
+  return (
+    <div className="flex min-h-0 flex-1 flex-col">
+      <SpreadsheetGrid
+        editable={false}
+        rows={parseSpreadsheetText(filename, content)}
+      />
     </div>
   );
 }
@@ -280,13 +397,19 @@ function ArtifactAttachmentSpreadsheetBody({
   artifact,
   previewMode = "preview",
 }: Extract<ArtifactAttachmentPanelBodyProps, { kind: "spreadsheet" }>) {
-  const showSource = previewMode === "source" && Boolean(content);
+  const phase = resolveArtifactBodyPhase({
+    canPreview,
+    error,
+    hasContent: Boolean(content),
+    loading,
+    showSource: previewMode === "source" && Boolean(content),
+  });
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      {loading ? <LoadingState /> : null}
-      {error ? <p className="p-4 text-destructive text-sm">{error}</p> : null}
-      {!(loading || error) && showSource && content
+      {phase === "loading" ? <LoadingState /> : null}
+      {phase === "error" && error ? <ArtifactBodyError error={error} /> : null}
+      {phase === "source" && content
         ? renderTextContent({
             content,
             fillHeight: true,
@@ -294,17 +417,13 @@ function ArtifactAttachmentSpreadsheetBody({
             language: null,
           })
         : null}
-      {!(loading || error || showSource) && content ? (
-        <div className="flex min-h-0 flex-1 flex-col">
-          <SpreadsheetGrid
-            editable={false}
-            rows={parseSpreadsheetText(artifact.filename, content)}
-          />
-        </div>
+      {phase === "content" && content ? (
+        <ArtifactSpreadsheetPreview
+          content={content}
+          filename={artifact.filename}
+        />
       ) : null}
-      {loading || error || content || canPreview ? null : (
-        <UnavailablePreview padded />
-      )}
+      {phase === "unavailable" ? <UnavailablePreview padded /> : null}
     </div>
   );
 }

@@ -24,6 +24,7 @@ import {
 } from "../org-guards";
 import {
   assertBrowserCsrf,
+  assertJsonRequest,
   authenticateRequest,
   clearBrowserSessionCookies,
   createBrowserSessionResponse,
@@ -445,14 +446,18 @@ export function registerAuthRoutes(app: HonoApp, options: ServerOptions): void {
       return errorResponse("Authentication not configured", 500);
     }
 
+    assertJsonRequest(c.req.raw);
+
     const body = await readJson<{ email: string; password: string }>(c.req.raw);
     const user = await databaseAdapter.getUserByEmail(body.email);
     if (!user) {
       return errorResponse("Invalid credentials", 401);
     }
 
+    // Every path that sets a password trims it first, so login has to as well
+    // or a padded password can never be typed back in.
     const valid = await authService.verifyPassword(
-      body.password,
+      body.password?.trim() ?? "",
       user.passwordHash
     );
     if (!valid) {

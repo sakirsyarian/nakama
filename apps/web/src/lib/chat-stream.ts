@@ -9,6 +9,10 @@ import type { Dispatch, SetStateAction } from "react";
 import type { ChatStatus } from "@/lib/ai-ui-types";
 import type { ChatListItem } from "@/lib/chat-history";
 import { upsertStreamingToolMessage } from "@/lib/chat-stream-artifact";
+import {
+  formatListWorkflowsToolResult,
+  isListWorkflowsTool,
+} from "@/lib/chat-stream-workflow";
 import { createClientId } from "@/lib/client-id";
 import { cn } from "@/lib/utils";
 
@@ -78,6 +82,10 @@ export function formatToolResult(
 
   if (isSubAgentTool(tool)) {
     return formatSubAgentToolResult(result);
+  }
+
+  if (isListWorkflowsTool(tool)) {
+    return formatListWorkflowsToolResult(result);
   }
 
   return formatDefaultToolResult(result);
@@ -316,6 +324,10 @@ export function formatToolActionLabel(
     return formatSubAgentTitle(input);
   }
 
+  if (isListWorkflowsTool(tool)) {
+    return "Listed workflows";
+  }
+
   if (tool === "bash" && summary) {
     return `Ran ${truncateDisplay(summary.split("\n")[0] ?? summary, 96)}`;
   }
@@ -403,31 +415,29 @@ export function isAbortError(error: unknown): boolean {
 export function finalizeStreamingMessages(
   messages: ChatListItem[]
 ): ChatListItem[] {
-  const next = messages.map((message) =>
-    message.role === "tool" && message.toolStatus === "running"
-      ? {
-          ...message,
-          artifactStreaming: false,
-          content: `${message.tool} stopped`,
-          toolStatus: "done" as const,
-        }
-      : message
-  );
+  return messages.map((message) => {
+    if (message.role === "tool" && message.toolStatus === "running") {
+      return {
+        ...message,
+        artifactStreaming: false,
+        content: `${message.tool} stopped`,
+        toolStatus: "done" as const,
+      };
+    }
 
-  for (let index = next.length - 1; index >= 0; index -= 1) {
-    const message = next[index];
-
-    if (message?.role === "assistant") {
-      next[index] = {
+    if (
+      message.role === "assistant" &&
+      (message.streaming || message.thinkingStreaming)
+    ) {
+      return {
         ...message,
         streaming: false,
         thinkingStreaming: false,
       };
-      break;
     }
-  }
 
-  return next;
+    return message;
+  });
 }
 
 export function deriveChatStatus(

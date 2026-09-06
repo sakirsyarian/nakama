@@ -3,7 +3,7 @@ import {
   BUILTIN_TOOL_IDS,
   GENERATE_IMAGE_TOOL_ID,
 } from "@nakama/core/tools/protected";
-import { createInMemoryDatabaseAdapter } from "./adapters/in-memory";
+import { createInMemoryDatabaseAdapter } from "./index";
 import { ensureGenerateImageToolDefinition } from "./org-profiles";
 import {
   ensureBuiltinToolDefinitions,
@@ -15,6 +15,46 @@ import {
 } from "./seed";
 
 describe("seed cleanup", () => {
+  test("deleteTool unassigns every profile before deleting", async () => {
+    const db = createInMemoryDatabaseAdapter();
+    const now = new Date().toISOString();
+
+    await db.upsertProfile({
+      createdAt: now,
+      id: "profile_a",
+      isSuper: false,
+      model: null,
+      name: "A",
+      systemPrompt: "a",
+      updatedAt: now,
+    });
+    await db.upsertProfile({
+      createdAt: now,
+      id: "profile_b",
+      isSuper: false,
+      model: null,
+      name: "B",
+      systemPrompt: "b",
+      updatedAt: now,
+    });
+    await db.upsertTool({
+      createdAt: now,
+      description: "doomed",
+      handlerConfig: {},
+      handlerType: "custom",
+      id: "tool_doomed",
+      name: "doomed-custom",
+      updatedAt: now,
+    });
+    await db.assignToolToProfile("profile_a", "tool_doomed");
+    await db.assignToolToProfile("profile_b", "tool_doomed");
+
+    expect(await db.deleteTool("tool_doomed")).toBe(true);
+    expect(await db.getTool("tool_doomed")).toBeNull();
+    expect(await db.listToolsForProfile("profile_a")).toHaveLength(0);
+    expect(await db.listToolsForProfile("profile_b")).toHaveLength(0);
+  });
+
   test("removes unsupported tool handler types", async () => {
     const db = createInMemoryDatabaseAdapter();
     const now = new Date().toISOString();
@@ -197,6 +237,7 @@ describe("seed built-in tools", () => {
 
     expect(profiles.map((profile) => profile.id)).toEqual(["profile_custom"]);
     expect(await db.getTool(BUILTIN_TOOL_IDS.web_search)).not.toBeNull();
+    expect(await db.getTool(BUILTIN_TOOL_IDS.sqlite)).not.toBeNull();
     expect(await db.getTool(GENERATE_IMAGE_TOOL_ID)).not.toBeNull();
   });
 

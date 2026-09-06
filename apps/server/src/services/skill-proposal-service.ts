@@ -5,8 +5,8 @@ import {
   isPathWithinProfileSkillsDir,
   NakamaApiError,
   parseRawProfileSkillContent,
+  resolveProfileOrgBooleanOverride,
   resolveProfileSkillSupportingFilePath,
-  resolveSkillWriteApprovalRequired,
 } from "@nakama/core";
 import type { SkillProposal } from "@nakama/core/contract";
 import {
@@ -55,6 +55,25 @@ export interface StageSkillProposalResult {
   warnings?: string[];
 }
 
+export async function isSkillWriteApprovalRequired(
+  database: DatabaseAdapter,
+  orgId: string,
+  profileId: string
+): Promise<boolean> {
+  const org = await database.getOrganizationById(orgId);
+  if (!org) {
+    throw new NakamaApiError("Organization not found.", 404);
+  }
+  const profile = await database.getProfileForOrg(profileId, orgId);
+  if (!profile) {
+    throw new NakamaApiError("Profile not found.", 404);
+  }
+  return resolveProfileOrgBooleanOverride(
+    profile.skillsWriteApproval ?? null,
+    org.skillsWriteApproval ?? false
+  );
+}
+
 export class SkillProposalService {
   constructor(
     private readonly database: DatabaseAdapter | null = null,
@@ -65,19 +84,11 @@ export class SkillProposalService {
     orgId: string,
     profileId: string
   ): Promise<boolean> {
-    const db = this.requireDatabase();
-    const org = await db.getOrganizationById(orgId);
-    if (!org) {
-      throw new NakamaApiError("Organization not found.", 404);
-    }
-    const profile = await db.getProfileForOrg(profileId, orgId);
-    if (!profile) {
-      throw new NakamaApiError("Profile not found.", 404);
-    }
-    return resolveSkillWriteApprovalRequired({
-      orgSkillsWriteApproval: org.skillsWriteApproval ?? false,
-      profileSkillsWriteApproval: profile.skillsWriteApproval ?? null,
-    });
+    return isSkillWriteApprovalRequired(
+      this.requireDatabase(),
+      orgId,
+      profileId
+    );
   }
 
   async stageProposal(
@@ -142,6 +153,11 @@ export class SkillProposalService {
       throw new NakamaApiError("Only pending proposals can be approved.", 400);
     }
 
+    const changeMeta = {
+      actorUserId: reviewerUserId,
+      source: "skill_manage" as const,
+    };
+
     if (proposal.action === "create") {
       const content = proposal.content;
       if (!content?.trim()) {
@@ -151,7 +167,8 @@ export class SkillProposalService {
       await skills.createAndAssignRawSkillToProfile(
         orgId,
         proposal.profileId,
-        content
+        content,
+        { changeMeta }
       );
     } else if (proposal.action === "patch") {
       const oldString = proposal.patchOldString;
@@ -167,7 +184,8 @@ export class SkillProposalService {
         proposal.profileId,
         proposal.skillName,
         oldString,
-        newString
+        newString,
+        changeMeta
       );
     } else if (proposal.action === "edit") {
       const content = proposal.content;
@@ -178,7 +196,8 @@ export class SkillProposalService {
         orgId,
         proposal.profileId,
         proposal.skillName,
-        content
+        content,
+        changeMeta
       );
       await this.archiveConsolidateLosers(orgId, proposal);
     } else if (proposal.action === "write_file") {
@@ -212,7 +231,8 @@ export class SkillProposalService {
       await skills.deleteAssignedProfileSkill(
         orgId,
         proposal.profileId,
-        proposal.skillName
+        proposal.skillName,
+        changeMeta
       );
     }
 

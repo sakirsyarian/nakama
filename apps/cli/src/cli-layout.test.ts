@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import {
+  createSerializedQueue,
   formatPendingDisplayLines,
   formatPendingSummary,
 } from "./message-queue";
@@ -19,6 +20,41 @@ describe("formatPendingSummary", () => {
         },
       })
     ).toBe("[image]");
+  });
+});
+
+describe("createSerializedQueue", () => {
+  test("runs tasks one after another", async () => {
+    const queue = createSerializedQueue();
+    const order: number[] = [];
+
+    const first = queue.enqueue(async () => {
+      await Bun.sleep(20);
+      order.push(1);
+    });
+    const second = queue.enqueue(async () => {
+      order.push(2);
+    });
+
+    await Promise.all([first, second]);
+    expect(order).toEqual([1, 2]);
+  });
+
+  test("continues after a rejected task", async () => {
+    const queue = createSerializedQueue();
+    const order: string[] = [];
+
+    const first = queue.enqueue(async () => {
+      order.push("a");
+      throw new Error("fail");
+    });
+    const second = queue.enqueue(async () => {
+      order.push("b");
+    });
+
+    await expect(first).rejects.toThrow("fail");
+    await second;
+    expect(order).toEqual(["a", "b"]);
   });
 });
 
@@ -250,6 +286,34 @@ describe("TerminalLayout frame pipeline", () => {
 
     const output = writes.join("");
     expect(output).toContain(" line-05 ");
+  });
+
+  test("scrolls within retained history and returns to live output after eviction", () => {
+    captureStdout();
+    setTerminalSize(80, 8);
+    const layout = new TerminalLayout(null);
+    Object.assign(layout, { anchored: true, anchorRow: 1, enabled: true });
+    layout.setReservedRows(1, [plainLine("> ")]);
+    for (let index = 0; index < 1001; index++) {
+      layout.writelnScroll(`retained-${index}`);
+    }
+
+    writes = [];
+    layout.scrollLines(10_000);
+    expect(writes.join("")).toContain(" retained-1 ");
+    expect(writes.join("")).not.toContain(" retained-0 ");
+
+    writes = [];
+    layout.writelnScroll("retained-1001");
+    expect(writes.join("")).toContain("retained-7");
+    expect(layout.getLastOutputLine()).toBe(1000);
+
+    writes = [];
+    layout.scrollToLatest();
+    expect(writes.join("")).toContain(" retained-1001 ");
+    writes = [];
+    layout.writelnScroll("retained-1002");
+    expect(writes.join("")).toContain(" retained-1002 ");
   });
 
   test("grows viewport upward as transcript gets longer", () => {

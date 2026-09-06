@@ -1,8 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { loadLocalAuthToken, verifyLocalAuthToken } from "@nakama/core";
+import { LOCAL_CLIENT_USER_ID } from "@nakama/core/local-auth";
 import { createInMemoryDatabaseAdapter } from "@nakama/db";
 import { AuthService } from "../services/auth-service";
 import { OrgService } from "../services/org-service";
@@ -98,8 +99,6 @@ function createServerOptions() {
       draftAutomation: async (_prompt: string, _channel: string) => ({
         id: "automation_draft",
       }),
-      draftTaskPrompt: async (_title: string, _description?: string) =>
-        "prompt-1",
       generateImage: async (_body: unknown) => ({
         data: "AA==",
         mediaType: "image/png",
@@ -115,10 +114,6 @@ function createServerOptions() {
       }),
       getProfile: async (_profileId: string) => ({ id: "default" }),
       getProfileAvatar: async (_orgId: string, _profileId: string) => ({
-        bytes: new Uint8Array([1, 2, 3]),
-        mediaType: "image/png",
-      }),
-      getProfileAvatarByProfileId: async (_profileId: string) => ({
         bytes: new Uint8Array([1, 2, 3]),
         mediaType: "image/png",
       }),
@@ -138,10 +133,6 @@ function createServerOptions() {
       }),
       getSessionTodos: async (_sessionId: string) => [],
       getSkill: async (_skillId: string) => ({ id: "skill_1" }),
-      getTaskChatMessages: async (_taskId: string) => ({
-        messages: [{ content: "task", role: "assistant" }],
-        sessionId: "session_1",
-      }),
       getTelegramSettings: async () => ({ enabled: false }),
       getThinkingSettings: async () => ({
         thinking: { effort: "medium", enabled: true },
@@ -192,8 +183,9 @@ function createServerOptions() {
         getContextUsage: () => null,
         send: async (input: { message: string }) => `reply:${input.message}`,
       }),
+      resolveWorkflowToolNames: async () => new Set<string>(),
       runAutomation: async (_automationId: string) => ({ skipped: false }),
-      runTask: async (_taskId: string) => ({ skipped: false }),
+      runWorkflow: async (_workflowId: string) => ({ skipped: false }),
       schedulePostTurnSkillReview: (_sessionId: string) => {},
       scheduleSessionTitleGeneration: (_sessionId: string) => {},
       setImageGenerationSettings: async (_body: unknown) => ({
@@ -294,31 +286,6 @@ function createServerOptions() {
     systemStatus: {
       getStatus: async () => ({ ok: true }),
     } as any,
-    taskService: {
-      create: async (_orgId: string, _body: unknown, _profileId?: string) => ({
-        id: "task_1",
-        status: "pending",
-      }),
-      delete: async (_taskId: string, _orgId: string) => true,
-      get: async (_taskId: string, _orgId?: string) => ({
-        id: "task_1",
-        status: "pending",
-      }),
-      listForOrg: async (_orgId: string) => [
-        { id: "task_1", status: "pending" },
-      ],
-      listRuns: async (_taskId: string, _orgId?: string, limit?: number) =>
-        limit ? [{ id: "task_run_1" }] : [{ id: "task_run_1" }],
-      update: async (
-        _taskId: string,
-        _orgId: string,
-        body: any,
-        _opts?: unknown
-      ) => ({
-        id: "task_1",
-        status: body.status ?? "pending",
-      }),
-    } as any,
     webDistDir: null,
     workerManager: {
       clearWorkerLogs: async () => {},
@@ -330,6 +297,16 @@ function createServerOptions() {
       restartWorker: async () => {},
       startWorker: async () => {},
       stopWorker: async () => {},
+    } as any,
+    workflowService: {
+      create: async () => ({ id: "workflow_1" }),
+      delete: async () => true,
+      deleteRun: async () => true,
+      get: async () => ({ id: "workflow_1", profileId: "default" }),
+      getRun: async () => ({ id: "run_1", steps: [] }),
+      listForOrg: async () => [{ id: "workflow_1" }],
+      listRuns: async () => [{ id: "run_1", steps: [] }],
+      update: async () => ({ id: "workflow_1" }),
     } as any,
   };
 }
@@ -471,6 +448,70 @@ describe("createHonoApp", () => {
     const csp = response.headers.get("Content-Security-Policy") ?? "";
     expect(csp).toContain("img-src 'self' data: blob:");
     expect(csp).toContain("media-src 'self' blob:");
+  });
+
+  test("allows the theme bootstrap by hash instead of every inline script", async () => {
+    const indexHtml = await Bun.file(
+      resolve(import.meta.dir, "../../../web/index.html")
+    ).text();
+    const inlineScript = indexHtml.match(/<script>([\s\S]*?)<\/script>/)?.[1];
+    if (!inlineScript) {
+      throw new Error("apps/web/index.html no longer inlines a script");
+    }
+    const hash = new Bun.CryptoHasher("sha256")
+      .update(inlineScript)
+      .digest("base64");
+
+    const options = createServerOptions();
+    const app = createHonoApp(options);
+    const response = await app.fetch(
+      new Request("http://localhost:4310/v1/profiles", {
+        headers: { Authorization: "Bearer invalid_token" },
+      })
+    );
+
+    const scriptSrc = (response.headers.get("Content-Security-Policy") ?? "")
+      .split(";")
+      .map((directive) => directive.trim())
+      .find((directive) => directive.startsWith("script-src"));
+    expect(scriptSrc).toBe(`script-src 'self' 'sha256-${hash}'`);
+  });
+
+  test("logs in with a password that was set with surrounding whitespace", async () => {
+    const configDir = await mkdtemp(join(tmpdir(), "nakama-password-trim-"));
+    process.env.NAKAMA_CONFIG_DIR = configDir;
+
+    try {
+      const options = createServerOptions();
+      const app = createHonoApp(options);
+      await app.fetch(
+        new Request("http://localhost:4310/v1/auth/setup", {
+          body: JSON.stringify(
+            buildSetupAuthBody("padded@example.com", {
+              admin: { password: "  secret123  " },
+            })
+          ),
+          headers: { "Content-Type": "application/json" },
+          method: "POST",
+        })
+      );
+
+      const loginResponse = await app.fetch(
+        new Request("http://localhost:4310/v1/auth/login", {
+          body: JSON.stringify({
+            email: "padded@example.com",
+            password: "  secret123  ",
+          }),
+          headers: { "Content-Type": "application/json" },
+          method: "POST",
+        })
+      );
+
+      expect(loginResponse.status).toBe(200);
+    } finally {
+      delete process.env.NAKAMA_CONFIG_DIR;
+      await rm(configDir, { force: true, recursive: true });
+    }
   });
 
   test("rotates the local auth token from a browser session", async () => {
@@ -629,6 +670,7 @@ describe("createHonoApp", () => {
       ok: true,
       providerConfigured: true,
       userConfigured: false,
+      version: expect.any(String),
     });
   });
 
@@ -742,6 +784,99 @@ describe("createHonoApp", () => {
     });
   }
 
+  test("a rejected setup leaves no organization behind", async () => {
+    const options = createServerOptions();
+    const app = createHonoApp(options);
+    const setup = (email: string) =>
+      app.fetch(
+        new Request("http://localhost:4310/v1/auth/setup", {
+          body: JSON.stringify(
+            buildSetupAuthBody(email, {
+              organization: { name: "Acme", slug: "acme" },
+            })
+          ),
+          headers: { "Content-Type": "application/json" },
+          method: "POST",
+        })
+      );
+
+    expect((await setup("not-an-email")).status).toBe(400);
+    expect(await options.databaseAdapter.listOrganizations()).toHaveLength(0);
+
+    // The org used to be committed before the admin was validated, so the
+    // retry lost the slug it had just taken.
+    expect((await setup("admin@example.com")).status).toBe(201);
+  });
+
+  test("concurrent setup creates exactly one org and one admin", async () => {
+    const options = createServerOptions();
+    const app = createHonoApp(options);
+    const setup = (slug: string) =>
+      app.fetch(
+        new Request("http://localhost:4310/v1/auth/setup", {
+          body: JSON.stringify(
+            buildSetupAuthBody(`${slug}@example.com`, {
+              organization: { name: slug, slug },
+            })
+          ),
+          headers: { "Content-Type": "application/json" },
+          method: "POST",
+        })
+      );
+
+    // Distinct slugs, so nothing but the human-user check can stop the loser.
+    const statuses = (await Promise.all([setup("alpha"), setup("beta")])).map(
+      (response) => response.status
+    );
+
+    expect(statuses.toSorted()).toEqual([201, 409]);
+    expect(await options.databaseAdapter.countHumanUsers()).toBe(1);
+
+    const organizations = await options.databaseAdapter.listOrganizations();
+    expect(organizations).toHaveLength(1);
+    const members = await options.databaseAdapter.listOrgMembers(
+      organizations[0]?.id ?? ""
+    );
+    expect(
+      members.filter((member) => member.userId !== LOCAL_CLIENT_USER_ID)
+    ).toHaveLength(1);
+  });
+
+  test("sends HSTS behind a TLS terminator", async () => {
+    const app = createHonoApp(createServerOptions());
+
+    const response = await app.fetch(
+      new Request("http://localhost:4310/health", {
+        headers: { "X-Forwarded-Proto": "https" },
+      })
+    );
+
+    expect(response.headers.get("Strict-Transport-Security")).toContain(
+      "max-age="
+    );
+  });
+
+  test("login rejects a body that is not application/json", async () => {
+    const options = createServerOptions();
+    const app = createHonoApp(options);
+    await setupFreshInstallSession(app, options.databaseAdapter);
+
+    // A cross-site form can send text/plain without a CORS preflight, which is
+    // how a page logs a victim into an account it controls.
+    const response = await app.fetch(
+      new Request("http://localhost:4310/v1/auth/login", {
+        body: JSON.stringify({
+          email: "admin@example.com",
+          password: "password123",
+        }),
+        headers: { "Content-Type": "text/plain;charset=UTF-8" },
+        method: "POST",
+      })
+    );
+
+    expect(response.status).toBe(415);
+  });
+
   test("logout clears both Secure and non-Secure session cookies", async () => {
     const options = createServerOptions();
     const app = createHonoApp(options);
@@ -794,21 +929,6 @@ describe("createHonoApp", () => {
     expect(
       csrfClears.some((cookie) => !/;\s*Secure(?:;|$)/i.test(cookie))
     ).toBe(true);
-  });
-
-  test("serves task chat capability probe without auth", async () => {
-    const options = createServerOptions();
-    const app = createHonoApp(options);
-    const response = await app.fetch(
-      new Request(
-        "http://localhost:4310/v1/tasks/__capability_probe__/messages"
-      )
-    );
-
-    expect(response.status).toBe(404);
-    await expect(response.json()).resolves.toEqual({
-      error: "Task not found.",
-    });
   });
 
   test("requires platform admin to control messaging workers", async () => {
@@ -1009,18 +1129,6 @@ describe("createHonoApp", () => {
       name: "runs automations through Hono routes",
       path: "/v1/automations/automation_1/run",
     },
-    {
-      expected: { tasks: [{ id: "task_1", status: "pending" }] },
-      name: "serves tasks through Hono routes",
-      path: "/v1/tasks",
-    },
-    {
-      csrf: true,
-      expected: { run: { id: "task_run_1" } },
-      method: "POST" as const,
-      name: "runs tasks through Hono routes",
-      path: "/v1/tasks/task_1/run",
-    },
   ] as const;
 
   for (const tc of smokeRoutes) {
@@ -1101,6 +1209,7 @@ describe("createHonoApp", () => {
             email: "noorg@example.com",
             password: "password123",
           }),
+          headers: { "Content-Type": "application/json" },
           method: "POST",
         })
       );
@@ -1225,6 +1334,7 @@ describe("createHonoApp", () => {
             email: "platform@example.com",
             password: "password123",
           }),
+          headers: { "Content-Type": "application/json" },
           method: "POST",
         })
       );
@@ -1264,6 +1374,7 @@ describe("createHonoApp", () => {
             email: "admin@acme.com",
             password: created.adminMember.temporaryPassword,
           }),
+          headers: { "Content-Type": "application/json" },
           method: "POST",
         })
       );
