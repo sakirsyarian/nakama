@@ -1,14 +1,24 @@
-import { getWhatsAppConfigDir } from "@nakama/core/whatsapp-config";
+import type { ChannelConfigScope } from "@nakama/core/channel-config-shared";
+import { isChannelOwner } from "@nakama/core/channel-config-shared";
 import {
+  getWhatsAppConfigDir,
+  syncWhatsAppOwnerPairing,
+} from "@nakama/core/whatsapp-config";
+import {
+  DEFAULT_CONNECTION_CONFIG,
   DisconnectReason,
   extractMessageContent,
   fetchLatestBaileysVersion,
   getContentType,
+  jidDecode,
+  jidEncode,
   makeWASocket,
+  type proto,
   type WASocket,
 } from "@whiskeysockets/baileys";
 import { usePrivateMultiFileAuthState } from "./auth-state";
 import { createBaileysLogger } from "./baileys-logger";
+import { isChannelDebugEnabled } from "./channel-log";
 import {
   extractInboundText,
   isPrivateWhatsAppChat,
@@ -24,6 +34,7 @@ export interface WhatsAppSocketDeps {
   onDisconnected?: () => void;
   onMessage: (data: WhatsAppInboundChat) => Promise<void>;
   onQr?: (qr: string) => void;
+  orgId?: ChannelConfigScope;
 }
 
 export interface WhatsAppSocketHandle {
@@ -35,7 +46,7 @@ export interface WhatsAppSocketHandle {
 export async function createWhatsAppSocket(
   deps: WhatsAppSocketDeps
 ): Promise<WhatsAppSocketHandle> {
-  const authDir = getWhatsAppConfigDir() + "/auth";
+  const authDir = getWhatsAppConfigDir(deps.orgId) + "/auth";
   const { state, saveCreds } = await usePrivateMultiFileAuthState(authDir);
   const { version } = await fetchLatestBaileysVersion();
 
@@ -65,6 +76,57 @@ export async function createWhatsAppSocket(
         browser: ["Nakama", "Chrome", "4.0.0"] as [string, string, string],
         connectTimeoutMs: 30_000,
         logger: baileysLogger,
+        makeSignalRepository(auth, logger, pnToLIDFunc) {
+          const repository = DEFAULT_CONNECTION_CONFIG.makeSignalRepository(
+            auth,
+            logger,
+            pnToLIDFunc
+          );
+          const decrypt = repository.decryptMessage.bind(repository);
+          const recovered = new Map<string, string>();
+          // Retry stale sessions using only our own trusted identity pair.
+          repository.decryptMessage = async (message) => {
+            const sender = jidDecode(message.jid);
+            const pn = jidDecode(state.creds.me?.id);
+            const lid = jidDecode(state.creds.me?.lid);
+            const alternate =
+              sender?.server === "lid" && sender.user === lid?.user
+                ? pn
+                : sender?.server === "s.whatsapp.net" &&
+                    sender.user === pn?.user
+                  ? lid
+                  : undefined;
+            if (!(sender && alternate)) {
+              return decrypt(message);
+            }
+            const alternateJid = jidEncode(
+              alternate.user,
+              alternate.server,
+              sender.device
+            );
+            const primary = recovered.get(message.jid) ?? message.jid;
+            try {
+              return await decrypt({ ...message, jid: primary });
+            } catch (error) {
+              if (
+                !(error instanceof Error) ||
+                (error.name !== "SessionError" && error.message !== "Bad MAC")
+              ) {
+                throw error;
+              }
+              const fallback =
+                primary === message.jid ? alternateJid : message.jid;
+              try {
+                const plaintext = await decrypt({ ...message, jid: fallback });
+                recovered.set(message.jid, fallback);
+                return plaintext;
+              } catch {
+                throw error;
+              }
+            }
+          };
+          return repository;
+        },
         markOnlineOnConnect: false,
         printQRInTerminal: false,
         retryRequestDelayMs: 2000,
@@ -79,6 +141,7 @@ export async function createWhatsAppSocket(
         return;
       }
 
+      let identityAccepted = !isChannelOwner(deps.orgId ?? null);
       socket = next;
       wrapSocketSendMessage(next);
 
@@ -97,7 +160,23 @@ export async function createWhatsAppSocket(
           reconnectAttempt = 0;
           const me = state.creds.me;
           if (me?.id) {
-            deps.onConnected?.({ id: me.id, lid: me.lid ?? null });
+            try {
+              await syncWhatsAppOwnerPairing(
+                { ownerJid: me.id, ownerLid: me.lid },
+                deps.orgId
+              );
+              if (myGen !== generation || stopped) {
+                return;
+              }
+              identityAccepted = true;
+              deps.onConnected?.({ id: me.id, lid: me.lid ?? null });
+            } catch (error) {
+              stopped = true;
+              generation += 1;
+              await retireSocket(next);
+              socket = null;
+              console.error("WhatsApp account could not be claimed", error);
+            }
           }
         }
 
@@ -105,12 +184,13 @@ export async function createWhatsAppSocket(
           generation += 1;
           // Drop listeners before reconnect so buffered Baileys events on this
           // socket cannot dispatch after the next generation is bound.
-          next.ev.removeAllListeners();
+          next.ev.destroy();
           deps.onDisconnected?.();
-          const statusCode = lastDisconnect?.error?.message
-            ? (lastDisconnect.error as { output?: { statusCode?: number } })
-                .output?.statusCode
-            : lastDisconnect?.statusCode;
+          const statusCode = (
+            lastDisconnect?.error as
+              | { output?: { statusCode?: number } }
+              | undefined
+          )?.output?.statusCode;
           const shouldReconnect =
             statusCode !== DisconnectReason.loggedOut && !stopped;
 
@@ -145,9 +225,11 @@ export async function createWhatsAppSocket(
           return;
         }
 
-        console.log(
-          `WhatsApp messages.upsert type=${m.type} count=${m.messages.length}`
-        );
+        if (isChannelDebugEnabled()) {
+          console.log(
+            `WhatsApp messages.upsert type=${m.type} count=${m.messages.length}`
+          );
+        }
 
         if (!isSupportedUpsertType(m.type)) {
           return;
@@ -155,6 +237,9 @@ export async function createWhatsAppSocket(
 
         const me = state.creds.me;
 
+        if (!identityAccepted) {
+          return;
+        }
         for (const msg of m.messages) {
           const remoteJid = msg.key.remoteJid ?? null;
           const text = extractInboundText(msg.message);
@@ -163,9 +248,9 @@ export async function createWhatsAppSocket(
             requireGroupMention: false,
           });
 
-          if (remoteJid) {
+          if (remoteJid && isChannelDebugEnabled()) {
             console.log(
-              `WhatsApp upsert item id=${msg.key.id ?? "-"} jid=${maskWhatsAppJid(remoteJid)} fromMe=${msg.key.fromMe ? "yes" : "no"} participant=${maskWhatsAppJid(msg.key.participant)} participantPn=${maskWhatsAppJid(msg.key.participantPn)} textBytes=${Buffer.byteLength(text, "utf8")} handle=${inbound ? "yes" : "no"}`
+              `WhatsApp upsert item id=${msg.key.id ?? "-"} jid=${maskWhatsAppJid(remoteJid)} fromMe=${msg.key.fromMe ? "yes" : "no"} participant=${maskWhatsAppJid(msg.key.participant)} participantAlt=${maskWhatsAppJid(msg.key.participantAlt)} textBytes=${Buffer.byteLength(text, "utf8")} handle=${inbound ? "yes" : "no"}`
             );
           }
 
@@ -176,10 +261,12 @@ export async function createWhatsAppSocket(
             isPrivateWhatsAppChat(remoteJid)
           ) {
             loggedMissingTextPayload = true;
-            console.log(
-              "WhatsApp missing-text payload:",
-              summarizeMissingTextPayload(msg)
-            );
+            if (isChannelDebugEnabled()) {
+              console.log(
+                "WhatsApp missing-text payload:",
+                summarizeMissingTextPayload(msg)
+              );
+            }
           }
 
           if (
@@ -198,9 +285,11 @@ export async function createWhatsAppSocket(
             return;
           }
 
-          console.log(
-            `WhatsApp message received id=${msg.key.id ?? "-"} jid=${maskWhatsAppJid(inbound.jid)} textBytes=${Buffer.byteLength(inbound.text, "utf8")}`
-          );
+          if (isChannelDebugEnabled()) {
+            console.log(
+              `WhatsApp message received id=${msg.key.id ?? "-"} jid=${maskWhatsAppJid(inbound.jid)} textBytes=${Buffer.byteLength(inbound.text, "utf8")}`
+            );
+          }
 
           try {
             await deps.onMessage(inbound);
@@ -277,7 +366,7 @@ function retireSocket(target: WASocket | null | undefined): Promise<void> {
   }
 
   // Strip listeners first so end()'s close emit cannot re-enter reconnect.
-  target.ev.removeAllListeners();
+  target.ev.destroy();
   return Promise.resolve(target.end(undefined));
 }
 
@@ -292,7 +381,7 @@ export function summarizeMissingTextPayload(msg: {
     participant?: string | null;
     id?: string | null;
   };
-  message?: Record<string, unknown> | null;
+  message?: proto.IMessage | null;
   messageStubType?: unknown;
 }): string {
   const extracted = extractMessageContent(msg.message as any);

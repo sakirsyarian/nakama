@@ -1,9 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import { NakamaApiError } from "./api-error";
+import type { ChatMessage } from "./contract";
 import {
   countUserImages,
   estimateUserContentTokens,
   getUserMessageText,
+  messagesIncludeUserImages,
   normalizeUserContent,
   parseDataUrl,
   parseDocumentDataUrl,
@@ -200,6 +202,20 @@ describe("estimateUserContentTokens", () => {
 });
 
 describe("stripImagesForCompaction", () => {
+  test("omits tool images while preserving the tool result and original history", () => {
+    const message: ChatMessage = {
+      attachments: [
+        { data: tinyPngBase64, mediaType: "image/png", type: "image" },
+      ],
+      content: '{"path":"shot.png"}',
+      name: "read_file",
+      role: "tool",
+      toolCallId: "image",
+    };
+    const [stripped] = stripImagesForCompaction([message]);
+    expect(stripped).toEqual({ ...message, attachments: undefined });
+    expect(message.attachments).toHaveLength(1);
+  });
   test("replaces image parts with placeholder text", () => {
     const result = stripImagesForCompaction([
       {
@@ -275,5 +291,31 @@ describe("countUserImages", () => {
         { data: tinyPngBase64, mediaType: "image/png", type: "image" },
       ])
     ).toBe(1);
+  });
+});
+
+describe("messagesIncludeUserImages", () => {
+  test("detects image parts in user messages", () => {
+    const messages: ChatMessage[] = [
+      { content: "hello", role: "user" },
+      {
+        content: [
+          { text: "see this", type: "text" },
+          { data: "abc", mediaType: "image/png", type: "image" },
+        ],
+        role: "user",
+      },
+    ];
+
+    expect(messagesIncludeUserImages(messages)).toBe(true);
+  });
+
+  test("returns false for text-only history", () => {
+    const messages: ChatMessage[] = [
+      { content: "hello", role: "user" },
+      { content: "hi", role: "assistant" },
+    ];
+
+    expect(messagesIncludeUserImages(messages)).toBe(false);
   });
 });

@@ -1,22 +1,37 @@
-import { ArrowDown01Icon, Rotate02Icon, Wrench01Icon } from "hugeicons-react";
+import { Button } from "@nakama/ui/button";
+import { cn } from "@nakama/ui/utils";
+import {
+  ArrowDown01Icon,
+  ArrowRight01Icon,
+  Rotate02Icon,
+  Wrench01Icon,
+} from "hugeicons-react";
 import type { ReactNode } from "react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
+import { Link } from "react-router-dom";
 import {
   Message,
   MessageContent,
   MessageResponse,
 } from "@/components/ai-elements/message";
-import type { AssistantTurnSegment } from "@/components/chat/assistant-tool-group.shared";
+import {
+  type AssistantTurnSegment,
+  toolGroupElapsedSeconds,
+} from "@/components/chat/assistant-tool-group.shared";
 import { ImageGenerationToolRow } from "@/components/chat/ImageGenerationToolRow";
 import { ThinkingReasoning } from "@/components/chat/ThinkingReasoning";
 import thinkingStyles from "@/components/chat/ThinkingReasoning.module.css";
 import { WebFetchToolRow } from "@/components/chat/WebFetchToolRow";
 import { WebSearchToolRow } from "@/components/chat/WebSearchToolRow";
 import { WorkflowRunToolRow } from "@/components/chat/WorkflowRunToolRow";
-import { Button } from "@/components/ui/button";
+import { PluginSurface } from "@/components/PluginSurface";
+import { ProfileAvatar } from "@/components/ProfileAvatar";
+import { useAuth } from "@/context/use-auth";
+import { useTheme } from "@/context/use-theme";
+import { useOrgPlugins } from "@/hooks/use-plugins";
 import { useRafCoalescedValue } from "@/hooks/use-raf-coalesced-value";
 import { isArtifactMetaSidecarTool } from "@/lib/chat-artifacts";
-import type { ChatListItem } from "@/lib/chat-history";
+import { buildNewChatPath, type ChatListItem } from "@/lib/chat-history";
 import {
   formatSubAgentSubtitle,
   formatSubAgentTitle,
@@ -42,8 +57,8 @@ import {
 } from "@/lib/chat-stream-web-search";
 import { isRunWorkflowTool } from "@/lib/chat-stream-workflow";
 import { formatElapsedSeconds, useElapsedSeconds } from "@/lib/elapsed-time";
+import { findPluginTool } from "@/lib/plugin-runtime";
 import { splitStreamingMarkdown } from "@/lib/streaming-markdown-seal";
-import { cn } from "@/lib/utils";
 export function AssistantTurnSegmentView({
   segment,
   showThinking = true,
@@ -62,6 +77,7 @@ export function AssistantTurnSegmentView({
   if (segment.kind === "work") {
     return (
       <AssistantWorkGroup
+        active={segment.active ?? false}
         modelLabel={modelLabel}
         profileId={profileId}
         thinking={showThinking ? segment.thinking : undefined}
@@ -165,66 +181,89 @@ function AssistantTextContent({
   );
 }
 
+function PluginToolRow({ message }: { message: ChatListItem }) {
+  const plugins = useOrgPlugins().data ?? [];
+  const match = findPluginTool(plugins, message.tool);
+  const { activeOrg } = useAuth();
+  const { resolvedTheme } = useTheme();
+  const plugin = match?.plugin;
+  const fallback = <ToolTimelineItem message={message} />;
+  if (
+    !(match && activeOrg) ||
+    activeOrg.role === "viewer" ||
+    !plugin?.ui ||
+    plugin.lifecycleState !== "enabled"
+  ) {
+    return fallback;
+  }
+  return (
+    <PluginSurface
+      fallback={fallback}
+      key={`${activeOrg.id}:${plugin.pluginId}:${plugin.selectedVersion}:${plugin.revision}:${resolvedTheme}`}
+      orgId={activeOrg.id}
+      plugin={plugin}
+      theme={resolvedTheme}
+      tool={{
+        action: match.action,
+        input: message.toolInput,
+        result: message.toolResult,
+        status: message.toolStatus ?? "done",
+      }}
+    />
+  );
+}
+
 function AssistantWorkGroup({
+  active,
   thinking,
   tools,
   modelLabel,
   profileId,
 }: {
+  active: boolean;
   thinking?: ChatListItem;
   tools: ChatListItem[];
   modelLabel?: string | null;
   profileId?: string | null;
 }) {
-  const visibleTools = tools.filter((tool) => !isArtifactMetaSidecarTool(tool));
-  const workflowRunTools = visibleTools.filter((tool) =>
-    isRunWorkflowTool(tool.tool)
-  );
-  const otherTools = visibleTools.filter(
-    (tool) => !isRunWorkflowTool(tool.tool)
+  const visibleTools = tools.filter(
+    (tool) => !isArtifactMetaSidecarTool(tool) && tool.tool !== "create_profile"
   );
 
-  if (workflowRunTools.length === 0 && otherTools.length === 0 && !thinking) {
+  if (visibleTools.length === 0 && !thinking && !active) {
     return null;
   }
 
   return (
-    <div className="flex w-full max-w-full flex-col gap-3">
-      <OtherWorkGroup
-        modelLabel={modelLabel}
-        profileId={profileId}
-        thinking={thinking}
-        tools={otherTools}
-      />
-      {workflowRunTools.map((tool) => (
-        <WorkflowRunToolRow key={tool.id} message={tool} />
-      ))}
-    </div>
+    <OtherWorkGroup
+      active={active}
+      modelLabel={modelLabel}
+      profileId={profileId}
+      thinking={thinking}
+      tools={visibleTools}
+    />
   );
 }
 
 function OtherWorkGroup({
+  active,
   thinking,
   tools,
   modelLabel,
   profileId,
 }: {
+  active: boolean;
   thinking?: ChatListItem;
   tools: ChatListItem[];
   modelLabel?: string | null;
   profileId?: string | null;
 }) {
-  const isThinkingStreaming = Boolean(thinking?.thinkingStreaming);
-  const hasRunningTools = tools.some((tool) => tool.toolStatus === "running");
-  const isWorkActive = isThinkingStreaming || hasRunningTools;
-
-  if (tools.length === 0) {
-    return thinking ? <ThinkingBlock message={thinking} /> : null;
-  }
+  const isThinkingStreaming = active && Boolean(thinking?.thinkingStreaming);
 
   if (!thinking) {
     return (
       <ToolOnlyWorkGroup
+        isWorkActive={active}
         modelLabel={modelLabel}
         profileId={profileId}
         tools={tools}
@@ -236,24 +275,20 @@ function OtherWorkGroup({
     <ThinkingReasoning
       className="w-full max-w-full"
       isThinkingStreaming={isThinkingStreaming}
-      isWorkActive={isWorkActive}
+      isWorkActive={active}
       startedAt={thinking.createdAt}
       text={thinking.thinking ?? ""}
+      thinkingDurationMs={
+        tools.length === 0 && !active ? thinking.thinkingDurationMs : undefined
+      }
     >
       {tools.map((tool, index) => (
         <TimelineStep isLast={index === tools.length - 1} key={tool.id}>
-          {isDedicatedTool(tool) ? (
-            <DedicatedToolRow
-              message={tool}
-              modelLabel={modelLabel}
-              profileId={profileId}
-            />
-          ) : (
-            <ToolTimelineItem
-              defaultDetailsOpen={tools.length === 1}
-              message={tool}
-            />
-          )}
+          <ToolRow
+            message={tool}
+            modelLabel={modelLabel}
+            profileId={profileId}
+          />
         </TimelineStep>
       ))}
     </ThinkingReasoning>
@@ -261,26 +296,22 @@ function OtherWorkGroup({
 }
 
 function ToolOnlyWorkGroup({
+  isWorkActive,
   tools,
   modelLabel,
   profileId,
 }: {
+  isWorkActive: boolean;
   tools: ChatListItem[];
   modelLabel?: string | null;
   profileId?: string | null;
 }) {
-  const hasRunningTools = tools.some((tool) => tool.toolStatus === "running");
-  const isWorkActive = hasRunningTools;
   const [open, setOpen] = useState(isWorkActive);
-  const elapsedSeconds = useWorkDuration(isWorkActive, tools[0]?.createdAt);
+  const elapsedSeconds = useWorkDuration(isWorkActive, tools);
 
   useEffect(() => {
     if (isWorkActive) {
       setOpen(true);
-      return;
-    }
-
-    if (tools.length === 1) {
       return;
     }
 
@@ -290,7 +321,7 @@ function ToolOnlyWorkGroup({
     const delay = reducedMotion ? 0 : 360;
     const timerId = window.setTimeout(() => setOpen(false), delay);
     return () => window.clearTimeout(timerId);
-  }, [isWorkActive, tools.length]);
+  }, [isWorkActive]);
 
   const done = !isWorkActive;
   const expanded = done ? open : true;
@@ -311,12 +342,17 @@ function ToolOnlyWorkGroup({
       >
         {done ? (
           <span className={thinkingStyles.label}>
-            <span className={thinkingStyles.verb}>Used</span> {toolLabel} ·{" "}
-            {formatElapsedSeconds(elapsedSeconds)}
+            <span className={thinkingStyles.verb}>Used</span> {toolLabel}
+            {elapsedSeconds === null
+              ? null
+              : ` · ${formatElapsedSeconds(elapsedSeconds)}`}
           </span>
         ) : (
           <span className={cn(thinkingStyles.label, thinkingStyles.shimmer)}>
-            Working… · {formatElapsedSeconds(elapsedSeconds)}
+            Working…
+            {elapsedSeconds === null
+              ? null
+              : ` · ${formatElapsedSeconds(elapsedSeconds)}`}
           </span>
         )}
         {done ? (
@@ -350,18 +386,11 @@ function ToolOnlyWorkGroup({
             <div className={thinkingStyles.tools}>
               {tools.map((tool, index) => (
                 <TimelineStep isLast={index === tools.length - 1} key={tool.id}>
-                  {isDedicatedTool(tool) ? (
-                    <DedicatedToolRow
-                      message={tool}
-                      modelLabel={modelLabel}
-                      profileId={profileId}
-                    />
-                  ) : (
-                    <ToolTimelineItem
-                      defaultDetailsOpen={tools.length === 1}
-                      message={tool}
-                    />
-                  )}
+                  <ToolRow
+                    message={tool}
+                    modelLabel={modelLabel}
+                    profileId={profileId}
+                  />
                 </TimelineStep>
               ))}
             </div>
@@ -370,6 +399,36 @@ function ToolOnlyWorkGroup({
       </div>
     </div>
   );
+}
+
+function ToolRow({
+  message,
+  modelLabel,
+  profileId,
+}: {
+  message: ChatListItem;
+  modelLabel?: string | null;
+  profileId?: string | null;
+}) {
+  if (message.tool?.startsWith("plugin_")) {
+    return <PluginToolRow message={message} />;
+  }
+
+  if (isRunWorkflowTool(message.tool)) {
+    return <WorkflowRunToolRow message={message} />;
+  }
+
+  if (isDedicatedTool(message)) {
+    return (
+      <DedicatedToolRow
+        message={message}
+        modelLabel={modelLabel}
+        profileId={profileId}
+      />
+    );
+  }
+
+  return <ToolTimelineItem message={message} />;
 }
 
 function ThinkingBlock({ message }: { message: ChatListItem }) {
@@ -383,46 +442,25 @@ function ThinkingBlock({ message }: { message: ChatListItem }) {
       isWorkActive={isWorkActive}
       startedAt={message.createdAt}
       text={message.thinking ?? ""}
+      thinkingDurationMs={message.thinkingDurationMs}
     />
   );
 }
 
-function useWorkDuration(active: boolean, startedAt?: string): number {
-  const anchorRef = useRef<number | null>(null);
-  const frozenRef = useRef<number | null>(null);
-  const [elapsed, setElapsed] = useState(1);
-
+function useWorkDuration(
+  active: boolean,
+  tools: ChatListItem[]
+): number | null {
+  const [now, setNow] = useState(Date.now);
   useEffect(() => {
-    if (anchorRef.current === null) {
-      const parsed = startedAt ? new Date(startedAt).getTime() : Number.NaN;
-      anchorRef.current = Number.isNaN(parsed) ? Date.now() : parsed;
-    }
-
     if (!active) {
-      if (frozenRef.current === null) {
-        frozenRef.current = Math.max(
-          1,
-          Math.floor((Date.now() - anchorRef.current) / 1000)
-        );
-      }
-      setElapsed(frozenRef.current);
       return;
     }
-
-    frozenRef.current = null;
-
-    const update = () => {
-      setElapsed(
-        Math.max(1, Math.floor((Date.now() - anchorRef.current!) / 1000))
-      );
-    };
-
-    update();
-    const intervalId = window.setInterval(update, 1000);
+    setNow(Date.now());
+    const intervalId = window.setInterval(() => setNow(Date.now()), 1000);
     return () => window.clearInterval(intervalId);
-  }, [active, startedAt]);
-
-  return elapsed;
+  }, [active]);
+  return toolGroupElapsedSeconds(tools, now, active);
 }
 
 function isDedicatedTool(tool: ChatListItem): boolean {
@@ -468,6 +506,39 @@ function DedicatedToolRow({
   }
 
   return <SubAgentToolRow message={message} modelLabel={modelLabel} />;
+}
+
+export function ProfileCreatedCard({
+  profile,
+}: {
+  profile: {
+    hasAvatar: boolean;
+    id: string;
+    isSuper: boolean;
+    name: string;
+    updatedAt: string;
+  };
+}) {
+  return (
+    <div className="flex w-fit max-w-full items-center gap-3 rounded-xl bg-muted/40 p-3">
+      <div className="flex min-w-0 items-center gap-2.5">
+        <ProfileAvatar profile={profile} size="sm" />
+        <p className="truncate font-medium text-foreground text-sm">
+          {profile.name}
+        </p>
+      </div>
+      <Button
+        className="min-h-10 shrink-0 rounded-lg transition-transform active:scale-[0.96]"
+        render={<Link to={buildNewChatPath(profile.id)} />}
+        size="sm"
+        type="button"
+        variant="outline"
+      >
+        Start conversation
+        <ArrowRight01Icon aria-hidden className="size-4" />
+      </Button>
+    </div>
+  );
 }
 
 function subAgentStatusTone(status: string | undefined): string {
@@ -713,20 +784,6 @@ function SubAgentMark({
   );
 }
 
-function useToolDetailsOpen(isRunning: boolean, defaultDetailsOpen: boolean) {
-  const [detailsOpen, setDetailsOpen] = useState(defaultDetailsOpen);
-  const [prevIsRunning, setPrevIsRunning] = useState(isRunning);
-
-  if (isRunning !== prevIsRunning) {
-    setPrevIsRunning(isRunning);
-    if (isRunning) {
-      setDetailsOpen(true);
-    }
-  }
-
-  return { detailsOpen, setDetailsOpen };
-}
-
 function ToolTimelineOutput({
   command,
   isError,
@@ -793,13 +850,7 @@ function ToolTimelineDetails({
   );
 }
 
-function ToolTimelineItem({
-  message,
-  defaultDetailsOpen = false,
-}: {
-  message: ChatListItem;
-  defaultDetailsOpen?: boolean;
-}) {
+function ToolTimelineItem({ message }: { message: ChatListItem }) {
   const isRunning = message.toolStatus === "running";
   const command =
     message.tool === "bash"
@@ -813,10 +864,7 @@ function ToolTimelineItem({
     message.toolStatus === "done" &&
     isToolResultError(message.toolResult, output);
   const hasDetails = Boolean(isRunning || command || output);
-  const { detailsOpen, setDetailsOpen } = useToolDetailsOpen(
-    isRunning,
-    defaultDetailsOpen
-  );
+  const [detailsOpen, setDetailsOpen] = useState(false);
 
   return (
     <div>

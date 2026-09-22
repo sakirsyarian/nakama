@@ -79,9 +79,8 @@ function estimateTokens(text: string): number {
   return Math.ceil(text.length / TOKEN_ESTIMATE_RATIO);
 }
 
-// Gemini is the only provider whose mapper never replays the reasoning trace:
-// toGeminiAssistantParts sends content and toolCalls only, because replaying a
-// thought needs the thoughtSignature the parser drops. See #768.
+// Unsigned Gemini thinking is display-only. Signed parts are replayed and
+// counted through providerContent instead.
 export function providerReplaysThinking(provider: ProviderName): boolean {
   return provider !== "gemini";
 }
@@ -126,9 +125,29 @@ function estimateMessageTokens(
     }
 
     total += estimateTokens(message.content);
+    total += estimateUserContentTokens(message.attachments ?? []);
   }
 
   return total;
+}
+
+export interface HistoryTokenBreakdown {
+  conversation: number;
+  systemPrompt: number;
+  toolDefinitions: number;
+}
+
+export function estimateHistoryTokenBreakdown(
+  messages: readonly ChatMessage[],
+  systemPrompt: string,
+  tools?: LlmToolDefinition[],
+  replaysThinking = true
+): HistoryTokenBreakdown {
+  return {
+    conversation: estimateMessageTokens(messages, replaysThinking),
+    systemPrompt: estimateTokens(systemPrompt),
+    toolDefinitions: estimateTokens(JSON.stringify(tools ?? [])),
+  };
 }
 
 export function estimateHistoryTokens(
@@ -137,10 +156,14 @@ export function estimateHistoryTokens(
   tools?: LlmToolDefinition[],
   replaysThinking = true
 ): number {
+  const breakdown = estimateHistoryTokenBreakdown(
+    messages,
+    systemPrompt,
+    tools,
+    replaysThinking
+  );
   return (
-    estimateTokens(systemPrompt) +
-    estimateMessageTokens(messages, replaysThinking) +
-    estimateTokens(JSON.stringify(tools ?? []))
+    breakdown.systemPrompt + breakdown.conversation + breakdown.toolDefinitions
   );
 }
 
@@ -282,7 +305,9 @@ export function pruneToolOutputs(
       break;
     }
 
-    const estimate = estimateTokens(message.content);
+    const estimate =
+      estimateTokens(message.content) +
+      estimateUserContentTokens(message.attachments ?? []);
     total += estimate;
 
     if (total <= protect) {
@@ -303,7 +328,11 @@ export function pruneToolOutputs(
     if (!message || message.role !== "tool") {
       continue;
     }
-    messages[index] = { ...message, content: PRUNE_TRUNCATION };
+    messages[index] = {
+      ...message,
+      attachments: undefined,
+      content: PRUNE_TRUNCATION,
+    };
   }
 
   return { prunedTokens: pruned };

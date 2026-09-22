@@ -1,11 +1,12 @@
+import { Button } from "@nakama/ui/button";
+import { Spinner } from "@nakama/ui/spinner";
+import { cn } from "@nakama/ui/utils";
 import { Component, type ReactNode, Suspense } from "react";
 import {
   type RouteErrorState,
   routeErrorStateFromResetKey,
+  shouldReloadAfterRouteError,
 } from "@/components/route-error-state";
-import { Button } from "@/components/ui/button";
-import { Spinner } from "@/components/ui/spinner";
-import { cn } from "@/lib/utils";
 
 interface RouteBoundaryProps {
   children: ReactNode;
@@ -38,6 +39,9 @@ class RouteErrorBoundary extends Component<
       error?.message,
       errorInfo?.componentStack
     );
+    if (shouldReloadAfterRouteError(error?.message, sessionStorage)) {
+      window.location.reload();
+    }
   }
 
   render() {

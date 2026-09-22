@@ -1,20 +1,18 @@
 import type { OrgMemoryChangeLogEntry } from "@nakama/core/contract";
-import { EyeIcon, RotateLeft01Icon, TimelineIcon } from "hugeicons-react";
-import { useState } from "react";
-import { Button } from "@/components/ui/button";
+import { Button } from "@nakama/ui/button";
 import {
   Dialog,
   DialogContent,
   DialogDescription,
   DialogHeader,
   DialogTitle,
-} from "@/components/ui/dialog";
-import { Spinner } from "@/components/ui/spinner";
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipTrigger,
-} from "@/components/ui/tooltip";
+} from "@nakama/ui/dialog";
+import { Spinner } from "@nakama/ui/spinner";
+import { toast } from "@nakama/ui/toast";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@nakama/ui/tooltip";
+import { cn } from "@nakama/ui/utils";
+import { EyeIcon, RotateLeft01Icon, TimelineIcon } from "hugeicons-react";
+import { useState } from "react";
 import { useOrgMembers } from "@/hooks/use-org-members";
 import { useOrgMemory } from "@/hooks/use-org-memory";
 import {
@@ -28,8 +26,6 @@ import {
   formatSessionTimestamp,
 } from "@/lib/chat-history";
 import { formatError } from "@/lib/client";
-import { toast } from "@/lib/toast";
-import { cn } from "@/lib/utils";
 
 function shortenId(value: string): string {
   return value.length > 16 ? `${value.slice(0, 12)}…` : value;
@@ -269,9 +265,10 @@ function HistoryTimelineItem({
 export function OrgMemoryHistoryPanel({ orgId }: { orgId: string }) {
   const { data, isLoading, error } = useOrgMemoryHistory(orgId);
   const { data: memoryData } = useOrgMemory(orgId);
-  const undoMutation = useUndoOrgMemoryChange(orgId);
   const { data: membersData } = useOrgMembers(orgId);
   const changes = data?.changes ?? [];
+  const maxEntries = data?.maxEntries ?? 50;
+  const truncated = data?.truncated === true;
   const { data: latestRevision } = useOrgMemoryHistoryRevision(
     orgId,
     changes[0]?.id ?? null
@@ -287,6 +284,44 @@ export function OrgMemoryHistoryPanel({ orgId }: { orgId: string }) {
     liveContent !== undefined &&
     latestRevisionContent !== undefined &&
     changes.length >= (latestRevisionIsCurrent ? 2 : 1);
+
+  return (
+    <OrgMemoryHistoryPanelContent
+      canUndo={canUndo}
+      changes={changes}
+      error={error}
+      isLoading={isLoading}
+      latestRevisionIsCurrent={latestRevisionIsCurrent}
+      maxEntries={maxEntries}
+      members={members}
+      orgId={orgId}
+      truncated={truncated}
+    />
+  );
+}
+
+function OrgMemoryHistoryPanelContent({
+  canUndo,
+  changes,
+  latestRevisionIsCurrent,
+  maxEntries,
+  members,
+  orgId,
+  truncated,
+  error,
+  isLoading,
+}: {
+  canUndo: boolean;
+  changes: OrgMemoryChangeLogEntry[];
+  latestRevisionIsCurrent: boolean;
+  maxEntries: number;
+  members: { userId: string; name?: string | null; email: string }[];
+  orgId: string;
+  truncated: boolean;
+  error: unknown;
+  isLoading: boolean;
+}) {
+  const undoMutation = useUndoOrgMemoryChange(orgId);
 
   async function handleUndo() {
     try {
@@ -316,10 +351,17 @@ export function OrgMemoryHistoryPanel({ orgId }: { orgId: string }) {
   return (
     <div className="min-w-0">
       <div className="flex items-center justify-between gap-3 border-border border-b px-4 py-2">
-        <p className="text-muted-foreground text-xs">
-          Timeline of every change. View snapshots or revert to an earlier
-          revision.
-        </p>
+        <div className="min-w-0 space-y-1">
+          <p className="text-muted-foreground text-xs">
+            Timeline of every change. View snapshots or revert to an earlier
+            revision.
+          </p>
+          <p className="text-muted-foreground text-xs">
+            {truncated
+              ? `Keeping the newest ${maxEntries} revisions. Older snapshots were removed.`
+              : `Keeps up to ${maxEntries} revisions.`}
+          </p>
+        </div>
         <Button
           disabled={!canUndo || undoMutation.isPending}
           onClick={() => void handleUndo()}

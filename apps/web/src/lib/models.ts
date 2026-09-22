@@ -1,6 +1,7 @@
 import type {
   ConfigureProviderRequest,
   CreateProviderRequest,
+  CustomModelEntry,
   OllamaHostMode,
   ProviderModelOption,
   WireApi,
@@ -49,6 +50,9 @@ export function formatProviderLabel(
     provider === "openrouter" ||
     provider === "gemini" ||
     provider === "deepseek" ||
+    provider === "doubao" ||
+    provider === "mistral" ||
+    provider === "perplexity" ||
     provider === "cerebras" ||
     provider === "cloudflare" ||
     provider === "fireworks" ||
@@ -56,11 +60,19 @@ export function formatProviderLabel(
     provider === "openai_compatible" ||
     provider === "opencode_go" ||
     provider === "chatgpt" ||
+    provider === "xai_oauth" ||
     provider === "minimax" ||
     provider === "minimax_cn" ||
+    provider === "moonshot" ||
+    provider === "moonshot_cn" ||
     provider === "zhipu" ||
     provider === "zhipu_cn" ||
-    provider === "xai"
+    provider === "xai" ||
+    provider === "together" ||
+    provider === "xiaomi" ||
+    provider === "qwen" ||
+    provider === "qwen_cn" ||
+    provider === "vercel_ai_gateway"
   ) {
     return formatConfiguredProviderLabel(provider, displayName);
   }
@@ -72,10 +84,19 @@ export const PROVIDER_OPTIONS: Array<{ id: SelectedProvider; label: string }> =
   [
     { id: "openai", label: "OpenAI" },
     { id: "chatgpt", label: "ChatGPT (Plus/Pro)" },
+    { id: "xai_oauth", label: "Grok (SuperGrok / Premium+)" },
     { id: "anthropic", label: "Anthropic" },
     { id: "openrouter", label: "OpenRouter" },
     { id: "gemini", label: "Gemini" },
     { id: "deepseek", label: "DeepSeek" },
+    { id: "doubao", label: "Doubao (Volcengine)" },
+    { id: "together", label: "Together AI" },
+    { id: "xiaomi", label: "Xiaomi MiMo" },
+    { id: "vercel_ai_gateway", label: "Vercel AI Gateway" },
+    { id: "mistral", label: "Mistral" },
+    { id: "qwen", label: "Qwen (DashScope)" },
+    { id: "qwen_cn", label: "Qwen (DashScope CN)" },
+    { id: "perplexity", label: "Perplexity Sonar" },
     { id: "cerebras", label: "Cerebras" },
     { id: "cloudflare", label: "Cloudflare Worker AI" },
     { id: "fireworks", label: "Fireworks" },
@@ -84,6 +105,8 @@ export const PROVIDER_OPTIONS: Array<{ id: SelectedProvider; label: string }> =
     { id: "minimax", label: "MiniMax" },
     { id: "xai", label: "xAI Grok" },
     { id: "minimax_cn", label: "MiniMax (CN)" },
+    { id: "moonshot", label: "Moonshot Kimi" },
+    { id: "moonshot_cn", label: "Moonshot Kimi (CN)" },
     { id: "zhipu", label: "GLM (Z.ai)" },
     { id: "zhipu_cn", label: "GLM (CN)" },
     { id: "openai_compatible", label: "Custom (OpenAI-compatible)" },
@@ -217,7 +240,7 @@ export function validateApiKeyForProvider(
     return null;
   }
 
-  if (provider === "chatgpt") {
+  if (provider === "chatgpt" || provider === "xai_oauth") {
     return null;
   }
 
@@ -265,12 +288,24 @@ export function validateBaseUrlInput(baseUrl: string): string | null {
 }
 
 export function validateCustomModelsInput(
-  models: Array<{ id: string }>
+  models: Array<{
+    id: string;
+    inputPerMillionUsd?: number;
+    outputPerMillionUsd?: number;
+  }>
 ): string | null {
   const valid = models.filter((model) => model.id.trim());
 
   if (valid.length === 0) {
     return "Add at least one model.";
+  }
+
+  for (const row of valid) {
+    const hasInput = row.inputPerMillionUsd !== undefined;
+    const hasOutput = row.outputPerMillionUsd !== undefined;
+    if (hasInput !== hasOutput) {
+      return `Model "${row.id.trim()}" must set both input and output $/1M rates, or leave both blank.`;
+    }
   }
 
   return null;
@@ -293,12 +328,6 @@ export function validateOpenRouterModelsInput(
     if (slugError) {
       return slugError;
     }
-
-    const hasInput = row.inputPerMillionUsd !== undefined;
-    const hasOutput = row.outputPerMillionUsd !== undefined;
-    if (hasInput !== hasOutput) {
-      return `Model "${row.id.trim()}" must set both input and output $/1M rates, or leave both blank.`;
-    }
   }
 
   return null;
@@ -311,20 +340,7 @@ export function validateShortlistCapabilityModelsInput(
     outputPerMillionUsd?: number;
   }>
 ): string | null {
-  const listError = validateCustomModelsInput(models);
-  if (listError) {
-    return listError;
-  }
-
-  for (const row of models) {
-    const hasInput = row.inputPerMillionUsd !== undefined;
-    const hasOutput = row.outputPerMillionUsd !== undefined;
-    if (hasInput !== hasOutput) {
-      return `Model "${row.id.trim()}" must set both input and output $/1M rates, or leave both blank.`;
-    }
-  }
-
-  return null;
+  return validateCustomModelsInput(models);
 }
 
 export function defaultOllamaSetupBaseUrl(hostMode: OllamaHostMode): string {
@@ -458,86 +474,25 @@ export function modelsFromOpenRouterRows(
 }
 
 export function appendOpenRouterModelRow(
-  rows: Array<{
-    id: string;
-    name?: string;
-    default?: boolean;
-    inputPerMillionUsd?: number;
-    outputPerMillionUsd?: number;
-  }>,
+  rows: CustomModelEntry[],
   modelId: string,
   modelName: string,
-  pricing?: { inputPerMillionUsd?: number; outputPerMillionUsd?: number }
-): Array<{
-  id: string;
-  name: string;
-  default?: boolean;
-  inputPerMillionUsd?: number;
-  outputPerMillionUsd?: number;
-}> {
-  const base: Array<{
-    id: string;
-    name: string;
-    default?: boolean;
-    inputPerMillionUsd?: number;
-    outputPerMillionUsd?: number;
-  }> = [];
-
-  for (const row of rows) {
-    if (!row.id.trim()) {
-      continue;
-    }
-
-    base.push({
-      id: row.id,
+  extra?: Partial<CustomModelEntry>
+): CustomModelEntry[] {
+  // Spread rather than copying known keys, so anything the browse row carries
+  // (pricing, context window) survives instead of being silently dropped.
+  const base = rows
+    .filter((row) => row.id.trim())
+    .map(({ default: _wasDefault, ...row }) => ({
+      ...row,
       name: row.name ?? row.id,
-      ...(row.default ? { default: true } : {}),
-      ...(row.inputPerMillionUsd === undefined
-        ? {}
-        : { inputPerMillionUsd: row.inputPerMillionUsd }),
-      ...(row.outputPerMillionUsd === undefined
-        ? {}
-        : { outputPerMillionUsd: row.outputPerMillionUsd }),
-    });
-  }
+    }));
 
   if (base.some((row) => row.id === modelId)) {
-    return base.map((row) => ({
-      default: row.id === modelId,
-      id: row.id,
-      name: row.name ?? row.id,
-      ...(row.inputPerMillionUsd === undefined
-        ? {}
-        : { inputPerMillionUsd: row.inputPerMillionUsd }),
-      ...(row.outputPerMillionUsd === undefined
-        ? {}
-        : { outputPerMillionUsd: row.outputPerMillionUsd }),
-    }));
+    return base.map((row) => ({ ...row, default: row.id === modelId }));
   }
 
-  return [
-    ...base.map((row) => ({
-      id: row.id,
-      name: row.name ?? row.id,
-      ...(row.inputPerMillionUsd === undefined
-        ? {}
-        : { inputPerMillionUsd: row.inputPerMillionUsd }),
-      ...(row.outputPerMillionUsd === undefined
-        ? {}
-        : { outputPerMillionUsd: row.outputPerMillionUsd }),
-    })),
-    {
-      default: true,
-      id: modelId,
-      name: modelName,
-      ...(pricing?.inputPerMillionUsd === undefined
-        ? {}
-        : { inputPerMillionUsd: pricing.inputPerMillionUsd }),
-      ...(pricing?.outputPerMillionUsd === undefined
-        ? {}
-        : { outputPerMillionUsd: pricing.outputPerMillionUsd }),
-    },
-  ];
+  return [...base, { ...extra, default: true, id: modelId, name: modelName }];
 }
 
 export function resolveOpenRouterSetupModel(
@@ -589,94 +544,36 @@ export function buildCreateProviderRequest(options: {
   customModels?: ConfigureProviderRequest["customModels"];
   wireApi?: WireApi;
   chatgptOAuth?: CreateProviderRequest["chatgptOAuth"];
+  xaiOAuth?: CreateProviderRequest["xaiOAuth"];
 }): CreateProviderRequest {
-  const request = buildConfigureProviderRequest(options);
+  const customModels =
+    options.provider === "openai_compatible" ||
+    ([
+      "openrouter",
+      "xai_oauth",
+      "cerebras",
+      "fireworks",
+      "ollama",
+      "opencode_go",
+    ].includes(options.provider) &&
+      options.customModels?.length)
+      ? options.customModels
+      : undefined;
 
   return {
-    apiKey: request.apiKey,
-    type: request.provider,
+    apiKey: options.apiKey,
+    type: options.provider,
+    ...(options.xaiOAuth ? { xaiOAuth: options.xaiOAuth } : {}),
     ...(options.chatgptOAuth ? { chatgptOAuth: options.chatgptOAuth } : {}),
-    ...(request.model ? { model: request.model } : {}),
+    ...(options.model ? { model: options.model } : {}),
     ...(options.displayName?.trim()
       ? { label: options.displayName.trim() }
       : {}),
     ...(options.baseUrl?.trim() ? { baseUrl: options.baseUrl.trim() } : {}),
     ...(options.hostMode ? { hostMode: options.hostMode } : {}),
-    ...(request.customModels ? { customModels: request.customModels } : {}),
+    ...(customModels ? { customModels } : {}),
     ...(options.wireApi === "responses" ? { wireApi: options.wireApi } : {}),
   };
-}
-
-export function buildConfigureProviderRequest(options: {
-  apiKey: string;
-  provider: SelectedProvider;
-  model?: string;
-  displayName?: string;
-  baseUrl?: string;
-  hostMode?: OllamaHostMode;
-  customModels?: ConfigureProviderRequest["customModels"];
-}): ConfigureProviderRequest {
-  const request: ConfigureProviderRequest = {
-    apiKey: options.apiKey,
-    provider: options.provider,
-    ...(options.model ? { model: options.model } : {}),
-  };
-
-  if (options.provider === "openai_compatible") {
-    return {
-      ...request,
-      baseUrl: options.baseUrl?.trim(),
-      customModels: options.customModels,
-      displayName: options.displayName?.trim(),
-    };
-  }
-
-  if (options.provider === "openrouter" && options.customModels?.length) {
-    return {
-      ...request,
-      customModels: options.customModels,
-    };
-  }
-
-  if (options.provider === "cerebras" && options.customModels?.length) {
-    return {
-      ...request,
-      customModels: options.customModels,
-    };
-  }
-
-  if (options.provider === "fireworks" && options.customModels?.length) {
-    return {
-      ...request,
-      customModels: options.customModels,
-    };
-  }
-
-  if (options.provider === "ollama" && options.customModels?.length) {
-    return {
-      ...request,
-      baseUrl: options.baseUrl?.trim(),
-      customModels: options.customModels,
-    };
-  }
-
-  if (options.provider === "opencode_go" && options.customModels?.length) {
-    return {
-      ...request,
-      customModels: options.customModels,
-    };
-  }
-
-  if (options.provider === "opencode_go") {
-    return request;
-  }
-
-  const baseUrl = options.baseUrl?.trim();
-  if (baseUrl) {
-    return { ...request, baseUrl };
-  }
-
-  return request;
 }
 
 export function encodeModelSelection(
@@ -775,6 +672,38 @@ export function profileModelSelectionValue(
   return encodeModelSelection("__unknown__", resolvedModelId);
 }
 
+/**
+ * Drop a remembered selection whose provider or model is gone, so a stale pick
+ * falls back to the profile default instead of a model nobody can pick. An
+ * explicit provider is never remapped onto another one offering the same model
+ * id; empty groups mean the catalog has not loaded yet, so keep the selection.
+ */
+export function knownModelSelection(
+  selection: string | null | undefined,
+  groups: ReturnType<typeof groupModelsByProvider>
+): string | null {
+  if (!selection) {
+    return null;
+  }
+
+  if (groups.length === 0) {
+    return selection;
+  }
+
+  const decoded = decodeModelSelection(selection);
+  const modelId = decoded?.modelId ?? selection;
+  const pinnedProvider =
+    decoded && decoded.providerId !== "__unknown__" ? decoded.providerId : null;
+
+  const match = groups.find(
+    (group) =>
+      (!pinnedProvider || group.providerId === pinnedProvider) &&
+      group.models.some((model) => model.id === modelId)
+  );
+
+  return match ? encodeModelSelection(match.providerId, modelId) : null;
+}
+
 export function profileModelLabel(
   modelId: string | null,
   groups: ReturnType<typeof groupModelsByProvider>
@@ -857,6 +786,14 @@ export function resolveModelThinkingSupport(
     model.provider === "openai_compatible" ||
     model.provider === "openrouter" ||
     model.provider === "deepseek" ||
+    model.provider === "doubao" ||
+    model.provider === "together" ||
+    model.provider === "xiaomi" ||
+    model.provider === "vercel_ai_gateway" ||
+    model.provider === "mistral" ||
+    model.provider === "qwen" ||
+    model.provider === "qwen_cn" ||
+    model.provider === "perplexity" ||
     model.provider === "cerebras" ||
     model.provider === "fireworks" ||
     model.provider === "ollama"
@@ -906,6 +843,14 @@ export function resolveModelVisionSupport(
     model.provider === "openai_compatible" ||
     model.provider === "opencode_go" ||
     model.provider === "deepseek" ||
+    model.provider === "doubao" ||
+    model.provider === "together" ||
+    model.provider === "xiaomi" ||
+    model.provider === "vercel_ai_gateway" ||
+    model.provider === "mistral" ||
+    model.provider === "qwen" ||
+    model.provider === "qwen_cn" ||
+    model.provider === "perplexity" ||
     model.provider === "cerebras" ||
     model.provider === "fireworks" ||
     model.provider === "ollama" ||

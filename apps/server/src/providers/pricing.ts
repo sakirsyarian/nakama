@@ -3,9 +3,15 @@ import {
   type ProviderInstance,
   type ProviderName,
 } from "@nakama/core";
+import { DISCOVERY_MODEL_PROVIDERS } from "@nakama/core/discovery-providers";
 import { getModelById, IMAGE_GENERATION_MODEL_ID } from "./models";
 
 export interface ModelPricing {
+  /**
+   * USD per 1M input tokens served from the provider's prompt cache. Falls back
+   * to the full input rate when a model does not publish one.
+   */
+  cachedInputPerMillionUsd?: number;
   /** USD per 1M input tokens */
   inputPerMillionUsd: number;
   /** USD per 1M output tokens */
@@ -48,6 +54,9 @@ function getCustomModelPricing(
     entry.outputPerMillionUsd !== undefined
   ) {
     return {
+      ...(entry.cachedInputPerMillionUsd === undefined
+        ? {}
+        : { cachedInputPerMillionUsd: entry.cachedInputPerMillionUsd }),
       inputPerMillionUsd: entry.inputPerMillionUsd,
       outputPerMillionUsd: entry.outputPerMillionUsd,
     };
@@ -56,7 +65,32 @@ function getCustomModelPricing(
   return null;
 }
 
-export function getModelPricing(
+/**
+ * Providers whose rates only ever come from what the user typed in. Discovery
+ * providers belong here by construction: their catalogs are fetched from the
+ * platform at runtime, so there is never a bundled entry to price against and
+ * DEFAULT_PRICING would be a guess presented as a rate.
+ */
+const USER_PRICED_PROVIDERS = new Set<ProviderName>([
+  ...DISCOVERY_MODEL_PROVIDERS,
+  "cerebras",
+  "fireworks",
+  "ollama",
+  "openrouter",
+]);
+
+function isUserPriced(context: PricingContext): boolean {
+  const provider = context.provider ?? context.providerInstance?.type ?? null;
+  return provider !== null && USER_PRICED_PROVIDERS.has(provider);
+}
+
+/**
+ * Rates somebody actually published for this model: the image table, the
+ * catalog entry, or what the user typed for a custom model. Null when the only
+ * number available would be DEFAULT_PRICING, so a caller that shows money to a
+ * user can tell a real rate from a house guess.
+ */
+export function getExplicitModelPricing(
   modelId: string,
   context: PricingContext = {}
 ): ModelPricing | null {
@@ -65,15 +99,7 @@ export function getModelPricing(
     return imagePricing;
   }
 
-  const provider = context.provider ?? context.providerInstance?.type ?? null;
-
-  if (
-    provider === "openai_compatible" ||
-    provider === "openrouter" ||
-    provider === "cerebras" ||
-    provider === "fireworks" ||
-    provider === "ollama"
-  ) {
+  if (isUserPriced(context)) {
     return getCustomModelPricing(modelId, context);
   }
 
@@ -89,14 +115,28 @@ export function getModelPricing(
     };
   }
 
-  return DEFAULT_PRICING;
+  return null;
+}
+
+export function getModelPricing(
+  modelId: string,
+  context: PricingContext = {}
+): ModelPricing | null {
+  const explicit = getExplicitModelPricing(modelId, context);
+
+  if (explicit) {
+    return explicit;
+  }
+
+  return isUserPriced(context) ? null : DEFAULT_PRICING;
 }
 
 export function estimateUsageCostUsd(
   modelId: string,
   inputTokens: number,
   outputTokens: number,
-  context: PricingContext = {}
+  context: PricingContext = {},
+  cachedInputTokens = 0
 ): number {
   const pricing = getModelPricing(modelId, context);
 
@@ -104,9 +144,17 @@ export function estimateUsageCostUsd(
     return 0;
   }
 
-  const inputCost = (inputTokens / 1_000_000) * pricing.inputPerMillionUsd;
+  // A provider reporting more cached than total input would otherwise price
+  // the remainder negatively.
+  const cached = Math.min(Math.max(cachedInputTokens, 0), inputTokens);
+  const fresh = inputTokens - cached;
+  const cachedRate =
+    pricing.cachedInputPerMillionUsd ?? pricing.inputPerMillionUsd;
+
+  const inputCost = (fresh / 1_000_000) * pricing.inputPerMillionUsd;
+  const cachedCost = (cached / 1_000_000) * cachedRate;
   const outputCost = (outputTokens / 1_000_000) * pricing.outputPerMillionUsd;
-  return inputCost + outputCost;
+  return inputCost + cachedCost + outputCost;
 }
 
 export function hasCatalogPricing(

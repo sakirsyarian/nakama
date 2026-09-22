@@ -1,6 +1,6 @@
+import { Button } from "@nakama/ui/button";
 import { Delete02Icon } from "hugeicons-react";
 import { ComposioToolkitAssignPicker } from "@/components/ComposioToolkitAssignPicker";
-import { Button } from "@/components/ui/button";
 import type { RemoveAssignmentTarget } from "@/pages/profiles/profiles-page.shared";
 import type { ProfilesPageState } from "@/pages/profiles/use-profiles-page";
 
@@ -27,7 +27,9 @@ export function ProfileComposioSection({
     <div className="pt-5">
       <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
         <div>
-          <h3 className="type-section-title">Composio toolkits</h3>
+          <h3 className="font-normal text-muted-foreground/55 text-sm">
+            Composio toolkits
+          </h3>
           {assignedComposioToolkits.length > 0 ? (
             <p className="type-body mt-1 text-xs">
               {assignedComposioToolkits.length} assigned
@@ -47,11 +49,11 @@ export function ProfileComposioSection({
           Ask an org admin to enable apps on Integrations first.
         </p>
       ) : assignedComposioToolkits.length === 0 ? null : (
-        <ul className="divide-y divide-border rounded-md border border-border">
+        <ul className="divide-y divide-border overflow-hidden rounded-xl border border-border bg-card">
           {assignedComposioToolkits.map(
             ({ toolkit, userConnection, assignment }) => (
               <li
-                className="flex items-center justify-between gap-2 px-3 py-2 first:rounded-t-md last:rounded-b-md"
+                className="flex items-center justify-between gap-2 px-4 py-3"
                 key={toolkit.id}
               >
                 <div className="min-w-0">

@@ -5,21 +5,26 @@ import type {
   DocumentAttachment,
   ImageAttachment,
   KnowledgeBaseDuplicateAction,
+  SessionSummary,
   SoulStackFiles,
   UpdateProfileRequest,
   UpdateSessionRequest,
   UserContextStatusResponse,
+  WorkspaceEntry,
 } from "@nakama/core/contract";
 import {
-  useInfiniteQuery,
   useMutation,
   useQueries,
   useQuery,
   useQueryClient,
 } from "@tanstack/react-query";
+import { useMemo } from "react";
+import { useRunningTurnsStore } from "@/context/running-turns-store";
+import { useAuth } from "@/context/use-auth";
 import { HISTORY_SESSION_CHANNELS } from "@/lib/chat-history";
 import { client } from "@/lib/client";
 import { queryKeys } from "@/lib/query-keys";
+import { sessionListPollInterval } from "@/lib/session-list";
 
 const EMPTY_USER_CONTEXT: UserContextStatusResponse = {
   active: false,
@@ -119,6 +124,16 @@ export function useUpdateSessionMutation() {
     },
   });
 }
+export function useDeleteSessionMutation() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: (sessionId: string) => client.deleteSession(sessionId),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ["sessions"] });
+    },
+  });
+}
 
 export function useCloneProfileMutation() {
   const queryClient = useQueryClient();
@@ -191,14 +206,24 @@ export function useAssignToolMutation() {
   const queryClient = useQueryClient();
 
   return useMutation({
-    mutationFn: ({
+    mutationFn: async ({
       profileId,
       toolId,
     }: {
       profileId: string;
-      toolId: string;
-    }) => client.assignTool(profileId, { toolId }),
-    onSuccess: async (_data, variables) => {
+      toolId: string | string[];
+    }) => {
+      const results = await Promise.allSettled(
+        (Array.isArray(toolId) ? toolId : [toolId]).map((id) =>
+          client.assignTool(profileId, { toolId: id })
+        )
+      );
+      const failure = results.find((result) => result.status === "rejected");
+      if (failure?.status === "rejected") {
+        throw failure.reason;
+      }
+    },
+    onSettled: async (_data, _error, variables) => {
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: queryKeys.profiles.all }),
         queryClient.invalidateQueries({
@@ -213,14 +238,24 @@ export function useUnassignToolMutation() {
   const queryClient = useQueryClient();
 
   return useMutation({
-    mutationFn: ({
+    mutationFn: async ({
       profileId,
       toolId,
     }: {
       profileId: string;
-      toolId: string;
-    }) => client.unassignTool(profileId, toolId),
-    onSuccess: async (_data, variables) => {
+      toolId: string | string[];
+    }) => {
+      const results = await Promise.allSettled(
+        (Array.isArray(toolId) ? toolId : [toolId]).map((id) =>
+          client.unassignTool(profileId, id)
+        )
+      );
+      const failure = results.find((result) => result.status === "rejected");
+      if (failure?.status === "rejected") {
+        throw failure.reason;
+      }
+    },
+    onSettled: async (_data, _error, variables) => {
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: queryKeys.profiles.all }),
         queryClient.invalidateQueries({
@@ -476,18 +511,42 @@ export function useUnassignSkillMutation() {
 }
 
 export function useHistorySessionsQuery(profileId: string) {
+  const runningSessionIds = useRunningTurnsStore((state) => state.sessionIds);
+  // Turns are only ever started from the web chat page, so the other channels
+  // have no reason to poll along with it.
+  const localTurn = runningSessionIds.length > 0;
+  const runningSessionIdSet = new Set(runningSessionIds);
+
   const results = useQueries({
     queries: HISTORY_SESSION_CHANNELS.map((channel) => ({
       enabled: Boolean(profileId),
       queryFn: async () =>
         (await client.listSessions(profileId, channel)).sessions,
       queryKey: queryKeys.sessions(profileId, channel),
+      // A title is written after the turn returns and a turn ends without
+      // telling anyone, so the list has to look again. Gated per channel, so a
+      // quiet list makes no requests at all.
+      refetchInterval: (query: { state: { data?: SessionSummary[] } }) =>
+        sessionListPollInterval(query.state.data, {
+          localTurn: channel === "web" && localTurn,
+        }),
     })),
   });
 
   const sessions = results
     .flatMap((result) => result.data ?? [])
-    .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+    // The server answers from its own registry, which this tab can be ahead of
+    // for the moment between starting a turn and the list catching up.
+    .map((session) =>
+      session.active || !runningSessionIdSet.has(session.id)
+        ? session
+        : { ...session, active: true }
+    )
+    .sort(
+      (left, right) =>
+        Number(right.pinned) - Number(left.pinned) ||
+        right.updatedAt.localeCompare(left.updatedAt)
+    );
 
   return {
     data: sessions,
@@ -506,6 +565,14 @@ export function useSoulStatusQuery(profileId: string | null) {
   });
 }
 
+export function useOrganizationKnowledgeBaseQuery(orgId: string | null) {
+  return useQuery({
+    enabled: Boolean(orgId),
+    queryFn: () => client.listOrganizationKnowledgeBase(orgId!),
+    queryKey: queryKeys.knowledgeBase.organization(orgId ?? ""),
+  });
+}
+
 export function useKnowledgeBaseQuery(profileId: string | null) {
   return useQuery({
     enabled: Boolean(profileId),
@@ -514,22 +581,45 @@ export function useKnowledgeBaseQuery(profileId: string | null) {
   });
 }
 
-export const ARTIFACTS_PAGE_SIZE = 30;
+const EMPTY_PINNED_FILES: WorkspaceEntry[] = [];
 
-export function useArtifactsInfiniteQuery(profileId: string | null) {
-  return useInfiniteQuery({
+export function useFilePins(profileId: string | null, enabled: boolean) {
+  const { activeOrg, user } = useAuth();
+  const queryClient = useQueryClient();
+  const pins = useQuery({
+    enabled: Boolean(enabled && profileId && activeOrg),
+    queryFn: () => client.listProfileFilePins(profileId!),
+    queryKey: ["file-pins", activeOrg?.id, user?.id, profileId],
+  });
+  const mutation = useMutation({
+    mutationFn: (body: { path: string; pinned: boolean }) =>
+      client.setProfileFilePinned(profileId!, body),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["file-pins"] }),
+  });
+  const entries = pins.data?.entries ?? EMPTY_PINNED_FILES;
+  const pending = pins.isPending || pins.isError || mutation.isPending;
+  const { mutate } = mutation;
+  const controls = useMemo(
+    () => ({
+      paths: new Set(entries.map((entry) => entry.path)),
+      pending,
+      toggle: (path: string, pinned: boolean) => mutate({ path, pinned }),
+    }),
+    [entries, pending, mutate]
+  );
+  return { controls, entries, error: pins.error || mutation.error };
+}
+
+export function useArtifactsQuery(profileId: string | null, folder = "") {
+  return useQuery({
     enabled: Boolean(profileId),
-    getNextPageParam: (lastPage) => {
-      const nextOffset = (lastPage.offset ?? 0) + lastPage.artifacts.length;
-      return nextOffset < lastPage.total ? nextOffset : undefined;
-    },
-    initialPageParam: 0,
-    queryFn: ({ pageParam }: { pageParam: number }) =>
-      client.listProfileArtifacts(profileId!, {
-        limit: ARTIFACTS_PAGE_SIZE,
-        offset: pageParam,
-      }),
-    queryKey: queryKeys.artifacts.profile(profileId ?? ""),
+    // ponytail: fetch metadata once; paginate directory entries server-side if listings outgrow this response.
+    queryFn: () => client.listProfileArtifacts(profileId!, { folder }),
+    queryKey: [
+      ...queryKeys.artifacts.profile(profileId ?? ""),
+      "listing",
+      folder,
+    ],
   });
 }
 
@@ -566,6 +656,7 @@ export function useDeleteArtifactMutation() {
       filename: string;
     }) => client.deleteProfileArtifact(profileId, filename),
     onSuccess: async (_data, variables) => {
+      await queryClient.invalidateQueries({ queryKey: ["file-pins"] });
       await queryClient.invalidateQueries({
         queryKey: queryKeys.artifacts.profile(variables.profileId),
       });
@@ -680,30 +771,6 @@ export function useSoulFileQuery(
   });
 }
 
-export function usePurgeSessionMutation() {
-  const queryClient = useQueryClient();
-
-  return useMutation({
-    mutationFn: ({
-      sessionId,
-      channel = "web",
-    }: {
-      profileId: string;
-      sessionId: string;
-      channel?: AgentChannel;
-    }) => client.createChatSession(sessionId, channel).purge(),
-    onSuccess: async (_data, variables) => {
-      await Promise.all(
-        HISTORY_SESSION_CHANNELS.map((channel) =>
-          queryClient.invalidateQueries({
-            queryKey: queryKeys.sessions(variables.profileId, channel),
-          })
-        )
-      );
-    },
-  });
-}
-
 export function useBranchSessionMutation() {
   const queryClient = useQueryClient();
 
@@ -769,17 +836,6 @@ export function useUserContextQuery(
   });
 }
 
-export function useInitUserContextMutation() {
-  const queryClient = useQueryClient();
-
-  return useMutation({
-    mutationFn: () => client.initUserContext(),
-    onSuccess: async () => {
-      await queryClient.invalidateQueries({ queryKey: queryKeys.userContext });
-    },
-  });
-}
-
 export function useWriteUserContextMutation() {
   const queryClient = useQueryClient();
 
@@ -804,6 +860,44 @@ export function useUploadKnowledgeBaseDocumentMutation() {
       document: DocumentAttachment;
       onDuplicate?: KnowledgeBaseDuplicateAction;
     }) => client.uploadKnowledgeBaseDocument(profileId, document, onDuplicate),
+    onSuccess: async (_data, variables) => {
+      await queryClient.invalidateQueries({
+        queryKey: queryKeys.knowledgeBase.profile(variables.profileId),
+      });
+    },
+  });
+}
+
+export function useAttachSharedKnowledgeBaseDocumentMutation() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: ({
+      profileId,
+      documentId,
+    }: {
+      profileId: string;
+      documentId: string;
+    }) => client.attachSharedKnowledgeBaseDocument(profileId, documentId),
+    onSuccess: async (_data, variables) => {
+      await queryClient.invalidateQueries({
+        queryKey: queryKeys.knowledgeBase.profile(variables.profileId),
+      });
+    },
+  });
+}
+
+export function useDetachSharedKnowledgeBaseDocumentMutation() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: ({
+      profileId,
+      documentId,
+    }: {
+      profileId: string;
+      documentId: string;
+    }) => client.detachSharedKnowledgeBaseDocument(profileId, documentId),
     onSuccess: async (_data, variables) => {
       await queryClient.invalidateQueries({
         queryKey: queryKeys.knowledgeBase.profile(variables.profileId),

@@ -10,8 +10,11 @@ import {
   getOrgMemoryDir,
   getOrgMemoryFilePath,
   getOrgMemoryHistoryEntry,
+  type ListOrgMemoryHistoryResponse,
   listOrgMemoryHistory,
+  listOrgMemoryHistoryWithCap,
   NakamaApiError,
+  normalizeOrgMemoryBullet,
   normalizeOrgMemoryDedupKey,
   ORG_MEMORY_PREAMBLE,
   type OrgMemoryChangeAction,
@@ -27,9 +30,36 @@ import {
   writeTextFile,
 } from "@nakama/core/fs";
 import type { DatabaseAdapter, StoredOrgMemoryProposal } from "@nakama/db";
+import { MemoryBackendService } from "./memory-backend-service";
 
 const SUMMARY_BYTE_CAP = 2048;
 const MAX_PROPOSAL_BULLET_LENGTH = 500;
+const MAX_SOURCE_DOCUMENT_IDS = 20;
+
+function normalizeSourceDocumentIds(
+  value: string[] | null | undefined
+): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const seen = new Set<string>();
+  const ids: string[] = [];
+  for (const entry of value) {
+    if (typeof entry !== "string") {
+      continue;
+    }
+    const id = entry.trim();
+    if (!id || seen.has(id)) {
+      continue;
+    }
+    seen.add(id);
+    ids.push(id);
+    if (ids.length >= MAX_SOURCE_DOCUMENT_IDS) {
+      break;
+    }
+  }
+  return ids;
+}
 
 export interface OrgMemoryContent {
   content: string;
@@ -59,7 +89,6 @@ export interface ProposeOrgMemoryResult {
   message: string;
   outcome: ProposeOrgMemoryOutcome;
   proposalId?: string;
-  warnings?: string[];
 }
 
 export interface ProposeOrgMemoryInput {
@@ -67,10 +96,12 @@ export interface ProposeOrgMemoryInput {
   profileId?: string | null;
   proposedByUserId?: string | null;
   sessionId?: string | null;
+  sourceDocumentIds?: string[] | null;
 }
 
 export interface OrgMemoryServiceOptions {
   configDir?: string;
+  memoryBackend?: MemoryBackendService;
 }
 
 export interface OrgMemoryChangeContext {
@@ -80,11 +111,39 @@ export interface OrgMemoryChangeContext {
   restoredFromId?: string | null;
 }
 
+/**
+ * Both sides on purpose. Normalization collapses newlines, so the raw bullet is
+ * the only place a line-anchored pattern can still be seen: `x\n## Pinned`
+ * matches raw and not normalized. The reverse is also true, since collapsing
+ * joins a pattern split across a newline: `ignore all\nprevious` matches
+ * normalized and not raw. Checking one side leaves the other open.
+ */
+function assertNoOrgMemoryInjection(raw: string, normalized: string): void {
+  const injection = [
+    ...new Set([
+      ...detectOrgMemoryInjectionWarnings(raw),
+      ...detectOrgMemoryInjectionWarnings(normalized),
+    ]),
+  ];
+
+  if (injection.length > 0) {
+    throw new NakamaApiError(
+      `Memory bullet rejected. ${injection.join(" ")}`,
+      400
+    );
+  }
+}
+
 export class OrgMemoryService {
+  private readonly memoryBackend: MemoryBackendService | null;
   constructor(
     private readonly database: DatabaseAdapter | null = null,
     private readonly options: OrgMemoryServiceOptions = {}
-  ) {}
+  ) {
+    this.memoryBackend =
+      options.memoryBackend ??
+      (database ? new MemoryBackendService(database, options) : null);
+  }
 
   /**
    * Read the live org MEMORY.md. Returns the canonical preamble when the file
@@ -94,10 +153,20 @@ export class OrgMemoryService {
     const existing = await readTextIfExists(
       getOrgMemoryFilePath(orgId, this.options.configDir)
     );
-    if (!existing || existing.trim().length === 0) {
-      return `${ORG_MEMORY_PREAMBLE}\n`;
+    const content = existing?.trim() ? existing : `${ORG_MEMORY_PREAMBLE}\n`;
+    if (!this.memoryBackend) {
+      return content;
     }
-    return existing;
+    const raw = existing
+      ? await readText(getOrgMemoryFilePath(orgId, this.options.configDir))
+      : content;
+    const stored = await this.memoryBackend.readMemory(
+      orgId,
+      null,
+      "MEMORY.md",
+      raw
+    );
+    return existing ? stored.trim() : stored;
   }
 
   /** Render the `## Org Memory` section injected into profile system prompts. */
@@ -137,8 +206,8 @@ export class OrgMemoryService {
   async listHistory(
     orgId: string,
     limit?: number
-  ): Promise<OrgMemoryChangeLogEntry[]> {
-    return listOrgMemoryHistory(orgId, limit, this.options.configDir);
+  ): Promise<ListOrgMemoryHistoryResponse> {
+    return listOrgMemoryHistoryWithCap(orgId, limit, this.options.configDir);
   }
 
   async getHistoryRevision(orgId: string, revisionId: string) {
@@ -445,7 +514,6 @@ export class OrgMemoryService {
     input: ProposeOrgMemoryInput
   ): Promise<ProposeOrgMemoryResult> {
     const text = this.normalizeProposalBullet(input.bullet);
-    const warnings = detectOrgMemoryInjectionWarnings(text);
     const content = await this.getMemory(orgId);
     const parsed = parseOrgMemoryContent(content);
     const dedupKey = normalizeOrgMemoryDedupKey(text);
@@ -481,10 +549,12 @@ export class OrgMemoryService {
         message: "This fact is already awaiting admin approval.",
         outcome: "already_pending",
         proposalId: pending.id,
-        warnings: warnings.length > 0 ? warnings : undefined,
       };
     }
 
+    const sourceDocumentIds = normalizeSourceDocumentIds(
+      input.sourceDocumentIds
+    );
     const now = new Date().toISOString();
     const proposal: StoredOrgMemoryProposal = {
       bullet: text,
@@ -497,6 +567,7 @@ export class OrgMemoryService {
       reviewedAt: null,
       reviewerUserId: null,
       sessionId: input.sessionId ?? null,
+      sourceDocumentIds,
       status: "pending",
     };
     await db.createOrgMemoryProposal(proposal);
@@ -505,7 +576,6 @@ export class OrgMemoryService {
       message: `Recorded for admin review (proposal ${proposal.id}).`,
       outcome: "created",
       proposalId: proposal.id,
-      warnings: warnings.length > 0 ? warnings : undefined,
     };
   }
 
@@ -525,6 +595,15 @@ export class OrgMemoryService {
     if (proposal.status !== "pending") {
       throw new NakamaApiError("Only pending proposals can be approved.", 400);
     }
+
+    // A proposal created before propose_org_memory started rejecting these can
+    // still be sitting in the queue, and approving is the write that matters.
+    // An admin who wants the text anyway can reject this and add the fact
+    // through POST /memory/facts, which is the path meant for a person.
+    assertNoOrgMemoryInjection(
+      proposal.bullet,
+      normalizeOrgMemoryBullet(proposal.bullet)
+    );
 
     const pin = options.pin ?? false;
     const dateUtc = utcDateString();
@@ -599,26 +678,20 @@ export class OrgMemoryService {
       return { matches, query };
     }
 
-    const live = await readTextIfExists(
-      getOrgMemoryFilePath(orgId, this.options.configDir)
-    );
+    const live = await this.getMemory(orgId);
     if (live) {
       const parsed = parseOrgMemoryContent(live);
       for (const bullet of parsed.pinned) {
-        if (bullet.toLowerCase().includes(normalizedQuery)) {
-          matches.push({ bullet, source: "live", tier: "pinned" });
-        }
+        matches.push({ bullet, source: "live", tier: "pinned" });
       }
       for (const section of parsed.sections) {
         for (const bullet of section.bullets) {
-          if (bullet.toLowerCase().includes(normalizedQuery)) {
-            matches.push({
-              bullet,
-              date: section.date,
-              source: "live",
-              tier: "recent-log",
-            });
-          }
+          matches.push({
+            bullet,
+            date: section.date,
+            source: "live",
+            tier: "recent-log",
+          });
         }
       }
     }
@@ -633,14 +706,31 @@ export class OrgMemoryService {
       for (const filename of files) {
         const archiveContent = await readText(join(archiveDir, filename));
         for (const bullet of this.collectArchiveBullets(archiveContent)) {
-          if (bullet.toLowerCase().includes(normalizedQuery)) {
-            matches.push({ bullet, source: filename, tier: "archive" });
-          }
+          matches.push({ bullet, source: filename, tier: "archive" });
         }
       }
     }
 
-    return { matches, query };
+    const remote = await this.memoryBackend?.search(
+      orgId,
+      "org-search",
+      matches.map((match, index) => ({
+        content: match.bullet,
+        id: String(index),
+      })),
+      query,
+      100
+    );
+    return {
+      matches: remote
+        ? remote.flatMap((hit) =>
+            matches[Number(hit.id)] ? [matches[Number(hit.id)]!] : []
+          )
+        : matches.filter((match) =>
+            match.bullet.toLowerCase().includes(normalizedQuery)
+          ),
+      query,
+    };
   }
 
   private bulletExistsInMemory(
@@ -673,7 +763,7 @@ export class OrgMemoryService {
   }
 
   private normalizeBullet(bullet: string): string {
-    const text = bullet.trim().replace(/^-\s+/, "").trim();
+    const text = normalizeOrgMemoryBullet(bullet);
     if (text.length === 0) {
       throw new NakamaApiError("Memory bullet must not be empty.", 400);
     }
@@ -688,18 +778,11 @@ export class OrgMemoryService {
         400
       );
     }
-    if (text.includes("\n\n")) {
-      throw new NakamaApiError(
-        "Memory bullet must not contain multiple blank lines.",
-        400
-      );
-    }
-    if (/^##\s/m.test(text)) {
-      throw new NakamaApiError(
-        "Memory bullet must not contain markdown headings.",
-        400
-      );
-    }
+    // Rejected here and not in normalizeBullet on purpose: this is the path the
+    // agent reaches through propose_org_memory, so the content is whatever a
+    // document or a message talked it into. An org admin adding a fact through
+    // POST /memory/facts is a person who meant it, and still gets through.
+    assertNoOrgMemoryInjection(bullet, text);
     return text;
   }
 
@@ -726,6 +809,8 @@ export class OrgMemoryService {
     if (current === content) {
       return;
     }
+
+    await this.memoryBackend?.readMemory(orgId, null, "MEMORY.md", content);
 
     await writeTextFile(
       getOrgMemoryFilePath(orgId, this.options.configDir),

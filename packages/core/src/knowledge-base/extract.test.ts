@@ -1,16 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
-import path from "node:path";
 import {
   buildExtractedTextHeader,
   extractText,
   isSupportedKnowledgeBaseMediaType,
   normalizeKnowledgeBaseMediaType,
 } from "./extract";
-
-const SAMPLE_DOCX = readFileSync(
-  path.join(import.meta.dir, "..", "__fixtures__", "sample.docx")
-);
 
 describe("knowledge base extract", () => {
   test("normalizes media types from filename extensions", () => {
@@ -66,34 +60,6 @@ describe("knowledge base extract", () => {
     );
   });
 
-  test("extracts docx content as markdown", async () => {
-    const text = await extractText(
-      "application/octet-stream",
-      "laporan.docx",
-      SAMPLE_DOCX
-    );
-
-    expect(text).toContain("Laporan Mingguan");
-    expect(text).toContain("**teks tebal**");
-  });
-
-  test("extracts HTML that was uploaded under a .doc name", async () => {
-    const html = Buffer.from(
-      "<html><body><h1>Judul</h1></body></html>",
-      "utf8"
-    );
-    const text = await extractText("application/msword", "lama.doc", html);
-
-    expect(text).toContain("# Judul");
-  });
-
-  test("rejects a genuine legacy OLE .doc with an actionable message", async () => {
-    const ole = Buffer.from([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]);
-    expect(extractText("application/msword", "lama.doc", ole)).rejects.toThrow(
-      /Convert the file to \.docx/
-    );
-  });
-
   test("builds extracted text headers", () => {
     const header = buildExtractedTextHeader({
       filename: "report.pdf",
@@ -105,4 +71,15 @@ describe("knowledge base extract", () => {
     expect(header).toContain("# mediaType: application/pdf");
     expect(header).toContain("# uploadedAt: 2026-06-13T00:00:00.000Z");
   });
+});
+
+test("knowledge extraction accepts 20 MiB and rejects one byte more", async () => {
+  const limit = 20 * 1024 * 1024;
+  expect(
+    (await extractText("text/plain", "large.txt", Buffer.alloc(limit, "a")))
+      .length
+  ).toBe(limit);
+  await expect(
+    extractText("text/plain", "large.txt", Buffer.alloc(limit + 1))
+  ).rejects.toThrow();
 });

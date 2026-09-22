@@ -1,10 +1,39 @@
+import { createHash } from "node:crypto";
 import { join } from "node:path";
-import { getUserConfigDir, readTextOrNull, writeTextFile } from "@nakama/core";
+import {
+  getUserConfigDir,
+  parseIni,
+  readTextOrNull,
+  writeTextFile,
+} from "@nakama/core";
 
-const CLI_CONFIG_KEYS = new Set(["org_id", "profile_id"]);
+const CLI_CONFIG_KEYS = new Set(["org_id", "profile_id", "server_url"]);
+let configScope = "";
+
+export function setCliConfigScope(serverUrl?: string, userId?: string): void {
+  configScope =
+    serverUrl && userId
+      ? `-${createHash("sha256")
+          .update(JSON.stringify([serverUrl, userId]))
+          .digest("hex")}`
+      : "";
+}
 
 export function getCliConfigPath(): string {
-  return join(getUserConfigDir(), "cli.ini");
+  return join(getUserConfigDir(), `cli${configScope}.ini`);
+}
+
+export async function loadSavedCliServerUrl(): Promise<string | null> {
+  const values = await readCliConfigValues(join(getUserConfigDir(), "cli.ini"));
+  return values.server_url || null;
+}
+
+export async function saveCliServerUrl(serverUrl: string): Promise<void> {
+  await saveCliConfigValue(
+    "server_url",
+    serverUrl,
+    join(getUserConfigDir(), "cli.ini")
+  );
 }
 
 export async function loadSavedCliProfileId(): Promise<string | null> {
@@ -29,71 +58,52 @@ async function loadCliConfigValue(key: string): Promise<string | null> {
   return value || null;
 }
 
-async function saveCliConfigValue(key: string, value: string): Promise<void> {
+async function saveCliConfigValue(
+  key: string,
+  value: string,
+  path = getCliConfigPath()
+): Promise<void> {
   const trimmed = value.trim();
 
   if (!trimmed) {
     return;
   }
 
-  const values = await readCliConfigValues();
+  const values = await readCliConfigValues(path);
   values[key] = trimmed;
-  await writeCliConfig(values);
+  await writeCliConfig(values, path);
 }
 
-async function readCliConfigValues(): Promise<Record<string, string>> {
-  const raw = await readTextOrNull(getCliConfigPath());
+async function readCliConfigValues(
+  path = getCliConfigPath()
+): Promise<Record<string, string>> {
+  const raw = await readTextOrNull(path);
 
   if (raw === null) {
     return {};
   }
 
-  return parseIni(raw);
+  return Object.fromEntries(
+    Object.entries(parseIni(raw)).filter(([key]) => CLI_CONFIG_KEYS.has(key))
+  );
 }
 
-async function writeCliConfig(values: Record<string, string>): Promise<void> {
+async function writeCliConfig(
+  values: Record<string, string>,
+  path: string
+): Promise<void> {
   const lines = ["# Nakama CLI"];
 
-  if (values.org_id?.trim()) {
-    lines.push(`org_id=${values.org_id.trim()}`);
-  }
-
-  if (values.profile_id?.trim()) {
-    lines.push(`profile_id=${values.profile_id.trim()}`);
+  for (const key of CLI_CONFIG_KEYS) {
+    const value = values[key]?.trim();
+    if (value) {
+      lines.push(`${key}=${value}`);
+    }
   }
 
   lines.push("");
 
-  await writeTextFile(getCliConfigPath(), lines.join("\n"), {
+  await writeTextFile(path, lines.join("\n"), {
     ensureDir: getUserConfigDir(),
   });
-}
-
-function parseIni(raw: string): Record<string, string> {
-  const values: Record<string, string> = {};
-
-  for (const line of raw.split(/\r?\n/)) {
-    const trimmed = line.trim();
-
-    if (!trimmed || trimmed.startsWith("#") || trimmed.startsWith(";")) {
-      continue;
-    }
-
-    const separator = trimmed.indexOf("=");
-
-    if (separator <= 0) {
-      continue;
-    }
-
-    const key = trimmed.slice(0, separator).trim();
-
-    if (!CLI_CONFIG_KEYS.has(key)) {
-      continue;
-    }
-
-    const value = trimmed.slice(separator + 1).trim();
-    values[key] = value;
-  }
-
-  return values;
 }

@@ -1,15 +1,567 @@
 import { describe, expect, test } from "bun:test";
-import type { AgentChatSession } from "@nakama/agent";
-import type { DatabaseAdapter } from "@nakama/db";
-import { wrapPersistedSession } from "./session-persistence";
+import { mkdir, readFile, rm } from "node:fs/promises";
+import { type AgentChatSession, createAgentChatSession } from "@nakama/agent";
+import {
+  type ChatMessage,
+  type ProviderClient,
+  saveAttachmentBytes,
+} from "@nakama/core";
+import {
+  createInMemoryDatabaseAdapter,
+  createSqliteDatabase,
+  type DatabaseAdapter,
+} from "@nakama/db";
+import { setupTestConfigDir } from "../test-config-dir";
+import { AgentService } from "./agent-service";
+import { ProfileService } from "./profile-service";
+import {
+  archiveSessionHistory,
+  copySessionHistoryArchive,
+  createReadSessionHistoryTool,
+  deleteSessionHistoryArchive,
+  loadSessionHistory,
+  replaceSessionHistory,
+  sessionHistoryArchivePath,
+  wrapPersistedSession,
+} from "./session-persistence";
 
-describe("wrapPersistedSession", () => {
+const summaryProvider: ProviderClient = {
+  async generateChat() {
+    return {
+      assistantMessage: { content: "Summary", role: "assistant" },
+      content: "Summary",
+      toolCalls: [],
+    };
+  },
+  async generateText() {
+    return { content: "Summary" };
+  },
+  name: "openai",
+  streamChat(input, handlers) {
+    handlers.onChunk("Summary");
+    return this.generateChat(input);
+  },
+};
+
+function historyWithTool(): ChatMessage[] {
+  return [
+    { content: "Read the document", role: "user" },
+    {
+      content: "",
+      role: "assistant",
+      toolCalls: [
+        { arguments: { path: "notes.txt" }, id: "call", name: "read_file" },
+      ],
+    },
+    {
+      content: "Original result: 日本語 🐱",
+      name: "read_file",
+      role: "tool",
+      toolCallId: "call",
+    },
+    { content: "Read it", role: "assistant" },
+    { content: "Next", role: "user" },
+    { content: "Done", role: "assistant" },
+    { content: "Continue", role: "user" },
+    { content: "Done again", role: "assistant" },
+  ];
+}
+
+async function seedSession(
+  db: DatabaseAdapter,
+  id: string,
+  profileId = "profile",
+  orgId = "org_1"
+) {
+  await db.upsertSession({
+    agentQuestionnaire: null,
+    agentTodos: [],
+    channel: "web",
+    createdAt: new Date().toISOString(),
+    id,
+    model: null,
+    orgId,
+    profileId,
+    title: null,
+  });
+}
+
+describe("session persistence", () => {
+  setupTestConfigDir("nakama-history-archive-");
+
+  for (const stream of [false, true]) {
+    test(`saves the user message before the provider fails (stream: ${stream})`, async () => {
+      const db = createInMemoryDatabaseAdapter();
+      await seedSession(db, "failed");
+      const expected: ChatMessage[] = [
+        { content: "Please help", role: "user" },
+      ];
+      let savedBeforeRequest: ChatMessage[] = [];
+      const provider: ProviderClient = {
+        ...summaryProvider,
+        async generateChat() {
+          savedBeforeRequest = await loadSessionHistory(db, "failed");
+          throw new Error("Provider unavailable");
+        },
+      };
+      const session = wrapPersistedSession(
+        "failed",
+        createAgentChatSession({ provider }),
+        db
+      );
+      await expect(
+        stream
+          ? session.sendStream("Please help", { onChunk() {} })
+          : session.send("Please help")
+      ).rejects.toThrow("Provider unavailable");
+      expect(savedBeforeRequest).toEqual(expected);
+      expect(session.getHistory()).toEqual(expected);
+      const saved = await loadSessionHistory(db, "failed");
+      expect(saved).toEqual(expected);
+      let nextMessages: readonly ChatMessage[] = [];
+      const reopened = wrapPersistedSession(
+        "failed",
+        createAgentChatSession(
+          {
+            provider: {
+              ...summaryProvider,
+              generateChat(input) {
+                nextMessages = [...input.messages];
+                return summaryProvider.generateChat(input);
+              },
+            },
+          },
+          { initialHistory: saved }
+        ),
+        db
+      );
+      await reopened.send("Continue");
+      expect(nextMessages[0]).toEqual(expected[0]);
+      expect(await loadSessionHistory(db, "failed")).toHaveLength(3);
+    });
+  }
+
+  for (const cancelled of [false, true]) {
+    test(`handles a turn with no output (cancelled: ${cancelled})`, async () => {
+      const db = createInMemoryDatabaseAdapter();
+      await seedSession(db, "empty");
+      const controller = new AbortController();
+      const session = wrapPersistedSession(
+        "empty",
+        createAgentChatSession({
+          provider: {
+            ...summaryProvider,
+            streamChat() {
+              if (cancelled) {
+                controller.abort();
+              }
+              return Promise.reject(new Error("Interrupted"));
+            },
+          },
+        }),
+        db
+      );
+      await expect(
+        session.sendStream(
+          "Keep my request",
+          { onChunk() {} },
+          { signal: controller.signal }
+        )
+      ).rejects.toThrow();
+      expect(await loadSessionHistory(db, "empty")).toEqual([
+        { content: "Keep my request", role: "user" },
+      ]);
+    });
+  }
+
+  for (const ignoresAbort of [false, true]) {
+    test(`saves a stopped reply and reuses it after reopening (ignores abort: ${ignoresAbort})`, async () => {
+      const db = createInMemoryDatabaseAdapter();
+      await seedSession(db, "stopped");
+      const controller = new AbortController();
+      const provider: ProviderClient = {
+        ...summaryProvider,
+        async streamChat(input, handlers) {
+          handlers.onThinking?.("Considering the request");
+          handlers.onChunk("Partial ");
+          handlers.onChunk("reply");
+          controller.abort();
+          if (!ignoresAbort) {
+            input.signal?.throwIfAborted();
+          }
+          handlers.onChunk("late output");
+          return summaryProvider.generateChat(input);
+        },
+      };
+      const session = wrapPersistedSession(
+        "stopped",
+        createAgentChatSession({ provider }),
+        db
+      );
+      await expect(
+        session.sendStream(
+          "Help me",
+          { onChunk() {} },
+          { signal: controller.signal }
+        )
+      ).rejects.toThrow();
+      const stored = await loadSessionHistory(db, "stopped");
+      expect(stored).toEqual([
+        { content: "Help me", role: "user" },
+        {
+          content: "Partial reply",
+          role: "assistant",
+          thinking: "Considering the request",
+          thinkingDurationMs: expect.any(Number),
+        },
+      ]);
+      let nextMessages: readonly ChatMessage[] = [];
+      const reopened = wrapPersistedSession(
+        "stopped",
+        createAgentChatSession(
+          {
+            provider: {
+              ...summaryProvider,
+              generateChat(input) {
+                nextMessages = [...input.messages];
+                return summaryProvider.generateChat(input);
+              },
+            },
+          },
+          { initialHistory: stored }
+        ),
+        db
+      );
+      await reopened.send("Continue");
+      expect(nextMessages.slice(0, 2)).toEqual(stored);
+      expect(await loadSessionHistory(db, "stopped")).toHaveLength(4);
+    });
+  }
+
+  test("compaction replaces working history but preserves raw messages for scoped recovery", async () => {
+    const db = createInMemoryDatabaseAdapter();
+    await seedSession(db, "session_1");
+    const original = historyWithTool();
+    await replaceSessionHistory(db, "session_1", original);
+    const session = createAgentChatSession(
+      { provider: summaryProvider },
+      {
+        archiveHistory: (history) =>
+          archiveSessionHistory(db, "org_1", "session_1", history),
+        compaction: { contextWindow: 100_000, maxOutputTokens: 8192 },
+        initialHistory: original,
+      }
+    );
+    const wrapped = wrapPersistedSession("session_1", session, db);
+    expect((await wrapped.compact({ force: true })).action).toBe("summarized");
+    const working = await loadSessionHistory(db, "session_1");
+    expect(working.length).toBeLessThan(original.length);
+    expect(working.some((message) => message.role === "tool")).toBe(false);
+    const archived = JSON.parse(
+      await readFile(sessionHistoryArchivePath("org_1", "session_1"), "utf8")
+    );
+    expect(archived.messages).toEqual(original);
+    const tool = createReadSessionHistoryTool("org_1", "session_1");
+    let content = "";
+    let offset = 0;
+    for (;;) {
+      const page = (await tool.run(
+        { limit: 17, offset, orgId: "other-org", sessionId: "other-session" },
+        {}
+      )) as { content: string; nextOffset: number; done: boolean };
+      content += page.content;
+      expect(page.nextOffset).toBeGreaterThan(offset);
+      offset = page.nextOffset;
+      if (page.done) {
+        break;
+      }
+    }
+    expect(JSON.parse(content).messages).toEqual(original);
+    await wrapped.send("Another turn");
+    await wrapped.compact({ force: true });
+    const snapshots = (
+      await readFile(sessionHistoryArchivePath("org_1", "session_1"), "utf8")
+    )
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    expect(snapshots).toHaveLength(2);
+    expect(snapshots[0].messages).toEqual(original);
+    expect(snapshots[1].messages).toContainEqual({
+      content: "Another turn",
+      role: "user",
+    });
+    await expect(
+      createReadSessionHistoryTool("org_2", "session_1").run({}, {})
+    ).rejects.toThrow();
+    await expect(
+      createReadSessionHistoryTool("org_1", "session_2").run({}, {})
+    ).rejects.toThrow();
+  });
+
+  test("a failed archive leaves history and revision intact", async () => {
+    const original = historyWithTool();
+    const session = createAgentChatSession(
+      { provider: summaryProvider },
+      {
+        archiveHistory() {
+          throw new Error("Archive unavailable");
+        },
+        compaction: { contextWindow: 100_000, maxOutputTokens: 8192 },
+        initialHistory: original,
+      }
+    );
+    await expect(session.compact({ force: true })).rejects.toThrow();
+    expect(session.getHistory()).toEqual(original);
+    expect(session.getHistoryRevision()).toBe(0);
+  });
+
+  test.each(["send", "stream"])(
+    "automatic %s pruning archives original output but not no-op turns",
+    async (mode) => {
+      const db = createInMemoryDatabaseAdapter();
+      await seedSession(db, "automatic");
+      const original = historyWithTool();
+      original[2] = {
+        content: "x".repeat(200_000),
+        name: "read_file",
+        role: "tool",
+        toolCallId: "call",
+      };
+      const session = createAgentChatSession(
+        { provider: summaryProvider },
+        {
+          archiveHistory: (history) =>
+            archiveSessionHistory(db, "org_1", "automatic", history),
+          compaction: { contextWindow: 100_000, maxOutputTokens: 8192 },
+          initialHistory: original,
+        }
+      );
+      if (mode === "stream") {
+        await session.sendStream("Proceed", { onChunk() {} });
+      } else {
+        await session.send("Proceed");
+      }
+      const path = sessionHistoryArchivePath("org_1", "automatic");
+      const first = await readFile(path, "utf8");
+      expect(JSON.parse(first).messages).toEqual([
+        ...original,
+        { content: "Proceed", role: "user" },
+      ]);
+      expect(session.getHistory()[2]?.content.length).toBeLessThan(1000);
+      await session.send("Continue");
+      expect(await readFile(path, "utf8")).toBe(first);
+    }
+  );
+
+  test("branch archives survive source purge and are removed on clear", async () => {
+    const db = createInMemoryDatabaseAdapter();
+    const now = new Date().toISOString();
+    await db.upsertProfile({
+      createdAt: now,
+      id: "profile",
+      isDefault: true,
+      isSuper: false,
+      model: null,
+      name: "Test",
+      orgId: "org_1",
+      systemPrompt: "",
+      updatedAt: now,
+    });
+    let service = new AgentService(null, null, db);
+    const id = await service.createSession("org_1", "web", "profile");
+    const history = historyWithTool();
+    await replaceSessionHistory(db, id, history);
+    // Reload the persisted session through the production service wiring.
+    service = new AgentService(null, null, db);
+    Object.assign(service, {
+      createHarnessForProfile: () => ({ provider: summaryProvider }),
+      resolveCompactionConfig: () => ({
+        contextWindow: 100_000,
+        maxOutputTokens: 8192,
+      }),
+    });
+    expect(
+      (await service.compactSession(id, { force: true }, "org_1"))?.action
+    ).toBe("summarized");
+    const saved = await readFile(
+      sessionHistoryArchivePath("org_1", id),
+      "utf8"
+    );
+    expect(JSON.parse(saved).messages).toEqual(history);
+    const branch = await service.branchSession(id, 0, "org_1");
+    expect(branch).not.toBeNull();
+    expect(await service.purgeSession(id, "other-org")).toBe(false);
+    expect(await service.clearSession(id, "other-org")).toBe(false);
+    const source = await readFile(
+      sessionHistoryArchivePath("org_1", id),
+      "utf8"
+    );
+    expect(await service.purgeSession(id, "org_1")).toBe(true);
+    await expect(
+      readFile(sessionHistoryArchivePath("org_1", id))
+    ).rejects.toThrow();
+    expect(
+      await readFile(
+        sessionHistoryArchivePath("org_1", branch!.sessionId),
+        "utf8"
+      )
+    ).toBe(source);
+    await replaceSessionHistory(db, branch!.sessionId, history);
+    service.setAutomationTools([]);
+    const detached = await service.resolveSession(branch!.sessionId, "org_1");
+    service.setAutomationTools([]);
+    expect(await service.clearSession(branch!.sessionId, "org_1")).toBe(true);
+    await expect(detached!.compact({ force: true })).rejects.toThrow();
+    await expect(
+      readFile(sessionHistoryArchivePath("org_1", branch!.sessionId))
+    ).rejects.toThrow();
+    expect(await loadSessionHistory(db, branch!.sessionId)).toEqual([]);
+  });
+
+  test("purge removes attachment bytes and metadata", async () => {
+    const db = createInMemoryDatabaseAdapter();
+    const now = new Date().toISOString();
+    await db.upsertProfile({
+      createdAt: now,
+      id: "profile",
+      isDefault: true,
+      isSuper: false,
+      model: null,
+      name: "Test",
+      orgId: "org_1",
+      systemPrompt: "",
+      updatedAt: now,
+    });
+    const service = new AgentService(null, null, db);
+    const sessionId = await service.createSession("org_1", "web", "profile");
+    const attachmentPath = await saveAttachmentBytes(
+      "org_1",
+      "profile",
+      "attachment",
+      Buffer.from("attachment")
+    );
+    await db.insertAttachment({
+      channel: "web",
+      createdAt: now,
+      ephemeral: false,
+      filename: "attachment.txt",
+      id: "attachment",
+      kind: "document",
+      mediaType: "text/plain",
+      orgId: "org_1",
+      profileId: "profile",
+      sessionId,
+      sizeBytes: 10,
+      storagePath: attachmentPath,
+    });
+
+    expect(await service.purgeSession(sessionId, "other-org")).toBe(false);
+    expect(await readFile(attachmentPath, "utf8")).toBe("attachment");
+    expect(await service.purgeSession(sessionId, "org_1")).toBe(true);
+    await expect(readFile(attachmentPath)).rejects.toThrow();
+    expect(await db.getAttachment("attachment")).toBeNull();
+  });
+
+  test("clear during an archive write does not resurrect history or leave an archive", async () => {
+    const db = createInMemoryDatabaseAdapter();
+    await seedSession(db, "cleared");
+    let writing: Promise<string> | undefined;
+    const session = createAgentChatSession(
+      { provider: summaryProvider },
+      {
+        archiveHistory(history) {
+          writing = archiveSessionHistory(db, "org_1", "cleared", history);
+          session.clear();
+          const deletion = deleteSessionHistoryArchive("org_1", "cleared");
+          return Promise.all([writing, deletion]).then(([pointer]) => pointer);
+        },
+        compaction: { contextWindow: 100_000, maxOutputTokens: 8192 },
+        initialHistory: historyWithTool(),
+      }
+    );
+    await expect(session.compact({ force: true })).rejects.toThrow();
+    expect(writing).toBeDefined();
+    expect(session.getHistory()).toEqual([]);
+    await expect(
+      readFile(sessionHistoryArchivePath("org_1", "cleared"))
+    ).rejects.toThrow();
+  });
+
+  test("profile deletion cleans archives, rejects late writers, and can retry failed cleanup", async () => {
+    const database = await createSqliteDatabase(":memory:");
+    const db = database.adapter;
+    try {
+      const now = new Date().toISOString();
+      for (const [orgId, profileId] of [
+        ["org_1", "deleted"],
+        ["org_1", "kept"],
+        ["org_2", "other"],
+      ]) {
+        await db.upsertOrganization({
+          createdAt: now,
+          id: orgId,
+          name: orgId,
+          slug: orgId,
+          updatedAt: now,
+        });
+        await db.upsertProfile({
+          createdAt: now,
+          id: profileId,
+          isDefault: false,
+          isSuper: false,
+          model: null,
+          name: profileId,
+          orgId,
+          systemPrompt: "",
+          updatedAt: now,
+        });
+        await seedSession(db, profileId, profileId, orgId);
+        await archiveSessionHistory(db, orgId, profileId, historyWithTool());
+      }
+      const path = sessionHistoryArchivePath("org_1", "deleted");
+      await rm(path);
+      await mkdir(path);
+      const service = new ProfileService(db);
+      await expect(service.deleteProfile("org_1", "deleted")).rejects.toThrow();
+      expect(await db.getProfile("deleted")).not.toBeNull();
+      expect(await db.getSession("deleted")).not.toBeNull();
+      await rm(path, { recursive: true });
+
+      await archiveSessionHistory(db, "org_1", "deleted", historyWithTool());
+      await service.deleteProfile("org_1", "deleted");
+      expect(await db.getProfile("deleted")).toBeNull();
+      expect(await db.getSession("deleted")).toBeNull();
+      await expect(
+        archiveSessionHistory(db, "org_1", "deleted", historyWithTool())
+      ).rejects.toThrow();
+      await expect(
+        copySessionHistoryArchive(db, "org_1", "kept", "deleted")
+      ).rejects.toThrow();
+      await expect(readFile(path)).rejects.toThrow();
+      for (const [orgId, id] of [
+        ["org_1", "kept"],
+        ["org_2", "other"],
+      ]) {
+        expect(await db.getSession(id)).not.toBeNull();
+        expect(
+          JSON.parse(
+            await readFile(sessionHistoryArchivePath(orgId, id), "utf8")
+          ).messages
+        ).toEqual(historyWithTool());
+      }
+    } finally {
+      database.close();
+    }
+  });
+
   test("clear leaves the delete to clearSession instead of firing it unawaited", () => {
     let cleared = false;
     const session = {
       clear() {
         cleared = true;
       },
+      getHistory: () => [],
       getHistoryRevision: () => 0,
     } as unknown as AgentChatSession;
 

@@ -13,6 +13,10 @@ import {
   isComposioConfiguredAsync,
   NAKAMA_API_VERSION,
 } from "@nakama/core";
+import {
+  type ChannelConfigScope,
+  isChannelOwner,
+} from "@nakama/core/channel-config-shared";
 import type { DatabaseAdapter } from "@nakama/db";
 import type { AgentService } from "./agent-service";
 import type { AutomationRunner } from "./automation-runner";
@@ -30,12 +34,12 @@ export class SystemStatusService {
     private readonly databaseAdapter: DatabaseAdapter | null = null
   ) {}
 
-  async getStatus(): Promise<SystemStatusResponse> {
+  async getStatus(orgId: ChannelConfigScope): Promise<SystemStatusResponse> {
     const providerConfigured = this.agent.providerConfigured;
     const models = await this.agent.getModels();
     const usageFields = this.agent.getUsageStatusFields();
 
-    const statuses = await this.workerManager.getAllWorkerStatuses();
+    const statuses = await this.workerManager.getAllWorkerStatuses(orgId);
     const automationProcess = statuses.automation ?? null;
     const automationHeartbeat = await getAutomationWorkerHeartbeatStatus();
     const automationRunning = automationHeartbeat.running;
@@ -44,9 +48,9 @@ export class SystemStatusService {
       automationProcess.status === "online";
 
     const [telegramStatus, whatsappStatus, discordStatus] = await Promise.all([
-      this.resolveWorkerStatus("telegram", statuses.telegram),
-      this.resolveWorkerStatus("whatsapp", statuses.whatsapp),
-      this.resolveWorkerStatus("discord", statuses.discord),
+      this.resolveWorkerStatus("telegram", statuses.telegram, orgId),
+      this.resolveWorkerStatus("whatsapp", statuses.whatsapp, orgId),
+      this.resolveWorkerStatus("discord", statuses.discord, orgId),
     ]);
 
     return {
@@ -80,13 +84,23 @@ export class SystemStatusService {
 
   private async resolveWorkerStatus(
     name: "telegram" | "whatsapp" | "discord",
-    pm2Status: WorkerProcessInfo | null
+    pm2Status: WorkerProcessInfo | null,
+    orgId: ChannelConfigScope
   ) {
+    if (!isChannelOwner(orgId)) {
+      return {
+        configured: false,
+        connected: false,
+        ok: true,
+        paired: false,
+        running: false,
+      };
+    }
     if (pm2Status?.managed) {
       const running = pm2Status.status === "online";
 
       if (name === "telegram") {
-        const heartbeat = await getTelegramWorkerStatus();
+        const heartbeat = await getTelegramWorkerStatus(orgId);
         return {
           ...heartbeat,
           process: pm2Status,
@@ -95,7 +109,7 @@ export class SystemStatusService {
       }
 
       if (name === "discord") {
-        const heartbeat = await getDiscordWorkerStatus();
+        const heartbeat = await getDiscordWorkerStatus(orgId);
         return {
           ...heartbeat,
           process: pm2Status,
@@ -103,7 +117,7 @@ export class SystemStatusService {
         };
       }
 
-      const heartbeat = await getWhatsAppWorkerStatus();
+      const heartbeat = await getWhatsAppWorkerStatus(orgId);
       return {
         ...heartbeat,
         process: pm2Status,
@@ -112,14 +126,14 @@ export class SystemStatusService {
     }
 
     if (name === "telegram") {
-      return getTelegramWorkerStatus();
+      return getTelegramWorkerStatus(orgId);
     }
 
     if (name === "discord") {
-      return getDiscordWorkerStatus();
+      return getDiscordWorkerStatus(orgId);
     }
 
-    return getWhatsAppWorkerStatus();
+    return getWhatsAppWorkerStatus(orgId);
   }
 
   private getLlmUsage(

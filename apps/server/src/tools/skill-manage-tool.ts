@@ -1,5 +1,7 @@
 import {
   type AgentChannel,
+  fetchGitHubSkillBundle,
+  type GitHubSkillBundle,
   parseRawProfileSkillContent,
   type ToolContext,
   type ToolDefinition,
@@ -184,8 +186,9 @@ export function createSkillManageTools(
         properties: {
           action: {
             description:
-              "create = new/adopt skill; patch = targeted edit; edit = full SKILL.md replace; delete = remove profile-owned skill; write_file/remove_file = supporting files under the skill dir.",
+              "install = fetch a public GitHub skill directory including supporting files and create/adopt it; create = new/adopt skill; patch = targeted edit; edit = full SKILL.md replace; delete = remove profile-owned skill; write_file/remove_file = supporting files under the skill dir.",
             enum: [
+              "install",
               "create",
               "patch",
               "edit",
@@ -220,12 +223,32 @@ export function createSkillManageTools(
               "Relative path under the skill directory. Required for write_file and remove_file (not SKILL.md or tool.ts/tool.js).",
             type: "string",
           },
+          url: {
+            description:
+              "Public GitHub skill directory or SKILL.md URL. Required for install. Downloads SKILL.md and supporting files; never overwrites existing files with different content.",
+            type: "string",
+          },
         },
         required: ["action"],
         type: "object",
       },
-      async run(input, context: ToolContext) {
+      async run(rawInput, context: ToolContext) {
         const { orgId, profileId } = requireSkillManageAccess(context);
+        let input = rawInput;
+        let bundle: GitHubSkillBundle | undefined;
+        // Installation is a create proposal so it uses the same approval,
+        // collision protection, assignment, and catalog refresh path.
+        if (readString(input, "action") === "install") {
+          const url = readString(input, "url");
+          if (!url) {
+            throw new Error("url is required for install.");
+          }
+          bundle = await fetchGitHubSkillBundle(url);
+          input = {
+            action: "create",
+            content: bundle.content,
+          };
+        }
         const action = readAction(input);
 
         if (
@@ -247,6 +270,10 @@ export function createSkillManageTools(
               profileId,
               proposedByUserId: context.userId ?? null,
               sessionId: context.sessionId ?? null,
+              supportingFiles: bundle?.files.map((file) => ({
+                contentBase64: Buffer.from(file.content).toString("base64"),
+                path: file.path,
+              })),
             });
 
             const { name } = parseRawProfileSkillContent(
@@ -439,6 +466,7 @@ export function createSkillManageTools(
                 actorUserId: context.userId ?? null,
                 source: "skill_manage",
               },
+              supportingFiles: bundle?.files,
             }
           );
 

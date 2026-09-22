@@ -35,6 +35,14 @@ const PROVIDER_CHOICES: Array<{ id: UserProviderName; label: string }> = [
   { id: "openrouter", label: "OpenRouter" },
   { id: "gemini", label: "Gemini" },
   { id: "deepseek", label: "DeepSeek" },
+  { id: "doubao", label: "Doubao (Volcengine)" },
+  { id: "together", label: "Together AI" },
+  { id: "xiaomi", label: "Xiaomi MiMo" },
+  { id: "vercel_ai_gateway", label: "Vercel AI Gateway" },
+  { id: "mistral", label: "Mistral" },
+  { id: "qwen", label: "Qwen (DashScope)" },
+  { id: "qwen_cn", label: "Qwen (DashScope CN)" },
+  { id: "perplexity", label: "Perplexity Sonar" },
   { id: "xai", label: "xAI Grok" },
   { id: "cerebras", label: "Cerebras" },
   { id: "cloudflare", label: "Cloudflare Worker AI" },
@@ -43,6 +51,8 @@ const PROVIDER_CHOICES: Array<{ id: UserProviderName; label: string }> = [
   { id: "opencode_go", label: "OpenCode Go" },
   { id: "minimax", label: "MiniMax" },
   { id: "minimax_cn", label: "MiniMax (CN)" },
+  { id: "moonshot", label: "Moonshot Kimi" },
+  { id: "moonshot_cn", label: "Moonshot Kimi (CN)" },
   { id: "zhipu", label: "GLM (Z.ai)" },
   { id: "zhipu_cn", label: "GLM (CN)" },
   { id: "openai_compatible", label: "Custom (OpenAI-compatible)" },
@@ -180,6 +190,9 @@ function resolveProviderChoice(input: string): UserProviderName | null {
     normalized === "openrouter" ||
     normalized === "gemini" ||
     normalized === "deepseek" ||
+    normalized === "doubao" ||
+    normalized === "mistral" ||
+    normalized === "perplexity" ||
     normalized === "cerebras" ||
     normalized === "cloudflare" ||
     normalized === "fireworks" ||
@@ -188,9 +201,16 @@ function resolveProviderChoice(input: string): UserProviderName | null {
     normalized === "opencode_go" ||
     normalized === "minimax" ||
     normalized === "minimax_cn" ||
+    normalized === "moonshot" ||
+    normalized === "moonshot_cn" ||
     normalized === "zhipu" ||
     normalized === "zhipu_cn" ||
-    normalized === "xai"
+    normalized === "xai" ||
+    normalized === "together" ||
+    normalized === "xiaomi" ||
+    normalized === "qwen" ||
+    normalized === "qwen_cn" ||
+    normalized === "vercel_ai_gateway"
   ) {
     return normalized;
   }

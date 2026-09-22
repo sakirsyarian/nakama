@@ -19,7 +19,6 @@ export { isOpenRouterModelSlug } from "@nakama/core";
 
 export type ProviderModelOption = ContractProviderModelOption & {
   contextWindow: number;
-  maxOutputTokens: number;
 };
 
 function withVisionDefaults(
@@ -38,50 +37,24 @@ function withVisionDefaults(
   }));
 }
 
-const CHATGPT_SHARED_MODEL_IDS = [
-  "gpt-5.4",
-  "gpt-5.5",
-  "gpt-5.6-luna",
-] as const;
-
-function deriveChatgptModels(
-  catalog: ProviderModelOption[]
-): ProviderModelOption[] {
-  const openaiById = new Map(
-    catalog
-      .filter((model) => model.provider === "openai")
-      .map((model) => [model.id, model])
-  );
-
-  const shared = CHATGPT_SHARED_MODEL_IDS.map((id) => {
-    const source = openaiById.get(id);
-
-    if (!source) {
-      throw new Error(`Missing OpenAI catalog model for ChatGPT: ${id}`);
-    }
-
-    return {
-      ...source,
-      default: id === "gpt-5.4",
-      inputPerMillionUsd: 0,
-      outputPerMillionUsd: 0,
-      provider: "chatgpt" as const,
-    };
-  });
-
-  return [
-    ...shared,
-    {
-      contextWindow: 128_000,
-      id: "gpt-5.4-mini",
-      inputPerMillionUsd: 0,
-      maxOutputTokens: 8192,
-      name: "GPT-5.4 mini",
-      outputPerMillionUsd: 0,
-      provider: "chatgpt" as const,
-    },
-  ];
-}
+// ChatGPT sign-in has its own catalog and default context window, not API limits.
+// https://github.com/openai/codex/blob/main/codex-rs/models-manager/models.json
+// This catalog omits an output ceiling; compaction uses its local fallback.
+const CHATGPT_MODELS: ProviderModelOption[] = [
+  { default: true, id: "gpt-5.6-terra", name: "GPT-5.6 Terra" },
+  { id: "gpt-5.6-sol", name: "GPT-5.6 Sol" },
+  { id: "gpt-5.6-luna", name: "GPT-5.6 Luna" },
+  { id: "gpt-6-astra", name: "GPT-6 Astra" },
+  { id: "gpt-5.5", name: "GPT-5.5" },
+].map((model) => ({
+  ...model,
+  contextWindow: 272_000,
+  inputPerMillionUsd: 0,
+  outputPerMillionUsd: 0,
+  provider: "chatgpt",
+  supportsThinking: true,
+  supportsVision: true,
+}));
 
 const BASE_MODELS: ProviderModelOption[] = withVisionDefaults([
   {
@@ -150,23 +123,45 @@ const BASE_MODELS: ProviderModelOption[] = withVisionDefaults([
     provider: "openai",
     supportsThinking: false,
   },
+  // Gemini standard text prices: https://ai.google.dev/gemini-api/docs/pricing
   {
-    contextWindow: 1_000_000,
+    contextWindow: 1_048_576,
     default: true,
     id: "gemini-2.5-flash",
-    inputPerMillionUsd: 0.15,
-    maxOutputTokens: 8192,
+    inputPerMillionUsd: 0.3,
+    maxOutputTokens: 65_536,
     name: "Gemini 2.5 Flash",
-    outputPerMillionUsd: 0.6,
+    outputPerMillionUsd: 2.5,
     provider: "gemini",
   },
   {
-    contextWindow: 1_000_000,
+    contextWindow: 1_048_576,
     id: "gemini-2.5-pro",
+    // Base tier for prompts <= 200k tokens; longer prompts cost more.
     inputPerMillionUsd: 1.25,
-    maxOutputTokens: 8192,
+    maxOutputTokens: 65_536,
     name: "Gemini 2.5 Pro",
-    outputPerMillionUsd: 5,
+    outputPerMillionUsd: 10,
+    provider: "gemini",
+  },
+  {
+    contextWindow: 1_048_576,
+    id: "gemini-3.8-flash",
+    // Promotional prices through 2026-12-31; double on 2027-01-01.
+    inputPerMillionUsd: 0.75,
+    maxOutputTokens: 65_536,
+    name: "Gemini 3.8 Flash",
+    outputPerMillionUsd: 3.75,
+    provider: "gemini",
+  },
+  {
+    contextWindow: 1_048_576,
+    id: "gemini-3.1-pro-preview",
+    // Base tier for prompts <= 200k tokens; longer prompts cost more.
+    inputPerMillionUsd: 2,
+    maxOutputTokens: 65_536,
+    name: "Gemini 3.1 Pro (Preview)",
+    outputPerMillionUsd: 12,
     provider: "gemini",
   },
   {
@@ -189,6 +184,335 @@ const BASE_MODELS: ProviderModelOption[] = withVisionDefaults([
     outputPerMillionUsd: 0.87,
     provider: "deepseek",
     supportsThinking: true,
+  },
+  {
+    contextWindow: 256_000,
+    default: true,
+    id: "doubao-seed-2-1-pro-260628",
+    inputPerMillionUsd: 0.83,
+    maxOutputTokens: 256_000,
+    name: "Doubao Seed 2.1 Pro",
+    outputPerMillionUsd: 4.14,
+    provider: "doubao",
+    supportsThinking: true,
+    supportsVision: true,
+  },
+  {
+    contextWindow: 256_000,
+    id: "doubao-seed-2-1-turbo-260628",
+    inputPerMillionUsd: 0.41,
+    maxOutputTokens: 256_000,
+    name: "Doubao Seed 2.1 Turbo",
+    outputPerMillionUsd: 2.07,
+    provider: "doubao",
+    supportsThinking: true,
+    supportsVision: true,
+  },
+  {
+    contextWindow: 256_000,
+    id: "doubao-seed-1-8-251228",
+    inputPerMillionUsd: 0.26,
+    maxOutputTokens: 256_000,
+    name: "Doubao Seed 1.8",
+    outputPerMillionUsd: 0.67,
+    provider: "doubao",
+    supportsThinking: true,
+    supportsVision: true,
+  },
+  {
+    contextWindow: 262_144,
+    default: true,
+    id: "mistral-small-2603",
+    inputPerMillionUsd: 0.15,
+    maxOutputTokens: 65_536,
+    name: "Mistral Small 4",
+    outputPerMillionUsd: 0.6,
+    provider: "mistral",
+    supportsThinking: true,
+    supportsVision: true,
+  },
+  {
+    contextWindow: 262_144,
+    id: "mistral-medium-latest",
+    inputPerMillionUsd: 1.5,
+    maxOutputTokens: 65_536,
+    name: "Mistral Medium 3.5",
+    outputPerMillionUsd: 7.5,
+    provider: "mistral",
+    supportsVision: true,
+  },
+  {
+    contextWindow: 262_144,
+    id: "mistral-large-2512",
+    inputPerMillionUsd: 0.5,
+    maxOutputTokens: 65_536,
+    name: "Mistral Large 3",
+    outputPerMillionUsd: 1.5,
+    provider: "mistral",
+    supportsVision: true,
+  },
+  {
+    contextWindow: 131_072,
+    id: "ministral-3b-2512",
+    inputPerMillionUsd: 0.1,
+    maxOutputTokens: 65_536,
+    name: "Ministral 3 3B",
+    outputPerMillionUsd: 0.1,
+    provider: "mistral",
+    supportsVision: true,
+  },
+  {
+    contextWindow: 262_144,
+    id: "ministral-8b-2512",
+    inputPerMillionUsd: 0.15,
+    maxOutputTokens: 65_536,
+    name: "Ministral 3 8B",
+    outputPerMillionUsd: 0.15,
+    provider: "mistral",
+    supportsVision: true,
+  },
+  {
+    contextWindow: 262_144,
+    id: "ministral-14b-2512",
+    inputPerMillionUsd: 0.2,
+    maxOutputTokens: 65_536,
+    name: "Ministral 3 14B",
+    outputPerMillionUsd: 0.2,
+    provider: "mistral",
+    supportsVision: true,
+  },
+  {
+    contextWindow: 128_000,
+    default: true,
+    id: "sonar",
+    inputPerMillionUsd: 1,
+    maxOutputTokens: 8192,
+    name: "Sonar",
+    outputPerMillionUsd: 1,
+    provider: "perplexity",
+    supportsVision: true,
+  },
+  {
+    contextWindow: 200_000,
+    id: "sonar-pro",
+    inputPerMillionUsd: 3,
+    maxOutputTokens: 8192,
+    name: "Sonar Pro",
+    outputPerMillionUsd: 15,
+    provider: "perplexity",
+    supportsVision: true,
+  },
+  {
+    contextWindow: 128_000,
+    id: "sonar-reasoning-pro",
+    inputPerMillionUsd: 2,
+    maxOutputTokens: 8192,
+    name: "Sonar Reasoning Pro",
+    outputPerMillionUsd: 8,
+    provider: "perplexity",
+    supportsThinking: true,
+    supportsVision: true,
+  },
+  {
+    contextWindow: 128_000,
+    id: "sonar-deep-research",
+    inputPerMillionUsd: 2,
+    maxOutputTokens: 32_768,
+    name: "Sonar Deep Research",
+    outputPerMillionUsd: 8,
+    provider: "perplexity",
+    supportsThinking: true,
+    supportsVision: false,
+  },
+  {
+    contextWindow: 131_072,
+    default: true,
+    id: "openai/gpt-oss-120b",
+    inputPerMillionUsd: 0.15,
+    maxOutputTokens: 40_960,
+    name: "GPT-OSS 120B",
+    outputPerMillionUsd: 0.6,
+    provider: "together",
+    supportsThinking: true,
+    supportsVision: false,
+  },
+  {
+    contextWindow: 131_072,
+    id: "meta-llama/Llama-3.3-70B-Instruct-Turbo",
+    inputPerMillionUsd: 1.04,
+    maxOutputTokens: 40_960,
+    name: "Llama 3.3 70B Instruct Turbo",
+    outputPerMillionUsd: 1.04,
+    provider: "together",
+    supportsVision: false,
+  },
+  {
+    contextWindow: 262_144,
+    id: "Qwen/Qwen3.5-9B",
+    inputPerMillionUsd: 0.17,
+    maxOutputTokens: 65_536,
+    name: "Qwen3.5 9B",
+    outputPerMillionUsd: 0.25,
+    provider: "together",
+    supportsThinking: true,
+    supportsVision: true,
+  },
+  {
+    contextWindow: 1_048_576,
+    id: "deepseek-ai/DeepSeek-V4-Flash-0731",
+    inputPerMillionUsd: 0.14,
+    maxOutputTokens: 384_000,
+    name: "DeepSeek V4 Flash",
+    outputPerMillionUsd: 0.28,
+    provider: "together",
+    supportsThinking: true,
+    supportsVision: false,
+  },
+  {
+    contextWindow: 1_048_576,
+    id: "MiniMaxAI/MiniMax-M3",
+    inputPerMillionUsd: 0.3,
+    maxOutputTokens: 131_072,
+    name: "MiniMax M3",
+    outputPerMillionUsd: 1.2,
+    provider: "together",
+    supportsThinking: true,
+    supportsVision: true,
+  },
+  ...(["qwen", "qwen_cn"] as const).flatMap((provider) => [
+    {
+      contextWindow: 1_000_000,
+      default: true,
+      id: "qwen3.7-plus",
+      inputPerMillionUsd: 0.4,
+      maxOutputTokens: 65_536,
+      name: "Qwen3.7 Plus",
+      outputPerMillionUsd: 1.6,
+      provider,
+      supportsThinking: true,
+      supportsVision: true,
+    },
+    {
+      contextWindow: 131_072,
+      id: "qwen-plus",
+      inputPerMillionUsd: 0.4,
+      maxOutputTokens: 8192,
+      name: "Qwen Plus",
+      outputPerMillionUsd: 1.2,
+      provider,
+      supportsThinking: true,
+      supportsVision: false,
+    },
+    {
+      contextWindow: 262_144,
+      id: "qwen3-vl-plus",
+      inputPerMillionUsd: 0.2,
+      maxOutputTokens: 32_768,
+      name: "Qwen3 VL Plus",
+      outputPerMillionUsd: 1.6,
+      provider,
+      supportsThinking: true,
+      supportsVision: true,
+    },
+    {
+      contextWindow: 1_000_000,
+      id: "qwen-flash",
+      inputPerMillionUsd: 0.05,
+      maxOutputTokens: 32_768,
+      name: "Qwen Flash",
+      outputPerMillionUsd: 0.4,
+      provider,
+      supportsThinking: true,
+      supportsVision: false,
+    },
+  ]),
+  {
+    contextWindow: 128_000,
+    default: true,
+    id: "openai/gpt-4o-mini",
+    inputPerMillionUsd: 0.15,
+    maxOutputTokens: 16_384,
+    name: "GPT-4o mini",
+    outputPerMillionUsd: 0.6,
+    provider: "vercel_ai_gateway",
+    supportsVision: true,
+  },
+  {
+    contextWindow: 400_000,
+    id: "openai/gpt-5",
+    inputPerMillionUsd: 1.25,
+    maxOutputTokens: 128_000,
+    name: "GPT-5",
+    outputPerMillionUsd: 10,
+    provider: "vercel_ai_gateway",
+    supportsThinking: true,
+    supportsVision: true,
+  },
+  {
+    contextWindow: 1_000_000,
+    id: "anthropic/claude-sonnet-4.5",
+    inputPerMillionUsd: 3,
+    maxOutputTokens: 64_000,
+    name: "Claude Sonnet 4.5",
+    outputPerMillionUsd: 15,
+    provider: "vercel_ai_gateway",
+    supportsThinking: true,
+    supportsVision: true,
+  },
+  {
+    contextWindow: 1_000_000,
+    id: "google/gemini-2.5-flash",
+    inputPerMillionUsd: 0.3,
+    maxOutputTokens: 65_536,
+    name: "Gemini 2.5 Flash",
+    outputPerMillionUsd: 2.5,
+    provider: "vercel_ai_gateway",
+    supportsThinking: true,
+    supportsVision: true,
+  },
+  {
+    contextWindow: 128_000,
+    id: "meta/llama-3.3-70b",
+    inputPerMillionUsd: 0.72,
+    maxOutputTokens: 8192,
+    name: "Llama 3.3 70B",
+    outputPerMillionUsd: 0.72,
+    provider: "vercel_ai_gateway",
+    supportsVision: false,
+  },
+  {
+    contextWindow: 1_000_000,
+    id: "deepseek/deepseek-v4-flash",
+    inputPerMillionUsd: 0.13,
+    maxOutputTokens: 384_000,
+    name: "DeepSeek V4 Flash",
+    outputPerMillionUsd: 0.26,
+    provider: "vercel_ai_gateway",
+    supportsThinking: true,
+    supportsVision: false,
+  },
+  {
+    contextWindow: 1_048_576,
+    default: true,
+    id: "mimo-v2.5-pro",
+    inputPerMillionUsd: 0.435,
+    maxOutputTokens: 131_072,
+    name: "MiMo V2.5 Pro",
+    outputPerMillionUsd: 0.87,
+    provider: "xiaomi",
+    supportsThinking: true,
+    supportsVision: false,
+  },
+  {
+    contextWindow: 1_048_576,
+    id: "mimo-v2.5",
+    inputPerMillionUsd: 0.14,
+    maxOutputTokens: 131_072,
+    name: "MiMo V2.5",
+    outputPerMillionUsd: 0.28,
+    provider: "xiaomi",
+    supportsThinking: true,
+    supportsVision: true,
   },
   {
     contextWindow: 131_072,
@@ -476,7 +800,7 @@ const BASE_MODELS: ProviderModelOption[] = withVisionDefaults([
 
 export const AVAILABLE_MODELS: ProviderModelOption[] = [
   ...BASE_MODELS,
-  ...deriveChatgptModels(BASE_MODELS),
+  ...CHATGPT_MODELS,
 ];
 
 export function validateOpenRouterCustomModels(
@@ -565,12 +889,31 @@ export function validateOpenCodeGoCustomModels(
   return models;
 }
 
-export function getAvailableModels(): ProviderModelOption[] {
-  return AVAILABLE_MODELS;
-}
-
 export function getModelById(modelId: string): ProviderModelOption | undefined {
   return AVAILABLE_MODELS.find((model) => model.id === modelId);
+}
+
+/** Compaction sizing for one model.
+ *
+ * A custom model id is never in the built-in catalog, so without the instance
+ * entry every custom provider would silently compact at the fallback window.
+ * Entries that leave the sizes blank keep the catalog value, then the fallback.
+ */
+export function resolveModelLimits(
+  provider: ProviderName,
+  modelId: string,
+  customModels?: CustomModelEntry[]
+): { contextWindow: number; maxOutputTokens: number } {
+  const catalog = getModelsForProvider(provider).find(
+    (model) => model.id === modelId
+  );
+  const custom = findCustomModel(customModels, modelId);
+
+  return {
+    contextWindow: custom?.contextWindow ?? catalog?.contextWindow ?? 128_000,
+    maxOutputTokens:
+      custom?.maxOutputTokens ?? catalog?.maxOutputTokens ?? 8192,
+  };
 }
 
 export function getModelsForProvider(
@@ -583,10 +926,9 @@ export function getDefaultModel(
   provider: ProviderName,
   customModels?: CustomModelEntry[]
 ): string {
-  if (isDiscoveryModelProvider(provider)) {
-    // Discovery providers fetch model lists live from the platform
-    // (/models) and store them as instance custom models — no hardcoded
-    // catalog.
+  if (isDiscoveryModelProvider(provider) || provider === "xai_oauth") {
+    // Discovery providers and Grok subscription fetch model lists live
+    // and store them as instance custom models — no hardcoded catalog.
     return resolveCompatibleDefaultModel(customModels);
   }
 
@@ -608,9 +950,18 @@ export function getDefaultModel(
 
   if (
     (provider === "openai" ||
+      provider === "chatgpt" ||
       provider === "anthropic" ||
       provider === "gemini" ||
       provider === "deepseek" ||
+      provider === "doubao" ||
+      provider === "together" ||
+      provider === "xiaomi" ||
+      provider === "vercel_ai_gateway" ||
+      provider === "mistral" ||
+      provider === "qwen" ||
+      provider === "qwen_cn" ||
+      provider === "perplexity" ||
       provider === "opencode_go") &&
     customModels?.length
   ) {
@@ -627,15 +978,27 @@ export function getDefaultModel(
           ? "gemini-2.5-flash"
           : provider === "deepseek"
             ? "deepseek-v4-flash"
-            : provider === "cerebras"
-              ? "gpt-oss-120b"
-              : provider === "fireworks"
-                ? "accounts/fireworks/models/kimi-k2p6"
-                : provider === "opencode_go"
-                  ? "opencode-go/kimi-k2.7-code"
-                  : provider === "cloudflare"
-                    ? "@cf/meta/llama-3.3-70b-instruct-fp8-fast"
-                    : "gpt-5.4";
+            : provider === "together"
+              ? "openai/gpt-oss-120b"
+              : provider === "xiaomi"
+                ? "mimo-v2.5-pro"
+                : provider === "vercel_ai_gateway"
+                  ? "openai/gpt-4o-mini"
+                  : provider === "mistral"
+                    ? "mistral-small-2603"
+                    : provider === "qwen" || provider === "qwen_cn"
+                      ? "qwen3.7-plus"
+                      : provider === "perplexity"
+                        ? "sonar"
+                        : provider === "cerebras"
+                          ? "gpt-oss-120b"
+                          : provider === "fireworks"
+                            ? "accounts/fireworks/models/kimi-k2p6"
+                            : provider === "opencode_go"
+                              ? "opencode-go/kimi-k2.7-code"
+                              : provider === "cloudflare"
+                                ? "@cf/meta/llama-3.3-70b-instruct-fp8-fast"
+                                : "gpt-5.4";
   return models.find((model) => model.default)?.id ?? models[0]?.id ?? fallback;
 }
 
@@ -699,6 +1062,14 @@ export function resolveModel(
       provider === "anthropic" ||
       provider === "gemini" ||
       provider === "deepseek" ||
+      provider === "doubao" ||
+      provider === "together" ||
+      provider === "xiaomi" ||
+      provider === "vercel_ai_gateway" ||
+      provider === "mistral" ||
+      provider === "qwen" ||
+      provider === "qwen_cn" ||
+      provider === "perplexity" ||
       provider === "cerebras" ||
       provider === "fireworks" ||
       provider === "opencode_go") &&
@@ -726,7 +1097,8 @@ export function resolveModel(
       provider === "anthropic" ||
       provider === "gemini" ||
       provider === "opencode_go" ||
-      provider === "chatgpt")
+      provider === "chatgpt" ||
+      provider === "xai_oauth")
   ) {
     return trimmed;
   }
@@ -775,7 +1147,9 @@ export function modelSupportsVision(
   if (
     provider === "openai" ||
     provider === "anthropic" ||
-    provider === "gemini"
+    provider === "gemini" ||
+    provider === "chatgpt" ||
+    provider === "xai_oauth"
   ) {
     return true;
   }

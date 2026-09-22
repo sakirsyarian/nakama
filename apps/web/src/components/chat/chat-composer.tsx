@@ -4,20 +4,39 @@ import type {
   AgentQuestionAnswer,
   AgentQuestionnaire,
   AgentTodo,
+  ChatUsage,
   ProviderModelOption,
   SkillSummary,
   ThinkingEffort,
 } from "@nakama/core/contract";
 import { MAX_IMAGE_BYTES } from "@nakama/core/message-content";
+import { Button } from "@nakama/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@nakama/ui/dropdown-menu";
+import { toast } from "@nakama/ui/toast";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@nakama/ui/tooltip";
+import { cn } from "@nakama/ui/utils";
 import {
   Add01Icon,
+  Alert02Icon,
   ArrowUp02Icon,
   Cancel01Icon,
   File01Icon,
   Image01Icon,
   WifiOff01Icon,
 } from "hugeicons-react";
-import { useCallback, useMemo, useRef, useState } from "react";
+import {
+  type ReactNode,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import {
   PromptInput,
   PromptInputBody,
@@ -39,6 +58,7 @@ import {
   ChatMessageQueuePanel,
   type QueuedComposerMessage,
 } from "@/components/chat/ChatMessageQueuePanel";
+import { ChatAddCapabilitiesDialogs } from "@/components/chat/chat-add-capabilities-dialogs";
 import { composerActions } from "@/components/chat/chat-composer-actions";
 import { ChatContextUsageRing } from "@/components/chat/chat-context-usage";
 import { ChatSkillPicker } from "@/components/chat/chat-skill-picker";
@@ -46,28 +66,21 @@ import { ChatSkillTokenOverlay } from "@/components/chat/chat-skill-token-overla
 import { ChatThinkingEffortControl } from "@/components/chat/chat-thinking-effort-control";
 import { ImageAttachmentPreview } from "@/components/chat/image-attachment-preview";
 import { TextAttachmentPreview } from "@/components/chat/text-attachment-preview";
-import { Button } from "@/components/ui/button";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipTrigger,
-} from "@/components/ui/tooltip";
+import { useAuth } from "@/context/use-auth";
 import type { ChatStatus, FileUIPart } from "@/lib/ai-ui-types";
 import {
+  type ComposerAddCommandAction,
   type ComposerSlashSuggestion,
   filterComposerSlashSuggestions,
   findActiveSkillSlashRange,
+  matchComposerAddCommand,
+  matchComposerLearningLoopCommand,
   replaceSlashRangeWithReservedCommand,
   replaceSlashRangeWithSkillInvocation,
   type SkillSlashRange,
 } from "@/lib/chat-composer-skills";
 import type { ChatContextUsage } from "@/lib/chat-context-usage";
+import { storeComposerDraft } from "@/lib/chat-history";
 import {
   ALL_ATTACHMENT_ACCEPT,
   DOCUMENT_ACCEPT,
@@ -84,13 +97,13 @@ import {
   composerShellCompactClass,
   composerToolbarClass,
 } from "@/lib/chat-stream";
+import { formatError } from "@/lib/client";
 import { prepareChatUploadFiles } from "@/lib/compress-image";
 import { encodeModelSelection } from "@/lib/models";
 import {
   isPastedTextDocument,
   LONG_PASTE_WORD_THRESHOLD,
 } from "@/lib/pasted-text";
-import { cn } from "@/lib/utils";
 import { ChatComposerError, ChatTips } from "./chat-tips";
 
 interface ChatComposerBaseProps {
@@ -99,6 +112,7 @@ interface ChatComposerBaseProps {
   chatStatus: ChatStatus;
   className?: string;
   disabled?: boolean;
+  draftStorageKey?: string | null;
   error: string | null;
   footerClassName?: string;
   onStop?: () => void;
@@ -118,10 +132,12 @@ interface ChatComposerFullProps extends ChatComposerBaseProps {
   availableSkills?: SkillSummary[];
   contextUsage?: ChatContextUsage | null;
   currentModelSelection: string | null;
+  headerNotice?: ReactNode;
+  onConnectProvider?: () => void;
   onModelChange: (selection: string) => void;
-  onNavigateSetup?: () => void;
   onThinkingEffortChange?: (effort: ThinkingEffort) => void;
   primarySupportsVision?: boolean;
+  profileId?: string | null;
   profileModelId?: string | null;
   providerConfigured?: boolean;
   providerModelGroups: Array<{
@@ -130,6 +146,7 @@ interface ChatComposerFullProps extends ChatComposerBaseProps {
     models: ProviderModelOption[];
   }>;
   renderModelLabel: (selection: string | null) => string | null;
+  sessionUsage?: ChatUsage | null;
   showOfflineHint?: boolean;
   showTips?: boolean;
   thinkingEffort?: ThinkingEffort;
@@ -148,13 +165,18 @@ const EMPTY_SKILLS: SkillSummary[] = [];
 
 function ChatComposerNotice({
   error,
+  headerNotice,
   showTips,
 }: {
   error: string | null;
+  headerNotice?: ReactNode;
   showTips: boolean;
 }) {
   if (error) {
     return <ChatComposerError message={error} />;
+  }
+  if (headerNotice) {
+    return headerNotice;
   }
   if (showTips) {
     return <ChatTips />;
@@ -163,27 +185,38 @@ function ChatComposerNotice({
 }
 
 function ChatComposerOfflineHint({
-  onNavigateSetup,
+  onConnectProvider,
 }: {
-  onNavigateSetup?: () => void;
+  onConnectProvider?: () => void;
 }) {
   return (
-    <p
-      className="flex items-center gap-2 rounded-lg border border-amber-500/25 bg-amber-500/10 px-3 py-2 text-amber-800 text-xs dark:text-amber-200"
+    <div
+      className="mx-4 mb-2 flex flex-col gap-2 rounded-xl border border-amber-500/25 bg-amber-500/5 px-3 py-2.5 sm:flex-row sm:items-center sm:justify-between"
       role="status"
     >
-      <WifiOff01Icon aria-hidden className="size-3.5 shrink-0" />
-      <span>
-        No provider configured — limited responses.{" "}
-        <button
-          className="font-medium underline underline-offset-2 hover:text-amber-900 dark:hover:text-amber-100"
-          onClick={onNavigateSetup}
-          type="button"
-        >
-          Set up provider
-        </button>
-      </span>
-    </p>
+      <div className="flex min-w-0 items-start gap-2">
+        <Alert02Icon
+          aria-hidden="true"
+          className="mt-0.5 size-4 shrink-0 text-amber-700 dark:text-amber-300"
+        />
+        <div className="min-w-0 space-y-0.5">
+          <p className="font-semibold text-foreground text-sm">
+            One more step to start chatting
+          </p>
+          <p className="text-muted-foreground text-sm">
+            Connect an AI service so Nakama can respond to your messages.
+          </p>
+        </div>
+      </div>
+      <Button
+        className="shrink-0 self-start sm:self-auto"
+        onClick={onConnectProvider}
+        size="sm"
+        type="button"
+      >
+        Set up AI
+      </Button>
+    </div>
   );
 }
 
@@ -244,6 +277,8 @@ function ChatComposerStackedPrompt({
   disabled,
   displayError,
   footerClassName,
+  headerNotice,
+  onAddCommand,
   onStop,
   onSubmit,
   placeholder,
@@ -260,6 +295,8 @@ function ChatComposerStackedPrompt({
   disabled: boolean;
   displayError: string | null;
   footerClassName?: string;
+  headerNotice?: ReactNode;
+  onAddCommand?: (action: ComposerAddCommandAction) => void;
   onStop?: () => void;
   onSubmit: (text: string, files: FileUIPart[]) => void;
   placeholder: string;
@@ -271,7 +308,11 @@ function ChatComposerStackedPrompt({
 }) {
   return (
     <>
-      <ChatComposerNotice error={displayError} showTips={showTips} />
+      <ChatComposerNotice
+        error={displayError}
+        headerNotice={headerNotice}
+        showTips={showTips}
+      />
       <PromptInput
         accept={ALL_ATTACHMENT_ACCEPT}
         className={composerShellClass}
@@ -295,6 +336,7 @@ function ChatComposerStackedPrompt({
             disabled={disabled}
             key={skillPickerKey}
             longPasteWordThreshold={LONG_PASTE_WORD_THRESHOLD}
+            onAddCommand={onAddCommand}
             placeholder={placeholder}
           />
         </PromptInputBody>
@@ -327,7 +369,9 @@ function ChatComposerBarePrompt({
   disabled,
   displayError,
   footerClassName,
+  headerNotice,
   isMinimal,
+  onAddCommand,
   onStop,
   onSubmit,
   placeholder,
@@ -344,7 +388,9 @@ function ChatComposerBarePrompt({
   disabled: boolean;
   displayError: string | null;
   footerClassName?: string;
+  headerNotice?: ReactNode;
   isMinimal: boolean;
+  onAddCommand?: (action: ComposerAddCommandAction) => void;
   onStop?: () => void;
   onSubmit: (text: string, files: FileUIPart[]) => void;
   placeholder: string;
@@ -356,7 +402,11 @@ function ChatComposerBarePrompt({
 }) {
   return (
     <>
-      <ChatComposerNotice error={displayError} showTips={showTips} />
+      <ChatComposerNotice
+        error={displayError}
+        headerNotice={headerNotice}
+        showTips={showTips}
+      />
       <PromptInput
         accept={isMinimal ? undefined : ALL_ATTACHMENT_ACCEPT}
         className={isMinimal ? composerShellCompactClass : composerShellClass}
@@ -388,6 +438,7 @@ function ChatComposerBarePrompt({
             longPasteWordThreshold={
               isMinimal ? undefined : LONG_PASTE_WORD_THRESHOLD
             }
+            onAddCommand={onAddCommand}
             placeholder={placeholder}
           />
         </PromptInputBody>
@@ -434,7 +485,8 @@ function isFullComposer(
 
 function resolveChatComposerLayout(
   props: ChatComposerProps,
-  displayError: string | null
+  displayError: string | null,
+  enableAddCommands = false
 ) {
   const isMinimal = props.variant === "minimal";
   const todos = props.todos ?? EMPTY_TODOS;
@@ -451,6 +503,7 @@ function resolveChatComposerLayout(
   return {
     availableSkills,
     disabled: props.disabled ?? false,
+    enableAddCommands: !isMinimal && enableAddCommands,
     hasQuestionnaire,
     hasQueuedMessages,
     isMinimal,
@@ -473,11 +526,13 @@ function resolveChatComposerLayout(
 function ChatComposerMain({
   displayError,
   layout,
+  onAddCommand,
   props,
   setAttachmentError,
 }: {
   displayError: string | null;
   layout: ReturnType<typeof resolveChatComposerLayout>;
+  onAddCommand: (action: ComposerAddCommandAction) => void;
   props: ChatComposerProps;
   setAttachmentError: (message: string | null) => void;
 }) {
@@ -489,6 +544,8 @@ function ChatComposerMain({
     disabled: layout.disabled,
     displayError,
     footerClassName: props.footerClassName,
+    headerNotice: isFullComposer(props) ? props.headerNotice : undefined,
+    onAddCommand: layout.enableAddCommands ? onAddCommand : undefined,
     onStop: props.onStop,
     onSubmit: props.onSubmit,
     placeholder: layout.placeholder,
@@ -536,21 +593,107 @@ function ChatComposerMain({
 }
 
 export function ChatComposer(props: ChatComposerProps) {
+  const { activeOrg, updateOrg, user } = useAuth();
+  const { textInput } = usePromptInputController();
+  const [addDialog, setAddDialog] = useState<ComposerAddCommandAction | null>(
+    null
+  );
+  useEffect(() => {
+    storeComposerDraft(props.draftStorageKey ?? null, textInput.value);
+  }, [props.draftStorageKey, textInput.value]);
+
+  function clearDraft() {
+    if (!props.draftStorageKey) {
+      return;
+    }
+    storeComposerDraft(props.draftStorageKey, "");
+    textInput.clear();
+  }
+
+  const openAddCommand = useCallback((action: ComposerAddCommandAction) => {
+    setAddDialog(action);
+  }, []);
+
+  const canAddCapabilities =
+    isFullComposer(props) &&
+    Boolean(props.profileId) &&
+    !(props.disabled ?? false) &&
+    user?.isPlatformAdmin === true;
+
+  const composerProps: ChatComposerProps = {
+    ...props,
+    onSubmit: (text, files) => {
+      if (matchComposerLearningLoopCommand(text)) {
+        clearDraft();
+        if (!activeOrg) {
+          toast("Select an organization before enabling the learning loop.");
+          return;
+        }
+        void updateOrg(activeOrg.id, { skillsPostTurnReview: true })
+          .then(() => toast("Learning loop activated."))
+          .catch((error) => toast(formatError(error)));
+        return;
+      }
+      const addCommand = canAddCapabilities
+        ? matchComposerAddCommand(text)
+        : null;
+      if (addCommand) {
+        clearDraft();
+        openAddCommand(addCommand);
+        return;
+      }
+      clearDraft();
+      props.onSubmit(text, files);
+    },
+    onSubmitQuestionnaire: props.onSubmitQuestionnaire
+      ? (answers) => {
+          clearDraft();
+          props.onSubmitQuestionnaire?.(answers);
+        }
+      : undefined,
+  };
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
   const displayError = props.error ?? attachmentError;
-  const layout = resolveChatComposerLayout(props, displayError);
+  const layout = resolveChatComposerLayout(
+    composerProps,
+    displayError,
+    canAddCapabilities
+  );
+
+  const addProfileId =
+    isFullComposer(composerProps) && layout.enableAddCommands
+      ? (composerProps.profileId ?? null)
+      : null;
 
   return (
     <div className={cn("w-full shrink-0", props.className)}>
       {layout.showOfflineHint && isFullComposer(props) ? (
-        <ChatComposerOfflineHint onNavigateSetup={props.onNavigateSetup} />
+        <ChatComposerOfflineHint onConnectProvider={props.onConnectProvider} />
       ) : null}
       <ChatComposerMain
         displayError={displayError}
         layout={layout}
-        props={props}
+        onAddCommand={openAddCommand}
+        props={composerProps}
         setAttachmentError={setAttachmentError}
       />
+      {addProfileId ? (
+        <ChatAddCapabilitiesDialogs
+          mcpOpen={addDialog === "add-mcp"}
+          onMcpOpenChange={(open) => {
+            setAddDialog(open ? "add-mcp" : null);
+          }}
+          onPluginOpenChange={(open) =>
+            setAddDialog(open ? "add-plugin" : null)
+          }
+          onToolOpenChange={(open) => {
+            setAddDialog(open ? "add-tool" : null);
+          }}
+          pluginOpen={addDialog === "add-plugin"}
+          profileId={addProfileId}
+          toolOpen={addDialog === "add-tool"}
+        />
+      ) : null}
     </div>
   );
 }
@@ -559,12 +702,14 @@ function ChatComposerTextarea({
   availableSkills,
   disabled,
   className,
+  onAddCommand,
   placeholder,
   longPasteWordThreshold,
 }: {
   availableSkills: SkillSummary[];
   disabled: boolean;
   className: string;
+  onAddCommand?: (action: ComposerAddCommandAction) => void;
   placeholder: string;
   longPasteWordThreshold?: number;
 }) {
@@ -576,9 +721,11 @@ function ChatComposerTextarea({
   const suggestions = useMemo(
     () =>
       slashRange
-        ? filterComposerSlashSuggestions(availableSkills, slashRange.query)
+        ? filterComposerSlashSuggestions(availableSkills, slashRange.query, {
+            enableAddCommands: onAddCommand != null,
+          })
         : [],
-    [availableSkills, slashRange]
+    [availableSkills, onAddCommand, slashRange]
   );
   const pickerOpen = Boolean(slashRange && !disabled && suggestions.length > 0);
   const safeActiveIndex =
@@ -600,6 +747,23 @@ function ChatComposerTextarea({
         slashRange ?? findActiveSkillSlashRange(value, cursorIndex);
 
       if (!activeRange) {
+        return;
+      }
+
+      const addAction =
+        suggestion.kind === "command" ? suggestion.command.action : undefined;
+      if (
+        onAddCommand &&
+        (addAction === "add-tool" ||
+          addAction === "add-mcp" ||
+          addAction === "add-plugin")
+      ) {
+        controller.textInput.setInput(
+          `${value.slice(0, activeRange.start)}${value.slice(activeRange.end)}`
+        );
+        setSlashRange(null);
+        setActiveIndex(0);
+        onAddCommand(addAction);
         return;
       }
 
@@ -627,7 +791,7 @@ function ChatComposerTextarea({
         textareaRef.current?.focus();
       });
     },
-    [controller.textInput, slashRange]
+    [controller.textInput, onAddCommand, slashRange]
   );
 
   return (
@@ -684,7 +848,10 @@ function ChatComposerTextarea({
             return;
           }
 
-          if (event.key === "Enter" && !event.shiftKey) {
+          if (
+            (event.key === "Enter" || event.key === "Tab") &&
+            !event.shiftKey
+          ) {
             event.preventDefault();
             const suggestion = suggestions[safeActiveIndex];
             if (suggestion) {
@@ -722,7 +889,10 @@ function ChatComposerFullFooter({
         role="toolbar"
       >
         {props.contextUsage ? (
-          <ChatContextUsageRing usage={props.contextUsage} />
+          <ChatContextUsageRing
+            sessionUsage={props.sessionUsage}
+            usage={props.contextUsage}
+          />
         ) : null}
 
         {props.providerConfigured ? (

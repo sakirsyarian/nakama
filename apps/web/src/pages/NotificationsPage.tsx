@@ -1,5 +1,6 @@
+import { Card } from "@nakama/ui/card";
+import { Spinner } from "@nakama/ui/spinner";
 import { NotificationList } from "@/components/notifications/notification-list";
-import { Spinner } from "@/components/ui/spinner";
 import { useNotifications } from "@/hooks/use-notifications";
 
 export function NotificationsPage() {
@@ -14,7 +15,7 @@ export function NotificationsPage() {
   }
 
   return (
-    <div className="mx-auto w-full min-w-0 max-w-3xl">
+    <Card className="mx-auto w-full min-w-0 max-w-3xl overflow-hidden shadow-none">
       {totalCount === 0 ? (
         <p className="py-6 text-center text-muted-foreground text-sm">
           All caught up
@@ -22,6 +23,6 @@ export function NotificationsPage() {
       ) : (
         <NotificationList items={items} />
       )}
-    </div>
+    </Card>
   );
 }

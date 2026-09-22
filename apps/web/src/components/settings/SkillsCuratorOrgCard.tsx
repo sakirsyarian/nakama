@@ -1,12 +1,12 @@
 import type { SkillCuratorRunResult } from "@nakama/core/contract";
+import { Button } from "@nakama/ui/button";
+import { Card } from "@nakama/ui/card";
+import { Spinner } from "@nakama/ui/spinner";
+import { Switch } from "@nakama/ui/switch";
+import { toast } from "@nakama/ui/toast";
 import { useCallback, useEffect, useState } from "react";
-import { Button } from "@/components/ui/button";
-import { Card } from "@/components/ui/card";
-import { Spinner } from "@/components/ui/spinner";
-import { Switch } from "@/components/ui/switch";
 import { useAuth } from "@/context/use-auth";
 import { client, formatError } from "@/lib/client";
-import { toast } from "@/lib/toast";
 
 function parseIntegerInput(value: string): number | undefined {
   const parsed = Number(value);
@@ -349,6 +349,7 @@ export function SkillsCuratorOrgCard() {
                   setBusy
                 )
               }
+              size="sm"
             />
           </div>
         </div>
@@ -372,6 +373,7 @@ export function SkillsCuratorOrgCard() {
                   setBusy
                 )
               }
+              size="sm"
             />
           </div>
         </div>

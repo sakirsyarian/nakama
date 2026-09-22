@@ -6,15 +6,18 @@ import { NakamaApiError } from "./api-error";
 import { pathExists } from "./fs";
 import {
   applyChatgptOAuthToInstance,
+  applyXaiOAuthToInstance,
   chatgptOAuthNeedsRefresh,
   createProviderInstanceId,
   ensureUserConfigDir,
   getUserConfigPath,
   isChatgptProviderConnected,
+  isProviderConfigured,
   loadUserConfig,
   loadUserWebPublicUrl,
   normalizeProviderInstanceLabel,
   readChatgptOAuthFromInstance,
+  readXaiOAuthFromInstance,
   saveUserConfig,
   saveUserTimezone,
   saveUserWebPublicUrl,
@@ -96,6 +99,33 @@ describe("ensureUserConfigDir", () => {
 
 describe("user config multi-provider", () => {
   let configDir = "";
+
+  test("round-trips Grok OAuth tokens without using the API key field", async () => {
+    configDir = await mkdtemp(join(tmpdir(), "nakama-xai-oauth-"));
+    process.env.NAKAMA_CONFIG_DIR = configDir;
+    const oauth = {
+      accessToken: "access",
+      expiresAt: "2027-01-01T00:00:00.000Z",
+      refreshToken: "refresh",
+    };
+    const instance = applyXaiOAuthToInstance(
+      {
+        apiKey: "",
+        createdAt: new Date().toISOString(),
+        id: "grok",
+        label: "Grok",
+        type: "xai_oauth",
+      },
+      oauth
+    );
+    await saveUserConfig({
+      defaultProviderId: instance.id,
+      providers: [instance],
+    });
+    const loaded = await loadUserConfig();
+    expect(readXaiOAuthFromInstance(loaded!.providers[0]!)).toEqual(oauth);
+    expect(loaded!.providers[0]!.apiKey).toBe("");
+  });
 
   afterEach(async () => {
     if (configDir) {
@@ -246,6 +276,91 @@ describe("user config multi-provider", () => {
     );
   });
 
+  test("round-trips discovered models_json for discovery providers", async () => {
+    // The writer persists customModels for every provider type, so the reader
+    // must parse them back for discovery providers too — otherwise a fetched
+    // catalog is written to disk and dropped on the next load.
+    configDir = await mkdtemp(join(tmpdir(), "nakama-config-"));
+    process.env.NAKAMA_CONFIG_DIR = configDir;
+
+    const moonshotId = createProviderInstanceId();
+    const zhipuId = createProviderInstanceId();
+
+    await saveUserConfig({
+      defaultProviderId: moonshotId,
+      providers: [
+        {
+          apiKey: "sk-moonshot-test",
+          baseUrl: "https://api.moonshot.ai/v1",
+          createdAt: "2026-09-08T10:00:00.000Z",
+          customModels: [
+            {
+              default: true,
+              id: "kimi-k2.5",
+              inputPerMillionUsd: 0.6,
+              name: "Kimi K2.5",
+              outputPerMillionUsd: 2.5,
+              supportsVision: false,
+            },
+          ],
+          id: moonshotId,
+          label: "Moonshot Kimi",
+          type: "moonshot",
+        },
+        {
+          apiKey: "zp-test",
+          createdAt: "2026-09-08T10:00:00.000Z",
+          customModels: [{ default: true, id: "glm-5.2" }],
+          id: zhipuId,
+          label: "GLM (Z.ai)",
+          type: "zhipu",
+        },
+      ],
+    });
+
+    const loaded = await loadUserConfig();
+    expect(loaded?.providers[0]?.customModels?.[0]?.id).toBe("kimi-k2.5");
+    expect(loaded?.providers[0]?.customModels?.[0]?.inputPerMillionUsd).toBe(
+      0.6
+    );
+    expect(loaded?.providers[1]?.customModels?.[0]?.id).toBe("glm-5.2");
+  });
+
+  test("round-trips catalog shortlist models_json for Xiaomi MiMo", async () => {
+    configDir = await mkdtemp(join(tmpdir(), "nakama-config-"));
+    process.env.NAKAMA_CONFIG_DIR = configDir;
+
+    const xiaomiId = createProviderInstanceId();
+
+    await saveUserConfig({
+      defaultProviderId: xiaomiId,
+      providers: [
+        {
+          apiKey: "sk-xiaomi-test",
+          createdAt: "2026-09-09T10:00:00.000Z",
+          customModels: [
+            {
+              default: true,
+              id: "mimo-v2.5",
+              name: "MiMo V2.5",
+              supportsThinking: true,
+              supportsVision: true,
+            },
+          ],
+          id: xiaomiId,
+          label: "Xiaomi MiMo",
+          type: "xiaomi",
+        },
+      ],
+    });
+
+    const loaded = await loadUserConfig();
+    expect(loaded?.providers[0]?.customModels?.[0]?.id).toBe("mimo-v2.5");
+    expect(loaded?.providers[0]?.customModels?.[0]?.supportsThinking).toBe(
+      true
+    );
+  });
+
   test("repairs literal undefined label on load", async () => {
     configDir = await mkdtemp(join(tmpdir(), "nakama-config-"));
     process.env.NAKAMA_CONFIG_DIR = configDir;
@@ -287,6 +402,38 @@ created_at=2026-06-15T00:00:00.000Z
 });
 
 describe("chatgpt oauth helpers", () => {
+  test("recognizes a signed-in ChatGPT default provider without an API key", () => {
+    const provider = applyChatgptOAuthToInstance(
+      {
+        apiKey: "",
+        createdAt: "2026-01-01T00:00:00.000Z",
+        id: "chatgpt-1",
+        label: "ChatGPT",
+        type: "chatgpt",
+      },
+      {
+        accessToken: "test-access",
+        accountId: "test-account",
+        expiresAt: "2026-01-02T00:00:00.000Z",
+        refreshToken: "test-refresh",
+      }
+    );
+    const config = { defaultProviderId: provider.id, providers: [provider] };
+
+    expect(isProviderConfigured(config, {})).toBe(true);
+    for (const patch of [
+      { chatgptRefreshToken: "" },
+      { chatgptAccountId: "" },
+    ]) {
+      expect(
+        isProviderConfigured(
+          { ...config, providers: [{ ...provider, ...patch }] },
+          {}
+        )
+      ).toBe(false);
+    }
+  });
+
   test("isChatgptProviderConnected requires refresh token and account id", () => {
     expect(
       isChatgptProviderConnected({

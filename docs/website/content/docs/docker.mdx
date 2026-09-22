@@ -3,6 +3,34 @@ title: "Docker"
 description: "Run Nakama in a single Docker container with persistent data volumes."
 ---
 
+## Requirements
+
+One container, one process tree. Measured on `ghcr.io/ahmadrosid/nakama:latest`
+(v0.4.20) with no LLM provider and no channel workers:
+
+| | |
+| --- | --- |
+| Image on disk | 734 MB |
+| Memory, idle | ~200 MB |
+| Memory, serving chat | ~240 MB |
+| Memory, automation worker also running | ~247 MB |
+| Boot to `/health` | 3 to 5 seconds |
+| Data directory on first boot | 1.2 MB |
+
+It starts and serves on **1 vCPU and 1 GB**. It also starts under a 512 MB cap,
+using 221 MB, but that leaves nothing for the rest of the box.
+
+Three things raise the figure and are not in the table:
+
+- **Channel workers.** Telegram, WhatsApp, and Discord each run as their own
+  process next to the server. WhatsApp carries Baileys and libsignal and is the
+  heaviest of the three. Size for them separately if you enable them.
+- **A configured provider.** The numbers above come from offline mode, so no
+  model traffic passed through the container.
+- **The MicroSandbox bash backend**, which needs a working hypervisor at
+  `/dev/kvm`. Most small VPS plans do not expose it. See
+  [MicroSandbox bash backend](#optional-microsandbox-bash-backend).
+
 ## Quick run
 
 Pull the prebuilt image and start Nakama:
@@ -32,9 +60,18 @@ The data root follows `NAKAMA_CONFIG_DIR` when set. By default it is `/nakama/da
 
 On first run, complete the setup wizard in the browser and add your LLM provider. See [Providers](/providers) and [First-time setup](/first-time-setup).
 
+### Logs and monitoring
+
+Use readiness checks to keep traffic away from an unavailable database, and request IDs to connect an HTTP response with its logs.
+
+- Set `NAKAMA_LOG_FORMAT=json` for JSON lines on standard output. `NAKAMA_LOG_LEVEL` accepts `debug`, `info` (default), `warn`, `error`, or `silent`. These settings cover HTTP request logging and the initial worker lifecycle events; other existing logs remain unchanged.
+- HTTP responses include `X-Request-Id`. Nakama honors incoming IDs up to 255 characters or generates one. Response logs include this ID, method, status, and duration; `debug` also logs request start. URLs, request bodies, and credentials are not included in these HTTP logs. Streaming durations measure response setup, not the whole stream.
+- Use `/healthz` for liveness and `/readyz` for readiness on port 4310. Readiness returns 200 when the active connection can read the migrated database, or 503 when unavailable. It does not track restore progress and can remain ready while the old connection is still usable. Neither probe needs login or checks external providers or worker connectivity. The existing `/health` behavior is unchanged.
+- Set `NAKAMA_METRICS=true` to enable `/metrics`; otherwise it returns 404. It serves Prometheus-format HTTP response and server-error counters, which reset on process restart. Nakama sends nothing to an external collector. The endpoint needs no login and uses the same listener as the dashboard: restrict access through your network or reverse proxy before enabling it.
+
 ### First-boot seed (optional)
 
-To skip the setup wizard on a fresh data volume, set all three admin seed variables before the first boot. Nakama creates the admin account, a `Personal` org (override with `NAKAMA_SEED_ORG_NAME`), and an OpenCode Zen provider. Self-hosted installs without these variables behave as today.
+To skip the setup wizard on a fresh data volume, set all three admin seed variables before the first boot. Nakama creates the admin account and a `Personal` org (override with `NAKAMA_SEED_ORG_NAME`). No provider is created: after the first login, open `/setup` to add one. Self-hosted installs without these variables behave as today.
 
 | Variable | Required | Purpose |
 |---|---|---|
@@ -77,6 +114,14 @@ docker run -d -p 4310:4310 -v nakama-data:/nakama/data \
 ```
 
 See [Agent browser](/agent-browser#3-optional-cloakbrowser-for-antibot-sites).
+
+## Optional: MicroSandbox bash backend
+
+Stock `docker run` / `./scripts/docker-build-run.sh` does **not** pass `/dev/kvm` (or nested virtualization). Keep `NAKAMA_BASH_BACKEND=host` (the default) inside Docker unless you deliberately add hypervisor access.
+
+In Docker, host Bash runs inside the Nakama container with the server process's OS permissions. It can access mounted data outside the active profile workspace, including other profiles' files when permissions allow. The shared container does not isolate profiles from each other. Assign host Bash only to trusted profiles.
+
+If you set `NAKAMA_BASH_BACKEND=microsandbox` without a working MicroSandbox runtime / KVM device, **every** `bash` tool call fails closed — there is no silent host fallback. Coding-agent harness runs require `host` for now. See [Built-in tools — bash](/builtin-tools#bash).
 
 ## Next steps
 

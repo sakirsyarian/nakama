@@ -1,19 +1,20 @@
 import { join } from "node:path";
 import { NakamaClient } from "@nakama/client";
-import { installErrorHandlers, installErrorTrackingSink } from "@nakama/core";
-import { hasActiveStreams } from "@nakama/core/channel-active-stream";
 import {
-  ChannelOrgStore,
-  getChannelOrgSelectionPath,
-} from "@nakama/core/channel-org";
+  installErrorHandlers,
+  installErrorTrackingSink,
+  log,
+} from "@nakama/core";
+import { hasActiveStreams } from "@nakama/core/channel-active-stream";
+import { channelOwnerFromEnv } from "@nakama/core/channel-config-shared";
+import { ChannelOrgStore } from "@nakama/core/channel-org";
 import { ChannelSessionStore } from "@nakama/core/channel-session-store";
 import { getDiscordConfigDir } from "@nakama/core/discord-config";
 import {
-  clearDiscordWorkerHeartbeat,
+  createDiscordWorkerHeartbeat,
   isHeartbeatAlive,
-  readDiscordWorkerHeartbeat,
-  writeDiscordWorkerHeartbeat,
 } from "@nakama/core/discord-worker";
+
 import {
   ensureServerRunning,
   stopSpawnedServer,
@@ -27,6 +28,16 @@ import { ThreadStore } from "./thread-store";
 
 installErrorHandlers("worker:discord");
 void installErrorTrackingSink();
+
+const owner = channelOwnerFromEnv();
+const heartbeat = createDiscordWorkerHeartbeat(owner);
+const clearDiscordWorkerHeartbeat = heartbeat.clear;
+const readDiscordWorkerHeartbeat = heartbeat.read;
+const writeDiscordWorkerHeartbeat = (
+  pid: number,
+  updatedAt: string,
+  connected: boolean
+) => heartbeat.write({ connected, pid, updatedAt });
 
 let spawnedChild: Bun.Subprocess | null = null;
 let clientStop: (() => void | Promise<void>) | null = null;
@@ -63,7 +74,10 @@ try {
   }
 
   const config = await loadConfig();
-  const { serverUrl, spawnedChild: child } = await ensureServerRunning();
+  await heartbeat.acquire();
+  const { serverUrl, spawnedChild: child } = await ensureServerRunning({
+    spawn: false,
+  });
   spawnedChild = child;
 
   const client = new NakamaClient({
@@ -71,6 +85,7 @@ try {
       (await loadLocalAuthToken("discord@nakama.internal")) ?? undefined,
     baseUrl: serverUrl,
     clientOrigin: resolveWebPublicUrl(),
+    orgId: owner.orgId,
   });
   const health = await client.health();
 
@@ -93,17 +108,21 @@ try {
   }
 
   const sessionStore = new ChannelSessionStore(
-    join(getDiscordConfigDir(), "chat-sessions.json")
+    join(getDiscordConfigDir(owner), "chat-sessions.json")
   );
   await sessionStore.load();
 
-  const threadStore = new ThreadStore();
+  const threadStore = new ThreadStore(
+    join(getDiscordConfigDir(owner), "chat-threads.json")
+  );
   await threadStore.load();
 
-  const orgStore = new ChannelOrgStore(getChannelOrgSelectionPath("discord"));
+  const orgStore = new ChannelOrgStore(
+    join(getDiscordConfigDir(owner), "org-selection.json")
+  );
   await orgStore.load();
 
-  const authStore = new DiscordAuthStore();
+  const authStore = new DiscordAuthStore(owner);
   await authStore.reload();
 
   const discord = await createBot(config, {
@@ -114,7 +133,7 @@ try {
     threadStore,
   });
 
-  console.log("Nakama Discord bridge running.");
+  log("info", "worker.started", { worker: "discord" });
   console.log(`Server: ${serverUrl}`);
   console.log(`Profile: ${config.profileId}`);
   const authConfig = authStore.getConfig();

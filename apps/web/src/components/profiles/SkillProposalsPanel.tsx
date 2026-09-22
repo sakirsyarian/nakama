@@ -3,16 +3,17 @@ import type {
   ProfileSummary,
   SkillProposal,
 } from "@nakama/core/contract";
-import { useState } from "react";
-import { Button } from "@/components/ui/button";
+import { Button } from "@nakama/ui/button";
 import {
   Dialog,
   DialogContent,
   DialogFooter,
   DialogHeader,
   DialogTitle,
-} from "@/components/ui/dialog";
-import { Spinner } from "@/components/ui/spinner";
+} from "@nakama/ui/dialog";
+import { Spinner } from "@nakama/ui/spinner";
+import { toast } from "@nakama/ui/toast";
+import { useState } from "react";
 import { useProfilesQuery } from "@/hooks/use-app-queries";
 import { useOrgMembers } from "@/hooks/use-org-members";
 import {
@@ -25,7 +26,6 @@ import {
   formatSessionTimestamp,
 } from "@/lib/chat-history";
 import { formatError } from "@/lib/client";
-import { toast } from "@/lib/toast";
 
 function shortenId(value: string): string {
   return value.length > 16 ? `${value.slice(0, 12)}…` : value;
@@ -47,7 +47,17 @@ function resolveProposer(
 
 function proposalPreview(proposal: SkillProposal): string {
   if (proposal.action === "create" && proposal.content) {
-    return proposal.content;
+    const files = (proposal.supportingFiles ?? []).map((file) => {
+      const bytes = Uint8Array.from(atob(file.contentBase64), (char) =>
+        char.charCodeAt(0)
+      );
+      try {
+        return `\n\n--- ${file.path} ---\n${new TextDecoder("utf-8", { fatal: true }).decode(bytes)}`;
+      } catch {
+        return `\n\n--- ${file.path} (binary, ${bytes.length} bytes) ---`;
+      }
+    });
+    return proposal.content + files.join("");
   }
   if (proposal.action === "edit" && proposal.content) {
     return proposal.content;
@@ -125,7 +135,7 @@ function ProposalReviewDialog({
 
   return (
     <Dialog onOpenChange={onOpenChange} open={open}>
-      <DialogContent className="gap-4 overflow-hidden p-4 sm:max-w-lg sm:p-6">
+      <DialogContent className="gap-4 overflow-hidden p-4 sm:max-w-2xl sm:p-6">
         <DialogHeader className="pr-8">
           <DialogTitle>
             {actionLabel(proposal.action)} skill &ldquo;{proposal.skillName}

@@ -3,6 +3,7 @@ import {
   Events,
   GatewayIntentBits,
   type Message,
+  MessageFlags,
   Partials,
 } from "discord.js";
 import {
@@ -50,7 +51,9 @@ export async function createBot(
   });
 
   client.on(Events.MessageCreate, async (message: Message) => {
-    console.log(formatDiscordInboundMessageLog(message));
+    if (isChannelDebugEnabled()) {
+      console.log(formatDiscordInboundMessageLog(message));
+    }
     try {
       await handler.handleMessage(message);
     } catch (error) {
@@ -65,6 +68,34 @@ export async function createBot(
   // HTTP interaction endpoint, verify signatures with the app public key before
   // handling the body; do not copy this gateway-only handler as-is.
   client.on(Events.InteractionCreate, async (interaction) => {
+    if (
+      (interaction.isStringSelectMenu() || interaction.isButton()) &&
+      /^nakama:(org|profile|sessions):/.test(interaction.customId)
+    ) {
+      try {
+        // Private pickers can update in place; copied/foreign controls cannot mutate state.
+        if (interaction.customId.split(":")[2] !== interaction.user.id) {
+          await interaction.reply({
+            content: "Open your own /org, /profile or /sessions picker.",
+            flags: MessageFlags.Ephemeral,
+          });
+          return;
+        }
+        await interaction.deferUpdate();
+        await handler.handleSelectionInteraction(interaction);
+      } catch (error) {
+        if (!isIgnorableInteractionError(error)) {
+          console.error("Selection interaction error:", error);
+          await interaction
+            .editReply({
+              components: [],
+              content: "Something went wrong. Open the picker again.",
+            })
+            .catch(() => {});
+        }
+      }
+      return;
+    }
     if (!interaction.isChatInputCommand()) {
       return;
     }
@@ -75,8 +106,6 @@ export async function createBot(
         interaction.commandName,
         interaction.user.id
       );
-    } else {
-      console.log("[discord] slash", interaction.commandName);
     }
 
     // Acknowledge immediately — Discord expires interactions after ~3s.

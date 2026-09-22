@@ -5,10 +5,10 @@ import type {
 } from "@nakama/core/contract";
 import { BUNDLED_SKILL_NAMES } from "@nakama/core/skills/bundled-names";
 import { BASH_TOOL_ID } from "@nakama/core/tools/protected";
+import { Button } from "@nakama/ui/button";
 import { Delete02Icon } from "hugeicons-react";
 import { useMemo } from "react";
 import { SkillAssignPicker } from "@/components/SkillAssignPicker";
-import { Button } from "@/components/ui/button";
 import { useAuth } from "@/context/use-auth";
 import { formatSessionRelativeTime } from "@/lib/chat-history";
 import type { RemoveAssignmentTarget } from "@/pages/profiles/profiles-page.shared";
@@ -111,7 +111,7 @@ function ProfileSkillRow({
   const usageHint = formatSkillUsageHint(skill);
 
   return (
-    <li className="group flex items-center justify-between gap-2 px-3 py-2 hover:bg-muted/40">
+    <li className="group flex items-center justify-between gap-2 px-4 py-3 hover:bg-muted/40">
       <button
         aria-label={`View details for ${skill.name}`}
         className="min-w-0 flex-1 text-left disabled:opacity-50"
@@ -123,6 +123,11 @@ function ProfileSkillRow({
           <p className="truncate font-medium text-foreground text-sm leading-tight">
             {skill.name}
           </p>
+          {skill.pluginId ? (
+            <span className="shrink-0 text-muted-foreground text-xs">
+              {skill.pluginId}
+            </span>
+          ) : null}
           <SkillStatusBadge skill={skill} staleAfterDays={staleAfterDays} />
         </div>
         {usageHint ? (
@@ -182,7 +187,7 @@ function ProfileSkillsToolbar({
   return (
     <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
       <div>
-        <h3 className="type-section-title">Skills</h3>
+        <h3 className="font-normal text-muted-foreground/55 text-sm">Skills</h3>
         {assignedCount > 0 ? (
           <p className="type-body mt-1 text-xs">{assignedCount} assigned</p>
         ) : null}
@@ -239,7 +244,7 @@ function AssignedSkillsLists({
   const showGroupHeaders = customSkills.length > 0 && bundledSkills.length > 0;
 
   return (
-    <div className="overflow-hidden rounded-md border border-border">
+    <div className="overflow-hidden rounded-xl border border-border bg-card">
       {customSkills.length > 0 ? (
         <ul className="divide-y divide-border">
           {showGroupHeaders ? <SkillGroupHeader label="Your skills" /> : null}

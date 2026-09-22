@@ -1,8 +1,23 @@
+import { inferArtifactMimeType } from "./artifact-mime";
 import type { ChatMessage } from "./contract";
 
 const ARTIFACT_META_SUFFIX = ".nakama-meta.json";
 const ARTIFACTS_SEGMENT = "/artifacts/";
 const ARTIFACTS_PREFIX = "artifacts/";
+
+/** Filenames that look like agent scratch, never user-facing deliverables. */
+export function isScratchArtifactPath(relativePath: string): boolean {
+  const filename = relativePath.split("/").pop() ?? relativePath;
+  return (
+    filename.startsWith(".") ||
+    filename.startsWith("_") ||
+    filename.startsWith("~") ||
+    filename.endsWith("~") ||
+    filename.endsWith(".tmp") ||
+    filename.endsWith(".bak") ||
+    filename.endsWith(".swp")
+  );
+}
 
 export interface ChannelArtifactRef {
   filename: string;
@@ -309,8 +324,8 @@ export function extractLatestTurnMessages(
 }
 
 /**
- * Extract save-artifact pairs (content + `.nakama-meta.json` sidecar) from chat history.
- * Strict pairing only — no content-only or assistant-text fallbacks.
+ * Extract successful artifact writes from chat history. Complete sidecars override
+ * metadata inferred from the write result; assistant text never counts as a write.
  */
 export function extractPairedTurnArtifacts(
   messages: ChatMessage[]
@@ -340,6 +355,21 @@ export function extractPairedTurnArtifacts(
     }
 
     contentWrites.set(resolvedPath, { relativePath });
+    const sizeBytes = getWriteFileResult(message)?.bytesWritten;
+    if (
+      typeof sizeBytes === "number" &&
+      Number.isInteger(sizeBytes) &&
+      sizeBytes >= 0
+    ) {
+      artifactsByPath.set(
+        relativePath,
+        buildArtifactRef(relativePath, {
+          mimeType: inferArtifactMimeType(relativePath),
+          savedAt: "",
+          sizeBytes,
+        })
+      );
+    }
   }
 
   for (const message of turnMessages) {

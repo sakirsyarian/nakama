@@ -20,6 +20,23 @@ function createProviderInstance(
 }
 
 describe("resolveProfileProviderSelection", () => {
+  test("preserves a bare retired ChatGPT selection without making it the default", () => {
+    const instance = createProviderInstance({
+      id: "chatgpt-1",
+      label: "ChatGPT",
+      type: "chatgpt",
+    });
+    const options = { defaultProviderId: instance.id, providers: [instance] };
+
+    expect(
+      resolveProfileProviderSelection({ ...options, profileModel: "gpt-5.4" })
+    ).toEqual({ instance, model: "gpt-5.4" });
+    expect(
+      resolveProfileProviderSelection({ ...options, profileModel: null })?.model
+    ).toBe("gpt-5.6-terra");
+    expect(modelExistsOnInstance(instance, "unknown-model")).toBe(false);
+  });
+
   test("uses the explicitly selected provider instance for provider-qualified profile models", () => {
     const providers: ProviderInstance[] = [
       createProviderInstance({
@@ -353,6 +370,26 @@ describe("applyProviderInstanceUpdate", () => {
 });
 
 describe("buildProviderInstanceFromCreateRequest", () => {
+  test("creates a Grok subscription provider without an API key", () => {
+    const instance = buildProviderInstanceFromCreateRequest(
+      {
+        apiKey: "",
+        customModels: [{ id: "grok-4.6", name: "grok-4.6" }],
+        type: "xai_oauth",
+        xaiOAuth: {
+          accessToken: "access",
+          expiresAt: "2027-01-01T00:00:00.000Z",
+          refreshToken: "refresh",
+        },
+      },
+      []
+    );
+    expect(instance.type).toBe("xai_oauth");
+    expect(instance.xaiRefreshToken).toBe("refresh");
+    expect(instance.apiKey).toBe("");
+    expect(modelExistsOnInstance(instance, "grok-4.6")).toBe(true);
+  });
+
   test("persists a Cloudflare Workers AI base URL on the instance", () => {
     const instance = buildProviderInstanceFromCreateRequest(
       {

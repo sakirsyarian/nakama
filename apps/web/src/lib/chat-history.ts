@@ -3,6 +3,7 @@ import type {
   AgentChannel,
   AgentQuestionAnswer,
   ChatMessage,
+  ChatUsage,
   SessionMessageMeta,
 } from "@nakama/core/contract";
 import { AGENT_CHANNELS } from "@nakama/core/contract";
@@ -17,6 +18,7 @@ import {
   extractWebSearchBlocksFromProviderContent,
   WEB_SEARCH_TOOL_NAME,
 } from "@/lib/chat-stream-web-search";
+import { addChatUsage } from "@/lib/chat-usage";
 import { createClientId } from "@/lib/client-id";
 
 export interface RequestedChatSession {
@@ -103,6 +105,40 @@ export function storeChatDraft(draft: string): string {
   return key;
 }
 
+export function chatComposerDraftKey(
+  userId: string | undefined,
+  orgId: string | undefined,
+  profileId: string,
+  sessionId: string | null
+): string | null {
+  return userId && orgId && profileId
+    ? `nakama:composer-draft:${JSON.stringify([userId, orgId, profileId, sessionId])}`
+    : null;
+}
+
+export function readComposerDraft(key: string | null): string {
+  try {
+    return key ? (localStorage.getItem(key) ?? "") : "";
+  } catch {
+    return "";
+  }
+}
+
+export function storeComposerDraft(key: string | null, text: string): void {
+  if (!key) {
+    return;
+  }
+  try {
+    if (text) {
+      localStorage.setItem(key, text);
+    } else {
+      localStorage.removeItem(key);
+    }
+  } catch {
+    // Storage can be disabled or full; the composer must still work.
+  }
+}
+
 export const MAX_URL_CHAT_DRAFT_LENGTH = 1500;
 
 export function chatProfileIdFromPath(pathname: string): string | null {
@@ -116,22 +152,36 @@ export function isChatSessionPath(pathname: string): boolean {
 
 export const ACTIVE_CHAT_PROFILE_STORAGE_KEY = "nakama:active-chat-profile";
 
-export function readStoredActiveChatProfileId(): string | null {
+export function activeChatProfileStorageKey(orgId?: string | null): string {
+  return orgId
+    ? `${ACTIVE_CHAT_PROFILE_STORAGE_KEY}:${orgId}`
+    : ACTIVE_CHAT_PROFILE_STORAGE_KEY;
+}
+
+export function readStoredActiveChatProfileId(
+  orgId?: string | null
+): string | null {
   if (typeof localStorage === "undefined") {
     return null;
   }
 
   const profileId = localStorage
-    .getItem(ACTIVE_CHAT_PROFILE_STORAGE_KEY)
+    .getItem(activeChatProfileStorageKey(orgId))
     ?.trim();
   return profileId || null;
 }
 
-export function writeStoredActiveChatProfileId(profileId: string): void {
+export function writeStoredActiveChatProfileId(
+  profileId: string,
+  orgId?: string | null
+): void {
   if (typeof localStorage === "undefined") {
     return;
   }
 
+  if (orgId) {
+    localStorage.setItem(activeChatProfileStorageKey(orgId), profileId);
+  }
   localStorage.setItem(ACTIVE_CHAT_PROFILE_STORAGE_KEY, profileId);
 }
 
@@ -151,6 +201,7 @@ export function pickKnownProfileId(
 /** Initial profile for draft `/chat` before profiles list loads. */
 export function readInitialDraftChatProfileId(input: {
   search: string;
+  orgId?: string | null;
   routeProfileId?: string | null;
 }): string {
   if (input.routeProfileId) {
@@ -159,16 +210,17 @@ export function readInitialDraftChatProfileId(input: {
 
   return (
     readRequestedProfileFromNewChatSearch(input.search) ??
-    readStoredActiveChatProfileId() ??
+    readStoredActiveChatProfileId(input.orgId) ??
     ""
   );
 }
 
-/** Profile id for `/history` — URL when present, else live chat state / storage / default. */
-export function resolveHistoryProfileId(input: {
+/** Profile id for Recents — URL when present, else live chat state / storage / default. */
+export function resolveRecentChatsProfileId(input: {
   search: string;
   profiles: ReadonlyArray<{ id: string }>;
   liveChatProfileId?: string | null;
+  orgId?: string | null;
 }): string | null {
   const fromUrl = new URLSearchParams(input.search).get("profile");
   return (
@@ -176,7 +228,7 @@ export function resolveHistoryProfileId(input: {
       input.profiles,
       fromUrl,
       input.liveChatProfileId,
-      readStoredActiveChatProfileId()
+      readStoredActiveChatProfileId(input.orgId)
     ) ?? resolveDefaultProfileId(input.profiles)
   );
 }
@@ -223,7 +275,6 @@ export function resolveActiveProfileIdFromLocation(input: {
   search: string;
   profiles: ReadonlyArray<{ id: string }>;
   liveChatProfileId?: string | null;
-  historyPath?: string;
   profilesPath?: string;
 }): string | null {
   const {
@@ -231,7 +282,6 @@ export function resolveActiveProfileIdFromLocation(input: {
     search,
     profiles,
     liveChatProfileId,
-    historyPath = "/history",
     profilesPath = "/profiles",
   } = input;
 
@@ -239,10 +289,6 @@ export function resolveActiveProfileIdFromLocation(input: {
     profileId: string | null | undefined
   ): profileId is string =>
     Boolean(profileId && profiles.some((profile) => profile.id === profileId));
-
-  if (pathname === historyPath) {
-    return resolveHistoryProfileId({ liveChatProfileId, profiles, search });
-  }
 
   if (isProfilesPath(pathname, profilesPath)) {
     return resolveProfilesPageProfileId({
@@ -323,13 +369,19 @@ export interface ChatListItem {
   /** Live status from a running sub-agent child loop (e.g. "Reading SOUL.md"). */
   subAgentActivity?: string;
   thinking?: string;
+  thinkingDurationMs?: number;
   thinkingStreaming?: boolean;
   tool?: string;
   toolCallId?: string;
+  toolCompletedAt?: number;
+  toolGroupId?: string;
   toolInput?: Record<string, unknown>;
   toolInputAccumulatedJson?: string;
   toolResult?: unknown;
+  toolStartedAt?: number;
   toolStatus?: "running" | "done";
+  /** Tokens and cost of the LLM call(s) behind this reply; tool-call-only messages fold into the next visible one. */
+  usage?: ChatUsage;
 }
 
 /** Survives reload so a failed web turn keeps a Retry affordance. */
@@ -394,6 +446,42 @@ export function sessionStorageKey(profileId: string): string {
   return `nakama:session:${profileId}`;
 }
 
+export function lastChatModelStorageKey(profileId: string): string {
+  return `nakama:last-model:${profileId}`;
+}
+
+/**
+ * The model the user last picked by hand, per profile. A new chat resumes it
+ * instead of snapping back to the profile default.
+ */
+export function readLastChatModel(profileId: string): string | null {
+  if (typeof localStorage === "undefined" || !profileId) {
+    return null;
+  }
+
+  return (
+    localStorage.getItem(lastChatModelStorageKey(profileId))?.trim() || null
+  );
+}
+
+/** A falsy selection forgets the pick. */
+export function writeLastChatModel(
+  profileId: string,
+  selection: string | null
+): void {
+  if (typeof localStorage === "undefined" || !profileId) {
+    return;
+  }
+
+  const key = lastChatModelStorageKey(profileId);
+
+  if (selection) {
+    localStorage.setItem(key, selection);
+  } else {
+    localStorage.removeItem(key);
+  }
+}
+
 /**
  * Which channels the history panel lists. Total over `AgentChannel`, so a new
  * channel fails the typecheck here rather than dropping out of the list in
@@ -427,6 +515,24 @@ const READ_ONLY_SESSION_CHANNEL = {
   web: false,
   whatsapp: true,
 } as const satisfies Record<AgentChannel, boolean>;
+
+/**
+ * Text-only prompts that already live in server history are the ones Edit can
+ * branch and resend. Attachments and unsent/failed turns have no history index
+ * to branch from.
+ */
+export function isEditableUserMessage(message: ChatListItem): boolean {
+  return (
+    message.role === "user" &&
+    typeof message.historyIndex === "number" &&
+    !message.failed &&
+    !message.questionnaireAnswers?.length &&
+    !message.images?.length &&
+    !message.imageAttachments?.length &&
+    !message.documents?.length &&
+    message.content.trim().length > 0
+  );
+}
 
 export function isReadOnlySessionChannel(channel: AgentChannel): boolean {
   return READ_ONLY_SESSION_CHANNEL[channel];
@@ -474,6 +580,9 @@ export function chatMessagesToListItems(
   const items: ChatListItem[] = [];
   const hydratedToolCallIds = new Set<string>();
   const persistedWebSearchToolIds = new Set<string>();
+  // Tool-call-only assistant messages are not rendered, so their usage rides
+  // along to the next rendered assistant message in the turn.
+  let carriedUsage: ChatUsage | undefined;
 
   for (const message of messages) {
     if (message.role === "tool" && message.name === WEB_SEARCH_TOOL_NAME) {
@@ -511,6 +620,7 @@ export function chatMessagesToListItems(
 
     if (message.role === "assistant") {
       if (!message.content.trim() && message.toolCalls?.length) {
+        carriedUsage = addChatUsage(carriedUsage, message.usage);
         continue;
       }
 
@@ -540,6 +650,8 @@ export function chatMessagesToListItems(
       }
 
       const thinking = extractThinkingFromAssistantMessage(message);
+      const usage = addChatUsage(carriedUsage, message.usage);
+      carriedUsage = undefined;
 
       items.push({
         content: message.content,
@@ -547,7 +659,10 @@ export function chatMessagesToListItems(
         historyIndex: index,
         id: `history-${index}`,
         role: "assistant",
-        ...(thinking ? { thinking } : {}),
+        ...(thinking
+          ? { thinking, thinkingDurationMs: message.thinkingDurationMs }
+          : {}),
+        ...(usage ? { usage } : {}),
       });
       continue;
     }
@@ -562,8 +677,11 @@ export function chatMessagesToListItems(
         role: "tool",
         tool: message.name,
         toolCallId: message.toolCallId,
+        toolCompletedAt: message.toolCompletedAt,
+        toolGroupId: message.toolGroupId,
         toolInput: toolInputs.get(message.toolCallId),
         toolResult: parseToolResult(message.content),
+        toolStartedAt: message.toolStartedAt,
         toolStatus: "done",
       });
     }

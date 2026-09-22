@@ -4,6 +4,7 @@ import type {
   ProviderModelOption,
   UpdateProviderRequest,
   WireApi,
+  XaiOAuthCredentials,
 } from "@nakama/core/contract";
 import {
   defaultDiscoveryBaseUrl,
@@ -13,10 +14,7 @@ import { useMemo, useState } from "react";
 import { isCatalogShortlistProvider } from "@/components/catalog-provider-model-fields.shared";
 import type { ModelListRow } from "@/components/ModelListEditor";
 import { normalizeModelListRows } from "@/components/model-list-editor.shared";
-import {
-  seedManageModelRows,
-  seedShortlistManageModelRows,
-} from "@/components/settings/provider-settings-seed";
+import { seedManageModelRows } from "@/components/settings/provider-settings-seed";
 import { isShortlistBrowseProvider } from "@/components/shortlist-browse-providers.shared";
 import { formatError } from "@/lib/client";
 import {
@@ -54,6 +52,7 @@ export function useProviderInstanceCard({
   const [busy, setBusy] = useState(false);
   const [dialogError, setDialogError] = useState<string | null>(null);
   const [apiKey, setApiKey] = useState("");
+  const [xaiOAuth, setXaiOAuth] = useState<XaiOAuthCredentials | null>(null);
   const [chatgptOAuth, setChatgptOAuth] =
     useState<ChatgptOAuthCredentials | null>(null);
   const [showApiKey, setShowApiKey] = useState(false);
@@ -63,6 +62,7 @@ export function useProviderInstanceCard({
   const [manageModels, setManageModels] = useState<ModelListRow[]>([]);
 
   const providerType = instance.type as SelectedProvider;
+  const isXaiOAuth = providerType === "xai_oauth";
   const isChatgpt = providerType === "chatgpt";
   const isOllama = providerType === "ollama";
   // Discovery providers (OpenAI-compatible, MiniMax, …) fetch model lists
@@ -87,26 +87,7 @@ export function useProviderInstanceCard({
   const openManage = () => {
     setDialogError(null);
 
-    if (isCompatibleLike) {
-      setManageModels(
-        seedManageModelRows(instance.customModels, instanceModels)
-      );
-    } else if (isOpenRouter || isShortlistBrowse) {
-      setManageModels(
-        seedShortlistManageModelRows(
-          instance.customModels,
-          null,
-          instanceModels[0]?.name
-        )
-      );
-    } else if (isCatalogShortlist) {
-      setManageModels(
-        seedManageModelRows(
-          instance.customModels,
-          instance.customModels?.length ? instanceModels : []
-        )
-      );
-    }
+    setManageModels(seedManageModelRows(instance.customModels, instanceModels));
 
     setManageOpen(true);
   };
@@ -148,6 +129,17 @@ export function useProviderInstanceCard({
   };
 
   const handleReplaceKey = async () => {
+    if (isXaiOAuth) {
+      if (!xaiOAuth) {
+        setDialogError("Sign in with Grok before saving.");
+        return;
+      }
+      await runUpdate({ xaiOAuth }, () => {
+        setReplaceKeyOpen(false);
+        setXaiOAuth(null);
+      });
+      return;
+    }
     if (isChatgpt) {
       if (!chatgptOAuth) {
         setDialogError("Sign in with ChatGPT before saving.");
@@ -271,6 +263,7 @@ export function useProviderInstanceCard({
     isOllama,
     isOpenRouter,
     isShortlistBrowse,
+    isXaiOAuth,
     manageModels,
     manageOpen,
     openEdit,
@@ -290,6 +283,8 @@ export function useProviderInstanceCard({
     setManageOpen,
     setReplaceKeyOpen,
     setShowApiKey,
+    setXaiOAuth,
     showApiKey,
+    xaiOAuth,
   };
 }

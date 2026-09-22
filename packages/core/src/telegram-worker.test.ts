@@ -1,9 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import {
-  isHeartbeatAlive,
-  parseTelegramWorkerHeartbeat,
+  createTelegramWorkerHeartbeat,
   resolveTelegramWorkerStatus,
 } from "./telegram-worker";
+import { withTempHomedir } from "./testing/channel-config-fixtures";
 
 describe("resolveTelegramWorkerStatus", () => {
   test("is ok when telegram is not configured", () => {
@@ -68,44 +68,19 @@ describe("resolveTelegramWorkerStatus", () => {
   });
 });
 
-describe("isHeartbeatAlive", () => {
-  test("rejects stale or invalid heartbeats", () => {
-    expect(isHeartbeatAlive(null)).toBe(false);
-    expect(
-      isHeartbeatAlive({
-        pid: process.pid,
-        updatedAt: new Date(Date.now() - 60_000).toISOString(),
-      })
-    ).toBe(false);
-    expect(
-      isHeartbeatAlive({
-        pid: process.pid,
-        updatedAt: "not-a-date",
-      })
-    ).toBe(false);
-  });
+describe("createTelegramWorkerHeartbeat", () => {
+  test("claims each identity separately", async () => {
+    await withTempHomedir("nakama-telegram-hb-", async () => {
+      const legacy = createTelegramWorkerHeartbeat(null);
+      const orgA = createTelegramWorkerHeartbeat("org_a");
 
-  test("accepts a fresh heartbeat for the current process", () => {
-    expect(
-      isHeartbeatAlive({
+      await legacy.write({
         pid: process.pid,
         updatedAt: new Date().toISOString(),
-      })
-    ).toBe(true);
-  });
-});
+      });
 
-describe("parseTelegramWorkerHeartbeat", () => {
-  test("parses valid JSON", () => {
-    expect(
-      parseTelegramWorkerHeartbeat(
-        JSON.stringify({ pid: 12, updatedAt: "2026-01-01T00:00:00.000Z" })
-      )
-    ).toEqual({ pid: 12, updatedAt: "2026-01-01T00:00:00.000Z" });
-  });
-
-  test("returns null for invalid payloads", () => {
-    expect(parseTelegramWorkerHeartbeat("not json")).toBeNull();
-    expect(parseTelegramWorkerHeartbeat("{}")).toBeNull();
+      expect(await legacy.isRunning()).toBe(true);
+      expect(await orgA.isRunning()).toBe(false);
+    });
   });
 });

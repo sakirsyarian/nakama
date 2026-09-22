@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -7,8 +8,16 @@ import {
 } from "@nakama/core";
 import type { Server } from "bun";
 import { ensureProcessPath } from "./lib/ensure-process-path";
+import { createPluginAgentHost } from "./services/plugin-agent-host";
 
 ensureProcessPath();
+if (process.env.NAKAMA_DESKTOP === "1") {
+  if (!process.connected) {
+    process.exit(0);
+  }
+  // Also covers losing Electron while the database is still initializing.
+  process.on("disconnect", () => process.emit("SIGTERM", "SIGTERM"));
+}
 // Position is cosmetic: ESM evaluates every import above before this line runs, so a throw
 // inside @nakama/db or @nakama/agent module init is already past. Everything after is covered.
 installErrorHandlers("server");
@@ -28,6 +37,7 @@ import {
   DEFAULT_SERVER_HOST,
   DEFAULT_SERVER_PORT,
   ensureBundledSkillFiles,
+  getActiveProviderInstance,
   getUserConfigDir,
   loadConfig,
   NAKAMA_API_VERSION,
@@ -39,7 +49,7 @@ import {
   ensureBundledSkillsAssigned,
   seedDatabase,
 } from "@nakama/db";
-import { createHonoApp } from "./http/app";
+import { createHonoApp, MAX_HTTP_REQUEST_BODY_LIMIT_BYTES } from "./http/app";
 import {
   disableBunIdleTimeoutForLongHeldRequest,
   disableBunIdleTimeoutForSse,
@@ -51,6 +61,7 @@ import { AuthService } from "./services/auth-service";
 import { AutomationDeliveryService } from "./services/automation-delivery-service";
 import { AutomationRunner } from "./services/automation-runner";
 import { AutomationService } from "./services/automation-service";
+import { resolveComposioCallbackBaseUrl } from "./services/composio-callback-url";
 import { ComposioService } from "./services/composio-service";
 import { LlmUsageTracker } from "./services/llm-usage-tracker";
 import { McpClientManager } from "./services/mcp-client-manager";
@@ -61,15 +72,20 @@ import {
 import { McpService } from "./services/mcp-service";
 import { OrgMemoryService } from "./services/org-memory-service";
 import { OrgService } from "./services/org-service";
-import { resolveProfileProviderSelection } from "./services/provider-instance-helpers";
+import {
+  PluginService,
+  shutdownPluginRuntime,
+} from "./services/plugin-service";
+import {
+  resolveDefaultModelForInstance,
+  resolveProfileProviderSelection,
+} from "./services/provider-instance-helpers";
 import { SkillCuratorService } from "./services/skill-curator-service";
 import { SkillProposalService } from "./services/skill-proposal-service";
 import { SkillSuggestionService } from "./services/skill-suggestion-service";
 import { SkillsService } from "./services/skills-service";
 import { SystemStatusService } from "./services/system-status-service";
 import { WorkerManagerService } from "./services/worker-manager-service";
-import { WorkflowRunner } from "./services/workflow-runner";
-import { WorkflowService } from "./services/workflow-service";
 import { ensureProviderConfigured } from "./setup";
 import { resolveWebDistDir } from "./static-web";
 import {
@@ -79,9 +95,9 @@ import {
 import { createGenerateImageTool } from "./tools/generate-image-tool";
 import { createSessionTools } from "./tools/session-tools";
 import { createSubAgentTool } from "./tools/sub-agent-tool";
-import { createWorkflowTools } from "./tools/workflow-tools";
 
 const projectRoot = join(dirname(fileURLToPath(import.meta.url)), "../../..");
+let workerRecovery: Promise<void> = Promise.resolve();
 
 const host = process.env.NAKAMA_HOST ?? DEFAULT_SERVER_HOST;
 const requestedPort = parsePort(process.env.NAKAMA_PORT);
@@ -107,6 +123,19 @@ const database = await createDatabase(config.databaseUrl, {
 
 await seedDatabase(database.adapter);
 
+// Runs are only completed by the process that started them, so a crash or a
+// kill leaves rows claiming work nothing is doing. Settle them before serving.
+// ponytail: correct while this is a single process; two servers would mean one
+// boot settling the other's live runs, which needs a heartbeat to tell apart.
+const interruptedRuns = await database.adapter.failInterruptedRuns();
+if (interruptedRuns > 0) {
+  console.log(`Settled ${interruptedRuns} run(s) interrupted by a restart`);
+}
+
+// Channel credentials used to be install-wide. On a single-org install that
+// config can only belong to that org, so claim it once before any scope-exact
+// read reports the org as unconfigured.
+const organizations = await database.adapter.listOrganizations();
 const authService = new AuthService();
 
 const llmUsageTracker = await LlmUsageTracker.create(database.adapter);
@@ -131,6 +160,14 @@ agent.setServerTools({
 await agent.ensureVisionSettingsLoaded();
 await agent.ensureTranscriptionSettingsLoaded();
 await agent.ensureImageGenerationSettingsLoaded();
+// A restart drops the cognito session map, so whatever it was holding can no
+// longer be reached, let alone cleaned up on close.
+const sweptAttachments = await agent.sweepEphemeralAttachments();
+if (sweptAttachments > 0) {
+  console.info(
+    `[cognito] swept ${sweptAttachments} attachment(s) left by a previous run`
+  );
+}
 const mcpClientManager = new McpClientManager();
 const mcpService = new McpService(database.adapter, mcpClientManager);
 const composioService = new ComposioService(database.adapter, authService);
@@ -169,16 +206,84 @@ agent.setAutomationRunHistoryTools(
 );
 agent.setAutomationRunner(automationRunner);
 
-const workflowService = new WorkflowService(database.adapter);
-const workflowRunner = new WorkflowRunner(workflowService, agent);
-agent.setWorkflowTools(
-  createWorkflowTools(workflowService, workflowRunner, agent)
+const workerManager = new WorkerManagerService(
+  projectRoot,
+  undefined,
+  (providerType) => {
+    const userConfig = agent.getUserConfig();
+    const active = getActiveProviderInstance(userConfig);
+    const configured = providerType
+      ? active?.type === providerType && active.apiKey.trim()
+        ? active
+        : userConfig?.providers.find(
+            (provider) =>
+              provider.type === providerType && provider.apiKey.trim()
+          )
+      : active;
+    if (!configured) {
+      return null;
+    }
+    return {
+      apiKey: configured.apiKey,
+      baseUrl: configured.baseUrl,
+      model: resolveDefaultModelForInstance(configured),
+      type: configured.type,
+    };
+  }
 );
-agent.setWorkflowRunner(workflowRunner);
 
-const workerManager = new WorkerManagerService(projectRoot);
-
+agent.channelWorkers = workerManager;
+workerManager.channelOwnerAvailable = async ({ orgId, profileId }) => {
+  const org = await database.adapter.getOrganizationById(orgId);
+  return Boolean(
+    org &&
+      !org.archivedAt &&
+      (await database.adapter.listProfilesForOrg(orgId)).some(
+        (profile) => profile.id === profileId
+      )
+  );
+};
+try {
+  await workerManager.migrateAgentChannels(database.adapter);
+} catch (error) {
+  console.warn("Channel migration requires attention:", error);
+}
+agent.setChannelOwnerCleanup((orgId, profileId) =>
+  workerManager.disableProfileChannels({ orgId, profileId }, true)
+);
 const orgService = new OrgService(database.adapter, authService);
+orgService.beforeArchiveChannels = async (orgId) => {
+  const owners = (await database.adapter.listProfilesForOrg(orgId)).map(
+    (profile) => ({ orgId, profileId: profile.id })
+  );
+  const release = () => {
+    for (const owner of owners) {
+      workerManager.allowProfileChannels(owner);
+    }
+  };
+  try {
+    for (const owner of owners) {
+      await workerManager.disableProfileChannels(owner);
+    }
+  } catch (error) {
+    release();
+    throw error;
+  }
+  return release;
+};
+
+const pluginService = new PluginService(database.adapter, getUserConfigDir(), {
+  officialPackagesDir: join(projectRoot, "packages/plugins"),
+  onHostRequest: createPluginAgentHost(database.adapter, agent),
+  workerManager,
+});
+try {
+  await pluginService.recoverInterruptedPluginOperations();
+} catch (error) {
+  console.warn("Could not recover plugin operations:", error);
+}
+skillsService.setPluginService(pluginService);
+agent.setPluginService(pluginService);
 const orgMemoryService = new OrgMemoryService(database.adapter);
 const skillProposalService = new SkillProposalService(
   database.adapter,
@@ -227,14 +332,11 @@ const skillSuggestionService = new SkillSuggestionService(
 );
 agent.setSkillSuggestionService(skillSuggestionService);
 
-const seedResult = await runFirstBootSeed({
+await runFirstBootSeed({
   authService,
   databaseAdapter: database.adapter,
   orgService,
 });
-if (seedResult.providerWritten) {
-  await agent.reloadAfterDataRestore();
-}
 
 const systemStatus = new SystemStatusService(
   agent,
@@ -259,18 +361,19 @@ const app = createHonoApp({
   },
   orgMemoryService,
   orgService,
+  pluginService,
   skillCuratorService,
   skillProposalService,
   skillSuggestionService,
   systemStatus,
   webDistDir,
   workerManager,
-  workflowService,
 });
 
 const server = startServer({
   canFallbackToNextPort,
-  fetch: app.fetch,
+  // The limiter needs the peer address, and Bun only exposes it on `server`.
+  fetch: (request: Request, server: Server) => app.fetch(request, { server }),
   host,
   preferredPort: requestedPort,
 });
@@ -278,7 +381,16 @@ const serverUrl = writeRuntimeServerUrl(
   `http://${server.hostname}:${server.port}`
 );
 
-registerRuntimeCleanup(server, serverUrl, database, mcpClientManager);
+const shutdownRuntime = registerRuntimeCleanup(
+  server,
+  serverUrl,
+  database,
+  mcpClientManager
+);
+// Stop before recovering workers if Electron disappeared during initialization.
+if (process.env.NAKAMA_DESKTOP === "1" && !process.connected) {
+  await shutdownRuntime();
+}
 
 if (server.port !== requestedPort) {
   console.log(`Port ${requestedPort} is busy. Using ${server.port} instead.`);
@@ -295,7 +407,11 @@ void initializeOptionalServices({
 });
 
 try {
-  await workerManager.recoverDesiredWorkers();
+  workerRecovery = (async () => {
+    await workerManager.recoverDesiredWorkers();
+    await pluginService.recoverPluginWorkers();
+  })();
+  await workerRecovery;
 } catch (error) {
   console.warn("Could not recover platform workers:", error);
 }
@@ -309,6 +425,9 @@ if (humanUserCount > 0 && !agent.providerConfigured) {
   console.warn(
     `Provider not configured — complete the setup wizard at ${serverUrl}/setup to enable chat and automations.`
   );
+}
+if (process.env.NAKAMA_DESKTOP === "1") {
+  process.send?.({ type: "nakama-ready", url: serverUrl });
 }
 
 function parsePort(value: string | undefined): number {
@@ -332,7 +451,10 @@ async function initializeOptionalServices(options: {
   database: Database;
 }): Promise<void> {
   try {
-    await options.mcpService.connectEnabledServers();
+    await options.mcpService.connectEnabledServers({
+      callbackBaseUrl: resolveComposioCallbackBaseUrl(),
+      reauthorize: false,
+    });
   } catch (error) {
     console.warn("Could not connect MCP servers:", error);
   }
@@ -361,7 +483,7 @@ function startServer(options: {
   host: string;
   preferredPort: number;
   canFallbackToNextPort: boolean;
-  fetch: (request: Request) => Response | Promise<Response>;
+  fetch: (request: Request, server: Server) => Response | Promise<Response>;
 }): ReturnType<typeof Bun.serve> {
   const lastPort = options.canFallbackToNextPort
     ? Math.min(options.preferredPort + 2000, 65_535)
@@ -373,12 +495,13 @@ function startServer(options: {
       return Bun.serve({
         async fetch(request, server: Server) {
           disableBunIdleTimeoutForLongHeldRequest(request, server);
-          const response = await options.fetch(request);
+          const response = await options.fetch(request, server);
           disableBunIdleTimeoutForSse(request, response, server);
           return response;
         },
         hostname: options.host,
         idleTimeout: 255,
+        maxRequestBodySize: MAX_HTTP_REQUEST_BODY_LIMIT_BYTES,
         port,
       });
     } catch (error) {
@@ -409,7 +532,7 @@ function registerRuntimeCleanup(
   serverUrl: string,
   database: Database,
   mcpClientManager: McpClientManager
-): void {
+): () => Promise<void> {
   let cleanedUp = false;
 
   const cleanup = () => {
@@ -418,6 +541,7 @@ function registerRuntimeCleanup(
     }
 
     cleanedUp = true;
+    void shutdownPluginRuntime(1500);
     void mcpClientManager.disconnectAll();
     clearRuntimeServerUrl(serverUrl);
     database.close();
@@ -425,13 +549,58 @@ function registerRuntimeCleanup(
 
   process.on("exit", cleanup);
 
+  let stopping = false;
+  const shutdown = async () => {
+    if (stopping) {
+      return;
+    }
+    stopping = true;
+    if (process.env.NAKAMA_DESKTOP === "1") {
+      // A quit during startup must not race workers being recreated after shutdown.
+      await workerRecovery.catch(() => {});
+    }
+    // Desktop owns a private PM2 home; never stop a normal server's daemon.
+    if (
+      process.env.NAKAMA_DESKTOP === "1" &&
+      process.env.PM2_HOME &&
+      existsSync(join(process.env.PM2_HOME, "pm2.pid"))
+    ) {
+      const { default: pm2 } = await import("pm2");
+      await new Promise<void>((resolve) => {
+        const timeout = setTimeout(resolve, 3000);
+        pm2.connect((error) => {
+          if (error) {
+            clearTimeout(timeout);
+            resolve();
+            return;
+          }
+          pm2.killDaemon(() => {
+            clearTimeout(timeout);
+            pm2.disconnect();
+            resolve();
+          });
+        });
+      });
+    }
+    if (process.env.NAKAMA_DESKTOP === "1") {
+      await Promise.race([
+        Promise.allSettled([
+          shutdownPluginRuntime(1500),
+          mcpClientManager.disconnectAll(),
+        ]),
+        new Promise((resolve) => setTimeout(resolve, 2000)),
+      ]);
+    }
+    cleanup();
+    server.stop(true);
+    process.exit(0);
+  };
   for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
     process.on(signal, () => {
-      cleanup();
-      server.stop(true);
-      process.exit(0);
+      void shutdown();
     });
   }
+  return shutdown;
 }
 
 async function findRunningNakamaServerUrl(

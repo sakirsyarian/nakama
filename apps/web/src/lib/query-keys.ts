@@ -31,6 +31,8 @@ export const queryKeys = {
   health: ["health"] as const,
   imageGenerationSettings: ["imageGeneration", "settings"] as const,
   knowledgeBase: {
+    organization: (orgId: string) =>
+      ["knowledgeBase", "organization", orgId] as const,
     profile: (profileId: string) => ["knowledgeBase", profileId] as const,
   },
   mcp: {
@@ -50,6 +52,12 @@ export const queryKeys = {
     ["orgMemoryHistoryRevision", orgId, revisionId] as const,
   orgMemoryProposals: (orgId: string, status?: string) =>
     ["orgMemoryProposals", orgId, status ?? "all"] as const,
+  plugins: {
+    all: (orgId: string) => ["plugins", orgId] as const,
+    detail: (orgId: string, pluginId: string) =>
+      ["plugins", orgId, pluginId] as const,
+    releases: ["plugins", "releases"] as const,
+  },
   profiles: {
     all: ["profiles"] as const,
     detail: (profileId: string) => ["profiles", profileId] as const,

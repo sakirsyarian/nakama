@@ -7,6 +7,9 @@ import {
   type CreateOrganizationResponse,
   type ListUserOrgsResponse,
   LocalAuthTokenManagedExternallyError,
+  type RequestPasswordResetRequest,
+  type RequestPasswordResetResponse,
+  type ResetPasswordRequest,
   type RotateLocalAuthTokenResponse,
   rotateLocalAuthToken,
   type SetActiveOrgRequest,
@@ -35,6 +38,14 @@ import {
 } from "../shared";
 import type { HonoApp } from "../types";
 
+/**
+ * A real bcrypt hash at the cost the app uses, kept only so a login for an
+ * unknown email costs the same as one for a known email. Nothing verifies
+ * against it successfully; it exists to be slow.
+ */
+const ABSENT_ACCOUNT_PASSWORD_HASH =
+  "$2b$10$IJnCe7uf5MN2/Vo89wb4ReF6yVI5SNnLdjIbiZ4Uwj4/r7zcqrWLm";
+
 export function registerAuthRoutes(app: HonoApp, options: ServerOptions): void {
   const { authService, databaseAdapter, orgService } = options;
   const authCredentialsSchema = z
@@ -47,6 +58,7 @@ export function registerAuthRoutes(app: HonoApp, options: ServerOptions): void {
     .object({
       activeOrgId: z.string().nullable().optional(),
       email: z.string(),
+      id: z.string(),
       isPlatformAdmin: z.boolean().optional(),
       name: z.string().nullable().optional(),
       orgId: z.string().nullable().optional(),
@@ -55,6 +67,7 @@ export function registerAuthRoutes(app: HonoApp, options: ServerOptions): void {
     .openapi("AuthUserResponse");
   const updateAuthProfileSchema = z
     .object({
+      currentPassword: z.string().optional(),
       email: z.string().optional(),
       name: z.string().nullable().optional(),
       phone: z.string().nullable().optional(),
@@ -67,6 +80,33 @@ export function registerAuthRoutes(app: HonoApp, options: ServerOptions): void {
     .object({ error: z.string() })
     .openapi("ApiErrorResponse");
 
+  const setupAuthSchema = z
+    .object({
+      admin: z.object({
+        email: z.string(),
+        name: z.string(),
+        password: z.string(),
+        phone: z.string().optional(),
+      }),
+      organization: z.object({
+        name: z.string(),
+        slug: z.string(),
+      }),
+      webPublicUrl: z.string().optional(),
+    })
+    .openapi("SetupAuthRequest");
+  const createOrganizationSchema = z.object({
+    admin: z
+      .object({
+        email: z.string(),
+        name: z.string(),
+        phone: z.string(),
+      })
+      .optional(),
+    name: z.string(),
+    slug: z.string(),
+  });
+  const setActiveOrgSchema = z.object({ orgId: z.string() });
   const setupRoute = createRoute({
     method: "post",
     operationId: "setupAuth",
@@ -74,23 +114,7 @@ export function registerAuthRoutes(app: HonoApp, options: ServerOptions): void {
     request: {
       body: {
         content: {
-          "application/json": {
-            schema: z
-              .object({
-                admin: z.object({
-                  email: z.string(),
-                  name: z.string(),
-                  password: z.string(),
-                  phone: z.string().optional(),
-                }),
-                organization: z.object({
-                  name: z.string(),
-                  slug: z.string(),
-                }),
-                webPublicUrl: z.string().optional(),
-              })
-              .openapi("SetupAuthRequest"),
-          },
+          "application/json": { schema: setupAuthSchema },
         },
         required: true,
       },
@@ -253,6 +277,21 @@ export function registerAuthRoutes(app: HonoApp, options: ServerOptions): void {
       newPassword: z.string(),
     })
     .openapi("ChangePasswordRequest");
+  const requestPasswordResetSchema = z
+    .object({ email: z.string() })
+    .openapi("RequestPasswordResetRequest");
+  const requestPasswordResetResponseSchema = z
+    .object({
+      delivered: z.boolean(),
+      token: z.string().nullable(),
+    })
+    .openapi("RequestPasswordResetResponse");
+  const resetPasswordSchema = z
+    .object({
+      newPassword: z.string(),
+      token: z.string(),
+    })
+    .openapi("ResetPasswordRequest");
   const changePasswordRoute = createRoute({
     method: "post",
     operationId: "changePassword",
@@ -288,6 +327,66 @@ export function registerAuthRoutes(app: HonoApp, options: ServerOptions): void {
       },
     },
     summary: "Change the current user's password",
+    tags: ["Auth"],
+  });
+  const requestPasswordResetRoute = createRoute({
+    method: "post",
+    operationId: "requestPasswordReset",
+    path: "/v1/auth/password-reset/request",
+    request: {
+      body: {
+        content: {
+          "application/json": { schema: requestPasswordResetSchema },
+        },
+        required: true,
+      },
+    },
+    responses: {
+      200: {
+        content: {
+          "application/json": { schema: requestPasswordResetResponseSchema },
+        },
+        description: "Password reset requested",
+      },
+      400: {
+        content: { "application/json": { schema: errorSchema } },
+        description: "Error",
+      },
+      500: {
+        content: { "application/json": { schema: errorSchema } },
+        description: "Error",
+      },
+    },
+    summary: "Request a password reset token",
+    tags: ["Auth"],
+  });
+  const resetPasswordRoute = createRoute({
+    method: "post",
+    operationId: "resetPassword",
+    path: "/v1/auth/password-reset/complete",
+    request: {
+      body: {
+        content: { "application/json": { schema: resetPasswordSchema } },
+        required: true,
+      },
+    },
+    responses: {
+      200: {
+        content: {
+          "application/json": { schema: z.object({ ok: z.boolean() }) },
+        },
+        description: "Password reset",
+      },
+      400: {
+        content: { "application/json": { schema: errorSchema } },
+        description: "Error",
+      },
+      500: {
+        content: { "application/json": { schema: errorSchema } },
+        description: "Error",
+      },
+    },
+    summary: "Reset a password with a single-use token",
     tags: ["Auth"],
   });
 
@@ -376,7 +475,7 @@ export function registerAuthRoutes(app: HonoApp, options: ServerOptions): void {
       return errorResponse("Admin user already exists", 409);
     }
 
-    const body = await readJson<SetupAuthRequest>(c.req.raw);
+    const body = await readJson<SetupAuthRequest>(c.req.raw, setupAuthSchema);
     const password = body.admin?.password?.trim() ?? "";
     if (
       !(
@@ -448,9 +547,18 @@ export function registerAuthRoutes(app: HonoApp, options: ServerOptions): void {
 
     assertJsonRequest(c.req.raw);
 
-    const body = await readJson<{ email: string; password: string }>(c.req.raw);
+    const body = await readJson<{ email: string; password: string }>(
+      c.req.raw,
+      authCredentialsSchema
+    );
     const user = await databaseAdapter.getUserByEmail(body.email);
     if (!user) {
+      // Spend the same bcrypt work an existing account would, so the response
+      // time stops answering "does this email have an account here".
+      await authService.verifyPassword(
+        body.password?.trim() ?? "",
+        ABSENT_ACCOUNT_PASSWORD_HASH
+      );
       return errorResponse("Invalid credentials", 401);
     }
 
@@ -462,6 +570,10 @@ export function registerAuthRoutes(app: HonoApp, options: ServerOptions): void {
     );
     if (!valid) {
       return errorResponse("Invalid credentials", 401);
+    }
+
+    if (user.disabledAt) {
+      return errorResponse("Account disabled", 403);
     }
 
     const response = await createBrowserSessionResponse(
@@ -516,7 +628,10 @@ export function registerAuthRoutes(app: HonoApp, options: ServerOptions): void {
     const auth = getRequestAuth(c);
     assertBrowserCsrf(c.req.raw, auth, authService);
 
-    const body = await readJson<UpdateAuthProfileRequest>(c.req.raw);
+    const body = await readJson<UpdateAuthProfileRequest>(
+      c.req.raw,
+      updateAuthProfileSchema
+    );
     const updated = await orgService.updateOwnProfile(auth.user.id, body);
     return json<AuthUserResponse>(updated);
   });
@@ -559,7 +674,10 @@ export function registerAuthRoutes(app: HonoApp, options: ServerOptions): void {
     const auth = getRequestAuth(c);
     assertBrowserCsrf(c.req.raw, auth, authService);
 
-    const body = await readJson<ChangePasswordRequest>(c.req.raw);
+    const body = await readJson<ChangePasswordRequest>(
+      c.req.raw,
+      changePasswordSchema
+    );
     await orgService.changePassword({
       currentPassword: body.currentPassword,
       newPassword: body.newPassword,
@@ -571,6 +689,44 @@ export function registerAuthRoutes(app: HonoApp, options: ServerOptions): void {
     return response;
   });
 
+  app.openAPIRegistry.registerPath(requestPasswordResetRoute);
+  app.post("/v1/auth/password-reset/request", async (c) => {
+    if (!(authService && databaseAdapter && orgService)) {
+      return errorResponse("Authentication not configured", 500);
+    }
+
+    const body = await readJson<RequestPasswordResetRequest>(
+      c.req.raw,
+      requestPasswordResetSchema
+    );
+    const auth = await authenticateRequest(
+      c.req.raw,
+      authService,
+      databaseAdapter
+    );
+    const allowManualToken = auth?.isPlatformAdmin === true;
+    if (allowManualToken && auth) {
+      assertBrowserCsrf(c.req.raw, auth, authService);
+    }
+    return json<RequestPasswordResetResponse>(
+      await orgService.requestPasswordReset(body.email, allowManualToken)
+    );
+  });
+
+  app.openAPIRegistry.registerPath(resetPasswordRoute);
+  app.post("/v1/auth/password-reset/complete", async (c) => {
+    if (!orgService) {
+      return errorResponse("Authentication not configured", 500);
+    }
+
+    const body = await readJson<ResetPasswordRequest>(
+      c.req.raw,
+      resetPasswordSchema
+    );
+    await orgService.resetPassword(body);
+    return c.json({ ok: true }, 200);
+  });
+
   app.openAPIRegistry.registerPath(acceptInviteRoute);
   app.post("/v1/auth/accept-invite", async (c) => {
     if (!(authService && databaseAdapter && orgService)) {
@@ -578,7 +734,8 @@ export function registerAuthRoutes(app: HonoApp, options: ServerOptions): void {
     }
 
     const body = await readJson<{ token: string; password?: string }>(
-      c.req.raw
+      c.req.raw,
+      acceptInviteSchema
     );
     const accepted = await orgService.acceptInvite(body);
     const response = await createBrowserSessionResponse(
@@ -654,7 +811,10 @@ export function registerAuthRoutes(app: HonoApp, options: ServerOptions): void {
     const auth = requirePlatformAdminFromContext(c);
     assertBrowserCsrf(c.req.raw, auth, authService);
 
-    const body = await readJson<CreateOrganizationRequest>(c.req.raw);
+    const body = await readJson<CreateOrganizationRequest>(
+      c.req.raw,
+      createOrganizationSchema
+    );
     const result = await orgService.createOrganization(body, auth.user.id);
     return json<CreateOrganizationResponse>(result, 201);
   });
@@ -667,7 +827,10 @@ export function registerAuthRoutes(app: HonoApp, options: ServerOptions): void {
     const auth = getRequestAuth(c);
     assertBrowserCsrf(c.req.raw, auth, authService);
 
-    const body = await readJson<SetActiveOrgRequest>(c.req.raw);
+    const body = await readJson<SetActiveOrgRequest>(
+      c.req.raw,
+      setActiveOrgSchema
+    );
     await orgService.setActiveOrg({
       orgId: body.orgId,
       sessionId: auth.session?.id,

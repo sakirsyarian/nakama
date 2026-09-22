@@ -6,6 +6,13 @@
     "ultracite/biome/tanstack",
     "ultracite/biome/vitest"
   ],
+  "files": {
+    "includes": [
+      "!packages/plugins/*/actions",
+      "!packages/plugins/*/ui/app.js",
+      "!packages/plugins/*/workers"
+    ]
+  },
   "css": {
     "parser": {
       "cssModules": true
@@ -62,6 +69,7 @@
         "noExportedImports": "off",
         "noIncrementDecrement": "off",
         "noMultiAssign": "off",
+        "noDescendingSpecificity": "off",
         "noNestedTernary": "off",
         "noNonNullAssertion": "off",
         "noParameterAssign": "off",
@@ -81,7 +89,7 @@
         "useTemplate": "off"
       },
       "suspicious": {
-        "noAlert": "off",
+        "noAlert": "error",
         "noArrayIndexKey": "off",
         "noConfusingVoidType": "off",
         "noControlCharactersInRegex": "off",

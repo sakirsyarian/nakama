@@ -2,10 +2,13 @@ import { describe, expect, test } from "bun:test";
 import type { SkillSummary } from "@nakama/core/contract";
 import {
   filterComposerSlashSuggestions,
+  filterReservedSlashCommands,
   filterSkillsForSlashQuery,
   findActiveSkillSlashRange,
   getReservedCommandTokenRanges,
   getSkillTokenRanges,
+  matchComposerAddCommand,
+  matchComposerLearningLoopCommand,
   replaceSlashRangeWithReservedCommand,
   replaceSlashRangeWithSkillInvocation,
 } from "./chat-composer-skills";
@@ -109,13 +112,45 @@ describe("filterSkillsForSlashQuery", () => {
 });
 
 describe("filterComposerSlashSuggestions", () => {
+  test.each([
+    ["addto", "add-tool"],
+    ["ADD_TO", "add-tool"],
+    ["add-pl", "add-plugin"],
+    ["addpl", "add-plugin"],
+    ["addmc", "add-mcp"],
+    ["adtl", "add-tool"],
+    ["tool", "add-tool"],
+  ])("matches command query %s", (query, name) => {
+    const commands = filterComposerSlashSuggestions([], query, {
+      enableAddCommands: true,
+    }).filter((item) => item.kind === "command");
+    expect(commands.map((item) => item.command.name)).toEqual([name]);
+    expect(filterComposerSlashSuggestions([], query)).toEqual([]);
+  });
+
+  test("does not turn separator-only input into every command", () => {
+    expect(
+      filterComposerSlashSuggestions([], "-_", { enableAddCommands: true })
+    ).toEqual([]);
+  });
+
+  test("ranks contiguous matches ahead of scattered letters", () => {
+    const commands = ["add-tool", "atlas"].map((name) => ({
+      description: "",
+      name,
+    }));
+    expect(
+      filterReservedSlashCommands("atl", commands).map((c) => c.name)
+    ).toEqual(["atlas", "add-tool"]);
+    expect(filterReservedSlashCommands("zzzz", commands)).toEqual([]);
+  });
   test("lists reserved /learn ahead of skills when manage-skills is assigned", () => {
     expect(
       filterComposerSlashSuggestions([manageSkillsSkill, weatherSkill], "").map(
         (item) =>
           item.kind === "command" ? item.command.name : item.skill.name
       )
-    ).toEqual(["learn", "weather"]);
+    ).toEqual(["enable-learning-loop", "learn", "weather"]);
   });
 
   test("hides /learn when manage-skills is not assigned", () => {
@@ -133,15 +168,9 @@ describe("filterComposerSlashSuggestions", () => {
       [manageSkillsSkill, weatherSkill, deploySkill],
       "lea"
     );
-    expect(suggestions).toEqual([
-      {
-        command: {
-          description: "Distill a reusable skill from sources",
-          name: "learn",
-        },
-        kind: "command",
-      },
-    ]);
+    expect(
+      suggestions.map((item) => item.kind === "command" && item.command.name)
+    ).toEqual(["learn", "enable-learning-loop"]);
   });
 
   test("does not match /learn via description keywords", () => {
@@ -157,6 +186,49 @@ describe("filterComposerSlashSuggestions", () => {
         "sk"
       ).filter((item) => item.kind === "command")
     ).toEqual([]);
+  });
+
+  test("lists add commands only when enabled", () => {
+    expect(
+      filterComposerSlashSuggestions([weatherSkill], "add").filter(
+        (item) => item.kind === "command"
+      )
+    ).toEqual([]);
+    expect(
+      filterComposerSlashSuggestions([weatherSkill], "add", {
+        enableAddCommands: true,
+      }).map((item) =>
+        item.kind === "command" ? item.command.name : item.skill.name
+      )
+    ).toEqual(["add-plugin", "add-tool", "add-mcp"]);
+    expect(
+      filterComposerSlashSuggestions([weatherSkill], "add-t", {
+        enableAddCommands: true,
+      }).map((item) =>
+        item.kind === "command" ? item.command.name : item.skill.name
+      )
+    ).toEqual(["add-tool"]);
+  });
+});
+
+describe("matchComposerAddCommand", () => {
+  test("matches a bare add command", () => {
+    expect(matchComposerAddCommand("  /add-tool  ")).toBe("add-tool");
+    expect(matchComposerAddCommand("/add-mcp")).toBe("add-mcp");
+    expect(matchComposerAddCommand("/add-plugin")).toBe("add-plugin");
+    expect(matchComposerAddCommand("/add-plugin workflows")).toBeNull();
+    expect(matchComposerAddCommand("/add-tool please")).toBeNull();
+  });
+});
+
+describe("matchComposerLearningLoopCommand", () => {
+  test("matches the bare learning loop command", () => {
+    expect(matchComposerLearningLoopCommand("  /enable-learning-loop  ")).toBe(
+      true
+    );
+    expect(matchComposerLearningLoopCommand("/enable-learning-loop now")).toBe(
+      false
+    );
   });
 });
 

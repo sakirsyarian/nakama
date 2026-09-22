@@ -1,7 +1,7 @@
+import { cn } from "@nakama/ui/utils";
 import { AlertCircleIcon, BulbIcon } from "hugeicons-react";
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import { cn } from "@/lib/utils";
 
 const TIPS = [
   "Use the Super Bot profile to create your own agents and tools.",
@@ -11,7 +11,7 @@ const TIPS = [
 
 const TIP_INTERVAL_MS = 10_000;
 
-function ChatComposerNotice({
+export function ChatComposerNotice({
   children,
   className,
   role,

@@ -7,9 +7,15 @@ import {
 } from "@/lib/chat-history";
 import {
   appendFailedTurnIfNeeded,
+  editedPromptText,
   findFailedRetryPrompt,
   markStreamingTurnFailed,
   messagesWithoutFailedTurn,
+  nextSuccessfulTurnAt,
+  planPromptBranch,
+  releaseChatStream,
+  shouldShowCognitoControl,
+  welcomeAnimationKey,
 } from "@/pages/chat/chat-page.shared";
 
 function user(
@@ -63,6 +69,17 @@ describe("markStreamingTurnFailed", () => {
 });
 
 describe("appendFailedTurnIfNeeded", () => {
+  test("reuses the saved user message after a failed turn", () => {
+    const saved = user("retry me", { historyIndex: 0 });
+    const next = appendFailedTurnIfNeeded([saved], {
+      error: "429",
+      text: "retry me",
+    });
+    expect(next).toHaveLength(2);
+    expect(next[0]).toBe(saved);
+    expect(next[1]).toMatchObject({ failed: true, role: "assistant" });
+  });
+
   test("appends stored user + failed assistant after reload", () => {
     const next = appendFailedTurnIfNeeded(
       [user("earlier", { historyIndex: 0 })],
@@ -174,5 +191,139 @@ describe("failed chat turn storage", () => {
 
       expect(readFailedChatTurn(sessionId)).toBeNull();
     });
+  });
+});
+
+describe("nextSuccessfulTurnAt", () => {
+  test("uses wall clock when there is no previous stamp", () => {
+    expect(nextSuccessfulTurnAt(null, 1000)).toBe(1000);
+  });
+
+  test("keeps wall clock when time advances", () => {
+    expect(nextSuccessfulTurnAt(1000, 1005)).toBe(1005);
+  });
+
+  test("bumps by 1ms when two turns finish in the same millisecond", () => {
+    expect(nextSuccessfulTurnAt(1000, 1000)).toBe(1001);
+  });
+
+  test("stays monotonic when wall clock moves backwards", () => {
+    expect(nextSuccessfulTurnAt(1000, 999)).toBe(1001);
+  });
+});
+
+describe("the edit flow", () => {
+  /** Two finished turns, so editing the second prompt has somewhere to branch. */
+  function transcript(): ChatListItem[] {
+    return [
+      user("deploy command?", { historyIndex: 0 }),
+      assistant("bun run deploy", { historyIndex: 1 }),
+      user("and for staging?", { historyIndex: 2 }),
+      assistant("bun run deploy:staging", { historyIndex: 3 }),
+    ];
+  }
+
+  test("branches before the edited prompt and carries the turns before it", () => {
+    const messages = transcript();
+    const edited = messages[2]!;
+
+    const plan = planPromptBranch(messages, edited);
+
+    expect(plan?.messageIndex).toBe(1);
+    expect(
+      plan?.initialMessages.map((message) => message.historyIndex)
+    ).toEqual([0, 1]);
+  });
+
+  test("sends the trimmed edit, not the original text", () => {
+    const messages = transcript();
+    const edited = messages[2]!;
+
+    expect(editedPromptText(edited, "  and for production?  ")).toBe(
+      "and for production?"
+    );
+  });
+
+  test("stops before branching when the text did not change", () => {
+    const messages = transcript();
+    const edited = messages[2]!;
+
+    expect(editedPromptText(edited, "and for staging?")).toBeNull();
+    expect(editedPromptText(edited, "  and for staging?  ")).toBeNull();
+    expect(editedPromptText(edited, "   ")).toBeNull();
+  });
+
+  test("starts a fresh session when the edited prompt opens the session", () => {
+    const messages = transcript();
+
+    expect(planPromptBranch(messages, messages[0]!)).toBeNull();
+  });
+
+  test("starts a fresh session for a prompt that is not in history yet", () => {
+    const messages = transcript();
+
+    expect(planPromptBranch(messages, user("not sent yet"))).toBeNull();
+  });
+
+  test("ignores rows the branch cannot replay", () => {
+    const messages = [
+      ...transcript(),
+      user("unsent follow-up"),
+      assistant("failed", { failed: true }),
+    ];
+    const edited = messages[2]!;
+
+    const plan = planPromptBranch(messages, edited);
+
+    expect(plan?.initialMessages).toHaveLength(2);
+  });
+});
+
+describe("cognito control visibility", () => {
+  test("an ordinary chat shows it only before the first message", () => {
+    expect(shouldShowCognitoControl(false, true)).toBe(true);
+    expect(shouldShowCognitoControl(false, false)).toBe(false);
+  });
+
+  test("an active cognito chat keeps it, or there is no way out of the mode", () => {
+    expect(shouldShowCognitoControl(true, false)).toBe(true);
+    expect(shouldShowCognitoControl(true, true)).toBe(true);
+  });
+});
+
+describe("welcome copy animation key", () => {
+  test("toggling produces a different key, so the entrance replays", () => {
+    expect(welcomeAnimationKey(true)).not.toBe(welcomeAnimationKey(false));
+  });
+});
+
+describe("releaseChatStream", () => {
+  test("detaches a send stream instead of aborting the turn behind it", () => {
+    const abort = new AbortController();
+    let detached = false;
+
+    const released = releaseChatStream({
+      abort,
+      detach: () => {
+        detached = true;
+      },
+    });
+
+    expect(released).toBe("detached");
+    expect(detached).toBe(true);
+    // The abort is what ends the turn server-side, so switching chats must not
+    // reach it: that is what made a second chat impossible to run.
+    expect(abort.signal.aborted).toBe(false);
+  });
+
+  test("aborts a subscribe stream, which owns no turn", () => {
+    const abort = new AbortController();
+
+    expect(releaseChatStream({ abort, detach: null })).toBe("aborted");
+    expect(abort.signal.aborted).toBe(true);
+  });
+
+  test("reports idle when nothing is streaming", () => {
+    expect(releaseChatStream({ abort: null, detach: null })).toBe("idle");
   });
 });

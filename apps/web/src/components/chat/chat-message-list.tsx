@@ -1,6 +1,17 @@
+import type { ChatUsage } from "@nakama/core/contract";
+import { Button } from "@nakama/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@nakama/ui/dropdown-menu";
+import { Textarea } from "@nakama/ui/textarea";
+import { cn } from "@nakama/ui/utils";
 import {
   CheckmarkCircle01Icon,
   Copy01Icon,
+  Edit03Icon,
   File01Icon,
   GitBranchIcon,
   MoreHorizontalIcon,
@@ -23,18 +34,21 @@ import {
 } from "@/components/ai-elements/conversation";
 import { Message, MessageContent } from "@/components/ai-elements/message";
 import { ArtifactAttachmentPreview } from "@/components/chat/artifact-attachment-preview";
-import { AssistantTurnSegmentView } from "@/components/chat/assistant-tool-group";
+import {
+  AssistantTurnSegmentView,
+  ProfileCreatedCard,
+} from "@/components/chat/assistant-tool-group";
 import { segmentAssistantTurn } from "@/components/chat/assistant-tool-group.shared";
+import { ToolCredentialCard } from "@/components/chat/chat-add-capabilities-dialogs";
+import { ChatUsageBadge } from "@/components/chat/chat-usage-badge";
 import { ImageAttachmentPreview } from "@/components/chat/image-attachment-preview";
 import { TextAttachmentPreview } from "@/components/chat/text-attachment-preview";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
 import { extractTurnArtifacts } from "@/lib/chat-artifacts";
-import { type ChatListItem, formatSessionTimestamp } from "@/lib/chat-history";
+import {
+  type ChatListItem,
+  formatSessionTimestamp,
+  isEditableUserMessage,
+} from "@/lib/chat-history";
 import {
   followOutputBehavior,
   listOverflowsViewport,
@@ -46,10 +60,14 @@ import {
   type MessageTurn,
   turnKey,
 } from "@/lib/chat-message-turns";
-import { awaitingModelLabel, isAwaitingModelResponse } from "@/lib/chat-stream";
+import {
+  awaitingModelLabel,
+  isAwaitingModelResponse,
+  parseProfileCreatedResult,
+} from "@/lib/chat-stream";
+import { sumChatUsage } from "@/lib/chat-usage";
 import { formatElapsedSeconds, useElapsedSeconds } from "@/lib/elapsed-time";
 import { isPastedTextDocument } from "@/lib/pasted-text";
-import { cn } from "@/lib/utils";
 
 /** Top/bottom inset as Virtuoso Header/Footer — never put padding on the scroller. */
 function VirtuosoEdgePad() {
@@ -98,9 +116,14 @@ interface ChatMessageListProps {
   messages: ChatListItem[];
   modelLabel?: string | null;
   onBranchMessage?: (message: ChatListItem) => void;
+  onContinueToolSetup?: (setupId: string) => Promise<void>;
+  onEditMessage?: (message: ChatListItem, text: string) => void;
   onRetryMessage?: (message: ChatListItem) => void;
   profileId?: string | null;
+  sessionId?: string;
   showThinking?: boolean;
+  /** Show tokens and estimated cost under each completed assistant turn. */
+  showUsage?: boolean;
   /** True while the assistant reply SSE stream is in flight. */
   streamActive?: boolean;
   turnStartedAt?: string | null;
@@ -112,15 +135,19 @@ export function ChatMessageList(props: ChatMessageListProps) {
 }
 
 function ChatMessageListSession({
+  sessionId,
+  onContinueToolSetup,
   messages,
   profileId,
   showThinking = true,
+  showUsage = false,
   modelLabel,
   branchingMessageId,
   actionsDisabled = false,
   streamActive = false,
   turnStartedAt = null,
   onBranchMessage,
+  onEditMessage,
   onRetryMessage,
   emptyMessage,
   className,
@@ -238,7 +265,12 @@ function ChatMessageListSession({
       if (turn.kind === "user") {
         return (
           <div className={itemClassName}>
-            <ChatMessageRow message={turn.message} />
+            <ChatMessageRow
+              busy={branchingMessageId != null || streamActive}
+              disabled={actionsDisabled}
+              message={turn.message}
+              onEditMessage={onEditMessage}
+            />
           </div>
         );
       }
@@ -251,28 +283,36 @@ function ChatMessageListSession({
             messages={turn.messages}
             modelLabel={modelLabel}
             onBranchMessage={onBranchMessage}
+            onContinueToolSetup={onContinueToolSetup}
             onRetryMessage={onRetryMessage}
             profileId={profileId}
+            sessionId={sessionId}
             showAwaiting={
               turnIndex === turns.length - 1 && awaitingLabel === "Working…"
             }
             showThinking={showThinking}
+            showUsage={showUsage}
             streamActive={streamActive}
             turnStartedAt={turnStartedAt}
+            workStreamActive={streamActive && turnIndex === turns.length - 1}
           />
         </div>
       );
     },
     [
+      sessionId,
+      onContinueToolSetup,
       actionsDisabled,
       awaitingLabel,
       branchingMessageId,
       contentClassName,
       modelLabel,
       onBranchMessage,
+      onEditMessage,
       onRetryMessage,
       profileId,
       showThinking,
+      showUsage,
       streamActive,
       turnStartedAt,
       turns.length,
@@ -325,9 +365,13 @@ function ChatMessageListSession({
 }
 
 function AssistantTurn({
+  sessionId,
+  onContinueToolSetup,
+  workStreamActive,
   messages,
   profileId,
   showThinking,
+  showUsage = false,
   modelLabel,
   branchingMessageId,
   actionsDisabled,
@@ -337,9 +381,13 @@ function AssistantTurn({
   onBranchMessage,
   onRetryMessage,
 }: {
+  sessionId?: string;
+  onContinueToolSetup?: (setupId: string) => Promise<void>;
+  workStreamActive: boolean;
   messages: IndexedMessage[];
   profileId?: string | null;
   showThinking: boolean;
+  showUsage?: boolean;
   modelLabel?: string | null;
   branchingMessageId?: string | null;
   actionsDisabled?: boolean;
@@ -350,7 +398,7 @@ function AssistantTurn({
   onRetryMessage?: (message: ChatListItem) => void;
 }) {
   const turnMessages = messages.map(({ message }) => message);
-  const segments = segmentAssistantTurn(turnMessages);
+  const segments = segmentAssistantTurn(turnMessages, workStreamActive);
   const artifacts = extractTurnArtifacts(turnMessages);
   const artifactTurnKey = messages.map(({ message }) => message.id).join(":");
   const anchorMessage = findAssistantTurnAnchor(turnMessages);
@@ -364,6 +412,7 @@ function AssistantTurn({
     !anchorMessage.failed;
   const retryDisabled =
     actionsDisabled || branchingMessageId === anchorMessage?.id;
+  const turnUsage = showUsage ? sumChatUsage(turnMessages) : undefined;
 
   return (
     <div className="group mr-auto ml-0 flex w-full max-w-full flex-col items-start justify-start gap-3">
@@ -371,7 +420,7 @@ function AssistantTurn({
         <AssistantTurnSegmentView
           key={
             segment.kind === "work"
-              ? `work:${segment.thinking?.id ?? "thought"}:${segment.tools.map((message) => message.id).join(":")}`
+              ? `work:${segment.groupId ?? segment.thinking?.id ?? "thought"}`
               : `text:${segment.message.id}`
           }
           modelLabel={modelLabel}
@@ -382,7 +431,22 @@ function AssistantTurn({
           showThinking={showThinking}
         />
       ))}
-      {showAwaiting ? <TurnAwaitingElapsed startedAt={turnStartedAt} /> : null}
+      {showAwaiting && !segments.some((segment) => segment.kind === "work") ? (
+        <TurnAwaitingElapsed startedAt={turnStartedAt} />
+      ) : null}
+      {!workStreamActive &&
+        turnComplete &&
+        turnMessages
+          .filter((message) => message.toolResult != null)
+          .map((message) => (
+            <ToolCredentialCard
+              disabled={actionsDisabled}
+              key={message.id}
+              onContinue={onContinueToolSetup}
+              result={message.toolResult}
+              sessionId={sessionId}
+            />
+          ))}
       {profileId && showArtifacts ? (
         <div className="flex flex-wrap gap-2">
           {artifacts.map((artifact) => {
@@ -399,6 +463,7 @@ function AssistantTurn({
           })}
         </div>
       ) : null}
+      <CreatedProfiles complete={turnComplete} messages={turnMessages} />
       {showActions && anchorMessage ? (
         <AssistantMessageActions
           actionsDisabled={actionsDisabled}
@@ -407,8 +472,39 @@ function AssistantTurn({
           message={anchorMessage}
           onBranchMessage={onBranchMessage}
           onRetryMessage={onRetryMessage}
+          usage={turnUsage}
         />
       ) : null}
+    </div>
+  );
+}
+
+function CreatedProfiles({
+  complete,
+  messages,
+}: {
+  complete: boolean;
+  messages: ChatListItem[];
+}) {
+  if (!complete) {
+    return null;
+  }
+  const profiles = messages.flatMap((message) => {
+    if (message.tool !== "create_profile") {
+      return [];
+    }
+
+    const profile = parseProfileCreatedResult(message.toolResult);
+    return profile ? [profile] : [];
+  });
+  if (profiles.length === 0) {
+    return null;
+  }
+  return (
+    <div className="flex w-full flex-col gap-2">
+      {profiles.map((profile) => (
+        <ProfileCreatedCard key={profile.id} profile={profile} />
+      ))}
     </div>
   );
 }
@@ -427,7 +523,79 @@ function TurnAwaitingElapsed({ startedAt }: { startedAt?: string | null }) {
   );
 }
 
-function ChatMessageRow({ message }: { message: ChatListItem }) {
+function ChatMessageRow({
+  message,
+  busy = false,
+  disabled = false,
+  onEditMessage,
+}: {
+  message: ChatListItem;
+  busy?: boolean;
+  disabled?: boolean;
+  onEditMessage?: (message: ChatListItem, text: string) => void;
+}) {
+  const [draft, setDraft] = useState<string | null>(null);
+  const canEdit =
+    Boolean(onEditMessage) && !disabled && isEditableUserMessage(message);
+
+  if (draft !== null && onEditMessage) {
+    const trimmed = draft.trim();
+    const unchanged = trimmed === message.content.trim();
+
+    function submit() {
+      if (!trimmed || unchanged) {
+        return;
+      }
+      setDraft(null);
+      onEditMessage?.(message, trimmed);
+    }
+
+    return (
+      <Message
+        className="mr-0 ml-auto w-full min-w-0 max-w-full items-end justify-end overflow-visible"
+        from="user"
+      >
+        <div className="flex w-full flex-col gap-3 rounded-[1.75rem] bg-muted px-5 pt-4 pb-3.5">
+          <Textarea
+            autoFocus
+            className="max-h-64 min-h-0 resize-none rounded-none border-0 bg-transparent p-0 text-sm leading-[1.55] tracking-[0.01em] shadow-none focus-visible:border-0 focus-visible:ring-0 dark:bg-transparent"
+            onChange={(event) => setDraft(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Escape") {
+                event.preventDefault();
+                setDraft(null);
+                return;
+              }
+              if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+                event.preventDefault();
+                submit();
+              }
+            }}
+            value={draft}
+          />
+          <div className="flex justify-end gap-2">
+            <Button
+              className="rounded-full px-4"
+              onClick={() => setDraft(null)}
+              type="button"
+              variant="outline"
+            >
+              Cancel
+            </Button>
+            <Button
+              className="rounded-full px-4"
+              disabled={!trimmed || unchanged || busy || disabled}
+              onClick={submit}
+              type="button"
+            >
+              Send
+            </Button>
+          </div>
+        </div>
+      </Message>
+    );
+  }
+
   return (
     <Message
       className="mr-0 ml-auto min-w-0 max-w-full items-end justify-end overflow-visible"
@@ -436,6 +604,18 @@ function ChatMessageRow({ message }: { message: ChatListItem }) {
       <MessageContent className="ml-auto min-w-0 max-w-full overflow-visible group-[.is-user]:ml-auto">
         <UserMessageContent message={message} />
       </MessageContent>
+      {canEdit ? (
+        <button
+          aria-label="Edit message"
+          className="mr-1 inline-flex size-8 items-center justify-center self-end rounded-lg text-muted-foreground opacity-0 transition-colors transition-opacity hover:bg-muted hover:text-foreground focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-40 group-focus-within:opacity-100 group-hover:opacity-60 group-hover:hover:opacity-100"
+          disabled={busy}
+          onClick={() => setDraft(message.content)}
+          title="Edit message"
+          type="button"
+        >
+          <Edit03Icon aria-hidden className="size-4" />
+        </button>
+      ) : null}
     </Message>
   );
 }
@@ -496,6 +676,7 @@ function AssistantMessageActions({
   actionsDisabled = false,
   onBranchMessage,
   onRetryMessage,
+  usage,
 }: {
   message: ChatListItem;
   copyContent: string;
@@ -503,6 +684,7 @@ function AssistantMessageActions({
   actionsDisabled?: boolean;
   onBranchMessage?: (message: ChatListItem) => void;
   onRetryMessage?: (message: ChatListItem) => void;
+  usage?: ChatUsage;
 }) {
   const [copied, setCopied] = useState(false);
   const copyTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -544,10 +726,11 @@ function AssistantMessageActions({
 
   return (
     <div className="flex items-center gap-1 pt-1 opacity-60 transition-opacity group-focus-within:opacity-100 group-hover:opacity-100 group-active:opacity-100">
+      {usage ? <ChatUsageBadge usage={usage} /> : null}
       <button
         aria-label={copied ? "Copied" : "Copy response"}
         className={cn(
-          "inline-flex size-8 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-40",
+          "inline-flex size-8 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-40",
           copied && "text-emerald-600 dark:text-emerald-400"
         )}
         disabled={!copyContent.trim()}
@@ -564,7 +747,7 @@ function AssistantMessageActions({
       {onRetryMessage ? (
         <button
           aria-label="Try again"
-          className="inline-flex size-8 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-40"
+          className="inline-flex size-8 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-40"
           disabled={busy || actionsDisabled}
           onClick={() => onRetryMessage(message)}
           title="Try again"
@@ -580,7 +763,7 @@ function AssistantMessageActions({
               <button
                 aria-label="Message actions"
                 className={cn(
-                  "inline-flex size-8 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
+                  "inline-flex size-8 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
                   busy && "pointer-events-none opacity-60"
                 )}
                 type="button"

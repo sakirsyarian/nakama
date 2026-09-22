@@ -70,6 +70,7 @@ const NATIVE_DOCUMENT_MEDIA_TYPES: Record<ProviderName, ReadonlySet<string>> = {
   ]),
   cloudflare: new Set<string>(),
   deepseek: new Set<string>(),
+  doubao: new Set<string>(),
   fireworks: new Set<string>(),
   gemini: new Set([
     "application/pdf",
@@ -79,6 +80,9 @@ const NATIVE_DOCUMENT_MEDIA_TYPES: Record<ProviderName, ReadonlySet<string>> = {
   ]),
   minimax: new Set<string>(),
   minimax_cn: new Set<string>(),
+  mistral: new Set<string>(),
+  moonshot: new Set<string>(),
+  moonshot_cn: new Set<string>(),
   ollama: new Set<string>(),
   openai: new Set([
     "application/pdf",
@@ -94,7 +98,14 @@ const NATIVE_DOCUMENT_MEDIA_TYPES: Record<ProviderName, ReadonlySet<string>> = {
     "text/csv",
     DOCX_MEDIA_TYPE,
   ]),
+  perplexity: new Set<string>(),
+  qwen: new Set<string>(),
+  qwen_cn: new Set<string>(),
+  together: new Set<string>(),
+  vercel_ai_gateway: new Set<string>(),
   xai: new Set<string>(),
+  xai_oauth: new Set<string>(),
+  xiaomi: new Set<string>(),
   zhipu: new Set<string>(),
   zhipu_cn: new Set<string>(),
 };

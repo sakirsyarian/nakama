@@ -7,7 +7,7 @@ import { SkillsWriteApprovalOrgCard } from "@/components/settings/SkillsWriteApp
 
 export function OrganizationPanel() {
   return (
-    <div className="min-w-0 space-y-8 p-4 sm:p-5">
+    <div className="min-w-0 space-y-8">
       <OrgMembersCard />
       <SkillsWriteApprovalOrgCard />
       <SkillsPostTurnReviewOrgCard />

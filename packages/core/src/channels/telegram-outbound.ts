@@ -15,7 +15,14 @@ export function createTelegramOutboundAdapter(
   return {
     async send(input): Promise<ChannelSendResult> {
       try {
-        const config = await loadTelegramConfigFile();
+        if (!(input.orgId && input.profileId)) {
+          return {
+            error: "Choose an agent connection before sending.",
+            ok: false,
+          };
+        }
+        const owner = { orgId: input.orgId, profileId: input.profileId };
+        const config = await loadTelegramConfigFile(owner);
         const token = config?.botToken.trim();
 
         if (!token) {

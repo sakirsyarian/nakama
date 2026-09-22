@@ -1,9 +1,18 @@
+import { rm } from "node:fs/promises";
 import {
+  createEmailOutboundAdapter,
+  type EmailOutboundAdapter,
   generateTemporaryPassword,
+  getOrgConfigDir,
   getProfileSoulDir,
   initSoulDirectory,
   NakamaApiError,
+  resolveWebPublicUrl,
 } from "@nakama/core";
+import {
+  listChannelOwners,
+  removeChannelConnection,
+} from "@nakama/core/channel-config-shared";
 import type {
   AcceptOrgInviteRequest,
   AddOrgMemberResponse,
@@ -18,6 +27,8 @@ import type {
   OrgMemberResponse,
   OrgMemberSummary,
   OrgRole,
+  RequestPasswordResetResponse,
+  ResetPasswordRequest,
   UpdateOrganizationRequest,
   UpdateOrgMemberRequest,
   UserOrgSummary,
@@ -27,6 +38,7 @@ import type {
   DatabaseAdapter,
   StoredOrganizationRecord,
   StoredOrgInviteRecord,
+  StoredPasswordResetTokenRecord,
   StoredUserRecord,
 } from "@nakama/db";
 import {
@@ -46,6 +58,7 @@ const SLUG_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const PHONE_PATTERN = /^[+0-9()\-\s]{6,32}$/;
 const MAX_MEMBER_NAME_LENGTH = 120;
+const PASSWORD_RESET_EXPIRY_MINUTES = 60;
 const MEMBER_NAME_CONTROL_CHARS = /[\u0000-\u001F\u007F]/;
 /** Path `userId` for org member routes — matches minted ids (`user_` + hex) and seeded ones. */
 const ORG_MEMBER_USER_ID_PATTERN = /^user_[A-Za-z0-9_]{1,64}$/;
@@ -57,9 +70,14 @@ function assertOrgMemberUserIdShape(userId: string): void {
 }
 
 export class OrgService {
+  beforeArchiveChannels?: (orgId: string) => Promise<() => void>;
   constructor(
     private readonly databaseAdapter: DatabaseAdapter,
-    private readonly authService: AuthService
+    private readonly authService: AuthService,
+    private readonly email: EmailOutboundAdapter = createEmailOutboundAdapter(),
+    private readonly getWebPublicUrl: () =>
+      | string
+      | undefined = resolveWebPublicUrl
   ) {}
 
   async listOrganizations(): Promise<OrganizationSummary[]> {
@@ -99,10 +117,17 @@ export class OrgService {
     }
 
     const now = new Date().toISOString();
-    const archived = await this.databaseAdapter.tryMarkOrganizationArchived(
-      orgId,
-      now
-    );
+    if (
+      (await this.databaseAdapter.listOrganizations()).filter(
+        (entry) => !entry.archivedAt
+      ).length <= 1
+    ) {
+      throw new NakamaApiError(LAST_ORGANIZATION_MESSAGE, 409);
+    }
+    const releaseAdmission = await this.beforeArchiveChannels?.(orgId);
+    const archived = await this.databaseAdapter
+      .tryMarkOrganizationArchived(orgId, now)
+      .finally(() => releaseAdmission?.());
     if (!archived) {
       const current = await this.databaseAdapter.getOrganizationById(orgId);
       if (!current || current.archivedAt) {
@@ -118,6 +143,33 @@ export class OrgService {
     });
   }
 
+  async permanentlyDeleteOrganization(orgId: string): Promise<void> {
+    const organization = await this.databaseAdapter.getOrganizationById(orgId);
+    if (!organization) {
+      throw new NakamaApiError("Not found", 404);
+    }
+    if (!organization.archivedAt) {
+      throw new NakamaApiError(
+        "Archive the organization before deleting it permanently.",
+        409
+      );
+    }
+
+    for (const platform of ["telegram", "discord", "whatsapp"] as const) {
+      for (const owner of await listChannelOwners(platform)) {
+        if (owner.orgId === orgId) {
+          await removeChannelConnection(platform, owner);
+        }
+      }
+    }
+    // Keep the database row available for a safe retry if disk cleanup fails.
+    await rm(getOrgConfigDir(orgId), { force: true, recursive: true });
+    const deleted = await this.databaseAdapter.deleteOrganization(orgId);
+    if (!deleted) {
+      throw new NakamaApiError("Not found", 404);
+    }
+  }
+
   async updateOrganization(
     orgId: string,
     request: UpdateOrganizationRequest
@@ -130,6 +182,30 @@ export class OrgService {
     }
 
     const now = new Date().toISOString();
+    const monthlyLlmTokenLimit =
+      request.monthlyLlmTokenLimit === undefined
+        ? (org.monthlyLlmTokenLimit ?? 0)
+        : request.monthlyLlmTokenLimit;
+    const monthlyLlmTurnLimit =
+      request.monthlyLlmTurnLimit === undefined
+        ? (org.monthlyLlmTurnLimit ?? 0)
+        : request.monthlyLlmTurnLimit;
+    const monthlyLlmWarningPercent =
+      request.monthlyLlmWarningPercent === undefined
+        ? (org.monthlyLlmWarningPercent ?? 80)
+        : request.monthlyLlmWarningPercent;
+    assertMonthlyLlmTurnLimit(monthlyLlmTokenLimit);
+    assertMonthlyLlmTurnLimit(monthlyLlmTurnLimit);
+    if (
+      !Number.isInteger(monthlyLlmWarningPercent) ||
+      monthlyLlmWarningPercent < 1 ||
+      monthlyLlmWarningPercent > 99
+    ) {
+      throw new NakamaApiError(
+        "Monthly LLM warning percent must be an integer from 1 to 99.",
+        400
+      );
+    }
     const skillsCuratorStaleAfterDays =
       request.skillsCuratorStaleAfterDays === undefined
         ? (org.skillsCuratorStaleAfterDays ?? 30)
@@ -144,6 +220,9 @@ export class OrgService {
     );
     const updated: StoredOrganizationRecord = {
       ...org,
+      monthlyLlmTokenLimit,
+      monthlyLlmTurnLimit,
+      monthlyLlmWarningPercent,
       name,
       skillsCuratorArchiveAfterDays,
       skillsCuratorConsolidateEnabled:
@@ -331,6 +410,7 @@ export class OrgService {
     return {
       activeOrgId,
       email: user.email,
+      id: user.id,
       isPlatformAdmin: Boolean(user.isPlatformAdmin),
       name: user.name ?? null,
       orgId: activeOrgId,
@@ -341,6 +421,7 @@ export class OrgService {
   async updateOwnProfile(
     userId: string,
     input: {
+      currentPassword?: string;
       name?: string | null;
       email?: string;
       phone?: string | null;
@@ -369,6 +450,14 @@ export class OrgService {
       }
 
       if (email !== user.email) {
+        const validPassword = await this.authService.verifyPassword(
+          input.currentPassword?.trim() ?? "",
+          user.passwordHash
+        );
+        if (!validPassword) {
+          throw new NakamaApiError("Current password is incorrect.", 401);
+        }
+
         const existing = await this.databaseAdapter.getUserByEmail(email);
         if (existing && existing.id !== user.id) {
           throw new NakamaApiError(
@@ -583,6 +672,112 @@ export class OrgService {
     );
   }
 
+  async disableMember(orgId: string, userId: string): Promise<void> {
+    assertOrgMemberUserIdShape(userId);
+    await this.requireActiveOrganization(orgId);
+
+    const member = await this.databaseAdapter.getOrgMember(orgId, userId);
+    if (!member) {
+      throw new NakamaApiError("Not found", 404);
+    }
+
+    // disabled_at is install-wide, not per-org, so this has to check every org
+    // the user administers, not just the org named in the URL: a user can be
+    // a plain member of orgId while being the sole admin of a different org,
+    // and disabling never touches org_members rows, so assertCanChangeAdminMembership
+    // (which only looks at one org) would miss that entirely.
+    const memberships =
+      await this.databaseAdapter.listUserOrganizations(userId);
+    const adminMemberships = memberships.filter(
+      (membership) => membership.role === "admin"
+    );
+    for (const membership of adminMemberships) {
+      const members = await this.databaseAdapter.listOrgMembers(
+        membership.organization.id
+      );
+      const otherAdmins = members.filter(
+        (entry) => entry.role === "admin" && entry.userId !== userId
+      );
+      const otherAdminUsers = await Promise.all(
+        otherAdmins.map((entry) =>
+          this.databaseAdapter.getUserById(entry.userId)
+        )
+      );
+      const hasUsableAdmin = otherAdminUsers.some(
+        (user) => user && !user.disabledAt
+      );
+      if (!hasUsableAdmin) {
+        throw new NakamaApiError(
+          "Cannot disable the last active admin of an organization.",
+          409
+        );
+      }
+    }
+
+    // Same shape as the org-admin check: is_platform_admin is also install-wide
+    // and unrelated to org membership, so a platform admin who is a plain
+    // member (or not a member) everywhere would otherwise slip past the loop
+    // above and could be the install's only platform admin.
+    const targetUser = await this.databaseAdapter.getUserById(userId);
+    if (targetUser?.isPlatformAdmin) {
+      const platformAdmins =
+        await this.databaseAdapter.listPlatformAdminUsers();
+      const hasUsablePlatformAdmin = platformAdmins.some(
+        (admin) => admin.id !== userId && !admin.disabledAt
+      );
+      if (!hasUsablePlatformAdmin) {
+        throw new NakamaApiError(
+          "Cannot disable the last active platform admin.",
+          409
+        );
+      }
+    }
+
+    const now = new Date().toISOString();
+    await this.databaseAdapter.disableUser(userId, now);
+    await this.databaseAdapter.revokeBrowserSessionsForUser(userId, now);
+  }
+
+  async enableMember(orgId: string, userId: string): Promise<void> {
+    assertOrgMemberUserIdShape(userId);
+    await this.requireActiveOrganization(orgId);
+
+    const member = await this.databaseAdapter.getOrgMember(orgId, userId);
+    if (!member) {
+      throw new NakamaApiError("Not found", 404);
+    }
+
+    await this.databaseAdapter.enableUser(userId);
+  }
+
+  /**
+   * Remove login, membership and per-user integration data while retaining an
+   * anonymous user anchor. Chat messages and shared artifacts are org records,
+   * so they stay intact without retaining the erased person's identity.
+   */
+  async eraseUser(userId: string, actorUserId: string): Promise<void> {
+    assertOrgMemberUserIdShape(userId);
+    if (userId === actorUserId) {
+      throw new NakamaApiError("You cannot erase your own account.", 409);
+    }
+
+    const user = await this.databaseAdapter.getUserById(userId);
+    if (!user) {
+      throw new NakamaApiError("Not found", 404);
+    }
+
+    const updatedAt = new Date().toISOString();
+    const erased = await this.databaseAdapter.eraseUser({
+      email: `erased-${crypto.randomUUID()}@deleted.invalid`,
+      id: userId,
+      passwordHash: await this.authService.hashPassword(crypto.randomUUID()),
+      updatedAt,
+    });
+    if (!erased) {
+      throw new NakamaApiError("Not found", 404);
+    }
+  }
+
   async updateMember(
     orgId: string,
     userId: string,
@@ -651,7 +846,7 @@ export class OrgService {
     role: OrgRole;
     invitedByUserId: string;
   }): Promise<OrgInviteCreatedResponse> {
-    await this.requireActiveOrganization(input.orgId);
+    const organization = await this.requireActiveOrganization(input.orgId);
 
     const email = normalizeEmail(input.email);
     if (!EMAIL_PATTERN.test(email)) {
@@ -706,9 +901,27 @@ export class OrgService {
 
     await this.databaseAdapter.createOrgInvite(record);
 
+    const webPublicUrl = this.getWebPublicUrl();
+    const acceptInstruction = webPublicUrl
+      ? `Accept your invitation: ${webPublicUrl}/accept-invite?token=${encodeURIComponent(token)}`
+      : `Invitation token: ${token}`;
+    const delivery = await this.email.send({
+      orgId: input.orgId,
+      subject: `You're invited to ${organization.name}`,
+      text: [
+        `You've been invited to join ${organization.name} as ${input.role}.`,
+        "",
+        acceptInstruction,
+        "",
+        `This invitation expires on ${record.expiresAt}.`,
+      ].join("\n"),
+      to: email,
+    });
+
     return {
+      delivered: delivery.ok,
       invite: toOrgInviteSummary(record),
-      token,
+      token: delivery.ok ? null : token,
     };
   }
 
@@ -791,6 +1004,87 @@ export class OrgService {
     };
   }
 
+  async requestPasswordReset(
+    requestedEmail: string,
+    allowManualToken = false
+  ): Promise<RequestPasswordResetResponse> {
+    const email = normalizeEmail(requestedEmail);
+    if (!EMAIL_PATTERN.test(email)) {
+      throw new NakamaApiError("A valid email address is required.", 400);
+    }
+
+    const user = await this.databaseAdapter.getUserByEmail(email);
+    if (!user) {
+      // Match the successful-delivery shape so configured deployments do not
+      // disclose whether an address has an account.
+      return { delivered: true, token: null };
+    }
+
+    const now = new Date();
+    const token = generatePasswordResetToken();
+    const record: StoredPasswordResetTokenRecord = {
+      consumedAt: null,
+      createdAt: now.toISOString(),
+      expiresAt: new Date(
+        now.getTime() + PASSWORD_RESET_EXPIRY_MINUTES * 60 * 1000
+      ).toISOString(),
+      id: `password_reset_${crypto.randomUUID().replace(/-/g, "")}`,
+      tokenHash: this.authService.hashToken(token),
+      userId: user.id,
+    };
+    await this.databaseAdapter.createPasswordResetToken(record);
+
+    const webPublicUrl = this.getWebPublicUrl();
+    const resetInstruction = webPublicUrl
+      ? `Reset your password: ${webPublicUrl}/reset-password?token=${encodeURIComponent(token)}`
+      : `Password reset token: ${token}`;
+    const deliveryPromise = Promise.resolve().then(() =>
+      this.email.send({
+        subject: "Reset your Nakama password",
+        text: [
+          "A password reset was requested for your account.",
+          "",
+          resetInstruction,
+          "",
+          `This link expires on ${record.expiresAt}. If you did not request it, you can ignore this message.`,
+        ].join("\n"),
+        to: email,
+      })
+    );
+
+    if (!allowManualToken) {
+      // Public callers get a response independent of SMTP latency. The
+      // adapter contains delivery errors, while this catch also protects
+      // against an injected adapter rejecting unexpectedly.
+      void deliveryPromise.catch(() => undefined);
+      return { delivered: true, token: null };
+    }
+
+    const delivery = await deliveryPromise;
+    return { delivered: delivery.ok, token: delivery.ok ? null : token };
+  }
+
+  async resetPassword(request: ResetPasswordRequest): Promise<void> {
+    const token = request.token?.trim();
+    if (!token) {
+      throw new NakamaApiError("Password reset token is required.", 400);
+    }
+
+    const newPassword = request.newPassword?.trim() ?? "";
+    assertNewPassword(newPassword);
+    const consumed = await this.databaseAdapter.consumePasswordResetToken(
+      this.authService.hashToken(token),
+      await this.authService.hashPassword(newPassword),
+      new Date().toISOString()
+    );
+    if (!consumed) {
+      throw new NakamaApiError(
+        "Password reset token is invalid or has expired.",
+        400
+      );
+    }
+  }
+
   async changePassword(input: {
     userId: string;
     currentPassword: string;
@@ -842,8 +1136,16 @@ export class OrgService {
     }
 
     const members = await this.databaseAdapter.listOrgMembers(orgId);
-    const adminCount = members.filter((entry) => entry.role === "admin").length;
-    if (adminCount > 1) {
+    const admins = members.filter((entry) => entry.role === "admin");
+    const adminUsers = await Promise.all(
+      admins.map((entry) => this.databaseAdapter.getUserById(entry.userId))
+    );
+    // disabled_at is install-wide and does not touch org_members rows, so a raw
+    // admin-row count still sees a disabled admin as usable coverage.
+    const usableAdminCount = adminUsers.filter(
+      (user) => user && !user.disabledAt
+    ).length;
+    if (usableAdminCount > 1) {
       return member;
     }
 
@@ -970,6 +1272,10 @@ function generateInviteToken(): string {
   return `tc_invite_${crypto.randomUUID().replace(/-/g, "")}${crypto.randomUUID().replace(/-/g, "")}`;
 }
 
+function generatePasswordResetToken(): string {
+  return `tc_reset_${crypto.randomUUID().replace(/-/g, "")}${crypto.randomUUID().replace(/-/g, "")}`;
+}
+
 function assertInviteUsable(invite: StoredOrgInviteRecord): void {
   if (invite.acceptedAt) {
     throw new NakamaApiError("Invite has already been accepted.", 400);
@@ -1002,6 +1308,15 @@ function assertSkillCuratorFreshnessClocks(
   }
 }
 
+function assertMonthlyLlmTurnLimit(limit: number): void {
+  if (!(Number.isInteger(limit) && limit >= 0 && limit <= 1_000_000)) {
+    throw new NakamaApiError(
+      "Monthly LLM turn limit must be an integer from 0 to 1000000.",
+      400
+    );
+  }
+}
+
 function assertNewPassword(password: string): void {
   if (password.length < 8) {
     throw new NakamaApiError("Password must be at least 8 characters.", 400);
@@ -1015,6 +1330,7 @@ function toOrganizationSummary(
     archivedAt: record.archivedAt ?? null,
     createdAt: record.createdAt,
     id: record.id,
+    monthlyLlmTurnLimit: record.monthlyLlmTurnLimit ?? 0,
     name: record.name,
     skillsCuratorArchiveAfterDays: record.skillsCuratorArchiveAfterDays ?? 90,
     skillsCuratorConsolidateEnabled:

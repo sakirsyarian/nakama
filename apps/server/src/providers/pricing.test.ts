@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   estimateUsageCostUsd,
+  getExplicitModelPricing,
   getModelPricing,
   hasCatalogPricing,
 } from "./pricing";
@@ -38,6 +39,14 @@ const fireworksInstance = {
   type: "fireworks" as const,
 };
 
+const moonshotInstance = {
+  apiKey: "sk-moonshot-test",
+  baseUrl: "https://api.moonshot.ai/v1",
+  createdAt: "2026-09-08T10:00:00.000Z",
+  id: "ms-1",
+  label: "Moonshot Kimi",
+  type: "moonshot" as const,
+};
 describe("estimateUsageCostUsd", () => {
   test("computes cost from catalog pricing", () => {
     const cost = estimateUsageCostUsd(
@@ -149,6 +158,40 @@ describe("estimateUsageCostUsd", () => {
     expect(cost).toBeCloseTo(2.5, 5);
   });
 
+  test("uses saved pricing for moonshot discovered models", () => {
+    const cost = estimateUsageCostUsd("kimi-k2.5", 1_000_000, 1_000_000, {
+      provider: "moonshot",
+      providerInstance: {
+        ...moonshotInstance,
+        customModels: [
+          {
+            id: "kimi-k2.5",
+            inputPerMillionUsd: 0.6,
+            outputPerMillionUsd: 2.5,
+          },
+        ],
+      },
+    });
+
+    expect(cost).toBeCloseTo(3.1, 5);
+  });
+
+  test("does not estimate discovery-provider models without saved pricing", () => {
+    // Discovery catalogs are fetched at runtime, so there is no bundled entry
+    // to price against: report unknown instead of DEFAULT_PRICING.
+    expect(
+      getModelPricing("kimi-k2.5", {
+        provider: "moonshot",
+        providerInstance: {
+          ...moonshotInstance,
+          customModels: [{ id: "kimi-k2.5" }],
+        },
+      })
+    ).toBeNull();
+    expect(getModelPricing("MiniMax-M3", { provider: "minimax" })).toBeNull();
+    expect(getModelPricing("glm-5.2", { provider: "zhipu_cn" })).toBeNull();
+  });
+
   test("does not estimate compatible models without user pricing", () => {
     const pricing = getModelPricing("llama3.2", {
       provider: "openai_compatible",
@@ -183,5 +226,95 @@ describe("estimateUsageCostUsd", () => {
         },
       })
     ).toBe(true);
+  });
+});
+
+describe("getExplicitModelPricing", () => {
+  test("returns null where getModelPricing falls back", () => {
+    expect(getExplicitModelPricing("vendor/custom-model")).toBeNull();
+    expect(getModelPricing("vendor/custom-model")).not.toBeNull();
+  });
+
+  test("returns the catalog rates for a known model", () => {
+    expect(getExplicitModelPricing("claude-sonnet-4-6")).toEqual({
+      inputPerMillionUsd: 3,
+      outputPerMillionUsd: 15,
+    });
+  });
+
+  test("returns the Images rates for gpt-image-2", () => {
+    expect(getExplicitModelPricing("gpt-image-2")).toEqual({
+      inputPerMillionUsd: 5,
+      outputPerMillionUsd: 30,
+    });
+  });
+
+  test("returns what the user typed for a custom model", () => {
+    expect(
+      getExplicitModelPricing("llama3.2", {
+        provider: "openai_compatible",
+        providerInstance: {
+          ...compatibleInstance,
+          customModels: [
+            { id: "llama3.2", inputPerMillionUsd: 2, outputPerMillionUsd: 4 },
+          ],
+        },
+      })
+    ).toEqual({ inputPerMillionUsd: 2, outputPerMillionUsd: 4 });
+  });
+});
+
+describe("estimateUsageCostUsd with a cached prompt slice", () => {
+  const instanceWith = (model: Record<string, unknown>) => ({
+    providerInstance: {
+      apiKey: "k",
+      baseUrl: "http://localhost:1/v1",
+      createdAt: "2026-06-07T10:00:00.000Z",
+      customModels: [model],
+      id: "cmp-cached",
+      label: "Cached",
+      type: "openai_compatible" as const,
+    },
+  });
+
+  test("bills the cached slice at its own rate, or the input rate when unset", () => {
+    const priced = estimateUsageCostUsd(
+      "m",
+      1_000_000,
+      0,
+      instanceWith({
+        cachedInputPerMillionUsd: 1,
+        id: "m",
+        inputPerMillionUsd: 10,
+        outputPerMillionUsd: 30,
+      }),
+      400_000
+    );
+    // 600k fresh at $10/1M plus 400k cached at $1/1M.
+    expect(priced).toBeCloseTo(6.4, 6);
+
+    // No cached rate published, so an existing install's numbers cannot move.
+    const noCachedRate = instanceWith({
+      id: "m",
+      inputPerMillionUsd: 10,
+      outputPerMillionUsd: 30,
+    });
+    expect(estimateUsageCostUsd("m", 1_000_000, 0, noCachedRate, 400_000)).toBe(
+      estimateUsageCostUsd("m", 1_000_000, 0, noCachedRate)
+    );
+  });
+
+  test("clamps a cached count larger than the input it belongs to", () => {
+    const ctx = instanceWith({
+      cachedInputPerMillionUsd: 1,
+      id: "m",
+      inputPerMillionUsd: 10,
+      outputPerMillionUsd: 30,
+    });
+    // Unclamped this prices 999k tokens of "fresh" input negatively.
+    expect(estimateUsageCostUsd("m", 1000, 0, ctx, 999_999)).toBeCloseTo(
+      0.001,
+      6
+    );
   });
 });

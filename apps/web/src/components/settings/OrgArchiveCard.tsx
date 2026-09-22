@@ -1,6 +1,5 @@
-import { useState } from "react";
-import { Button } from "@/components/ui/button";
-import { Card } from "@/components/ui/card";
+import { Button } from "@nakama/ui/button";
+import { Card } from "@nakama/ui/card";
 import {
   Dialog,
   DialogContent,
@@ -8,8 +7,9 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
-} from "@/components/ui/dialog";
-import { Spinner } from "@/components/ui/spinner";
+} from "@nakama/ui/dialog";
+import { Spinner } from "@nakama/ui/spinner";
+import { useState } from "react";
 import { useAuth } from "@/context/use-auth";
 import { formatError } from "@/lib/client";
 import { canArchiveOrganization } from "@/lib/org-archive";
@@ -41,7 +41,7 @@ export function OrgArchiveCard() {
   }
 
   return (
-    <Card className="gap-0 py-0">
+    <Card className="gap-0 py-0 shadow-none">
       <div className="flex flex-wrap items-center justify-between gap-3 px-4 py-4 sm:px-5">
         <h2 className="font-medium text-sm">Delete organization</h2>
         <Button

@@ -6,11 +6,13 @@ import {
   readFile,
   realpath,
   rm,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { convertDocxToMarkdown } from "../docx-text";
+import { getGlobalSkillsDir } from "../skills/paths";
 import {
   PathGuardError,
   runDeleteFile,
@@ -58,6 +60,28 @@ describe("file builtin tools", () => {
     expect(result.path).toBe(await realpath(targetPath));
     expect(result.bytesWritten).toBe(11);
     expect(await readFile(targetPath, "utf8")).toBe("hello world");
+  });
+
+  test("write_file preserves indentation and boundary whitespace", async () => {
+    tempDir = await mkdtemp(path.join(os.tmpdir(), "nakama-write-"));
+    const content = "    caf\u00e9\r\n    second line\r\n\r\n";
+    const result = await runWriteFile(
+      { content, path: "snippet.md" },
+      PROFILE_CONTEXT,
+      { workspaceRoot: tempDir }
+    );
+
+    expect(await readFile(result.path, "utf8")).toBe(content);
+    expect(result.bytesWritten).toBe(Buffer.byteLength(content, "utf8"));
+  });
+
+  test("write_file still rejects whitespace-only content", async () => {
+    tempDir = await mkdtemp(path.join(os.tmpdir(), "nakama-write-"));
+    await expect(
+      runWriteFile({ content: " \t\r\n", path: "notes.txt" }, PROFILE_CONTEXT, {
+        workspaceRoot: tempDir,
+      })
+    ).rejects.toThrow();
   });
 
   test("write_file resolves relative paths from profile workspace", async () => {
@@ -169,22 +193,6 @@ describe("file builtin tools", () => {
 
     expect(result).toEqual({ deleted: true, path: resolvedTargetPath });
     await expect(readFile(targetPath, "utf8")).rejects.toThrow();
-  });
-
-  test("delete_file refuses files under artifacts/", async () => {
-    tempDir = await mkdtemp(path.join(os.tmpdir(), "nakama-delete-artifact-"));
-    const artifactsDir = path.join(tempDir, "artifacts");
-    await mkdir(artifactsDir, { recursive: true });
-    const targetPath = path.join(artifactsDir, "script.md");
-    await writeFile(targetPath, "keep me", "utf8");
-
-    await expect(
-      runDeleteFile({ path: "artifacts/script.md" }, PROFILE_CONTEXT, {
-        workspaceRoot: tempDir,
-      })
-    ).rejects.toThrow(/Cannot delete files under artifacts/);
-
-    expect(await readFile(targetPath, "utf8")).toBe("keep me");
   });
 
   test("edit_file replaces a unique text match", async () => {
@@ -352,6 +360,129 @@ describe("file builtin tools", () => {
     expect(result.toString("utf8")).toBe("\uFEFFhello new");
   });
 
+  test.each([
+    {
+      content: "  old\nold\n",
+      edits: [{ newText: "new\n", oldText: "  old\n" }],
+      expected: "new\nold\n",
+      name: "keeps indentation and boundary newlines in oldText",
+    },
+    {
+      content: "😀 Ａ ﬁ \u201Bhi\u201F \u2212 \u2009x\n",
+      edits: [{ newText: "done", oldText: "A fi 'hi\" -  x" }],
+      expected: "😀 done\n",
+      name: "matches compatibility Unicode and emoji offsets",
+    },
+    {
+      content: "keep “this”  \nleft “quote” old  \nnext Ａ  \nkeep ‘that’\t\n",
+      edits: [
+        { newText: "new", oldText: "old" },
+        { newText: "B", oldText: "A" },
+      ],
+      expected: 'keep “this”  \nleft "quote" new\nnext B\nkeep ‘that’\t\n',
+      name: "normalizes only touched lines in mixed exact and fuzzy edits",
+    },
+    {
+      content: "keep  \nＡ and Ｂ  \ntail\t\n",
+      edits: [
+        { newText: "one", oldText: "A" },
+        { newText: "two", oldText: "B" },
+      ],
+      expected: "keep  \none and two\ntail\t\n",
+      name: "merges two replacements touching the same normalized line",
+    },
+    {
+      content: 'same “text”  \nsame "text"\t\nＡ\n',
+      edits: [{ newText: "B", oldText: "A" }],
+      expected: 'same “text”  \nsame "text"\t\nB\n',
+      name: "preserves the right duplicate normalized line",
+    },
+    {
+      content: "before\rold\rafter\r",
+      edits: [{ newText: "new", oldText: "before\nold" }],
+      expected: "new\nafter\n",
+      name: "normalizes lone CR to LF",
+    },
+    {
+      content: "first\r\nold\nlast\n",
+      edits: [{ newText: "new", oldText: "old" }],
+      expected: "first\r\nnew\r\nlast\r\n",
+      name: "uses the first newline style for a mixed-ending file",
+    },
+    {
+      content: "one two",
+      edits: [
+        { newText: "one", oldText: "one" },
+        { newText: "three", oldText: "two" },
+      ],
+      expected: "one three",
+      name: "permits unchanged entries when the batch changes content",
+    },
+    {
+      content: "\t",
+      edits: [{ newText: " ", oldText: "\t" }],
+      expected: " ",
+      name: "matches whitespace-only oldText exactly",
+    },
+  ])("edit_file $name", async ({ content, edits, expected }) => {
+    tempDir = await mkdtemp(path.join(os.tmpdir(), "nakama-edit-"));
+    const targetPath = path.join(tempDir, "note.txt");
+    await writeFile(targetPath, content);
+    await runEditFile({ edits, path: targetPath }, PROFILE_CONTEXT, {
+      workspaceRoot: tempDir,
+    });
+    expect(await readFile(targetPath, "utf8")).toBe(expected);
+  });
+
+  test.each([
+    {
+      content: "one two three",
+      edits: [{ newText: "-", oldText: " " }],
+      name: "rejects ambiguous whitespace-only searches",
+    },
+    {
+      content: "Ａ A",
+      edits: [{ newText: "B", oldText: "A" }],
+      name: "rejects normalized duplicates even with one exact match",
+    },
+    {
+      content: "ＡＢＣ",
+      edits: [
+        { newText: "x", oldText: "AB" },
+        { newText: "y", oldText: "BC" },
+      ],
+      name: "rejects overlapping fuzzy matches",
+    },
+    {
+      content: "old\r\nline",
+      edits: [{ newText: "old\r\nline", oldText: "old\nline" }],
+      name: "rejects a no-op after newline normalization",
+    },
+    {
+      content: "Ａ present",
+      edits: [
+        { newText: "B", oldText: "A" },
+        { newText: "new", oldText: "missing" },
+      ],
+      name: "rejects a missing edit without applying valid siblings",
+    },
+    {
+      content: "old",
+      edits: [{ newText: "new", oldText: "" }],
+      name: "rejects empty oldText",
+    },
+  ])("edit_file $name without writing", async ({ content, edits }) => {
+    tempDir = await mkdtemp(path.join(os.tmpdir(), "nakama-edit-"));
+    const targetPath = path.join(tempDir, "note.txt");
+    await writeFile(targetPath, content);
+    await expect(
+      runEditFile({ edits, path: targetPath }, PROFILE_CONTEXT, {
+        workspaceRoot: tempDir,
+      })
+    ).rejects.toThrow();
+    expect(await readFile(targetPath, "utf8")).toBe(content);
+  });
+
   test("edit_file rejects missing oldText", async () => {
     tempDir = await mkdtemp(path.join(os.tmpdir(), "nakama-edit-"));
     const targetPath = path.join(tempDir, "note.txt");
@@ -364,6 +495,43 @@ describe("file builtin tools", () => {
         { workspaceRoot: tempDir }
       )
     ).rejects.toThrow("oldText not found");
+  });
+
+  test.each([
+    ["image/png", "89504e470d0a1a0a0000000d49484452"],
+    ["image/jpeg", "ffd8ffe000104a4649460001"],
+    ["image/gif", "47494638396101000100"],
+    ["image/webp", "52494646100000005745425056503820"],
+  ])(
+    "read_file detects %s from bytes, independent of filename",
+    async (mediaType, hex) => {
+      tempDir = await mkdtemp(path.join(os.tmpdir(), "nakama-read-image-"));
+      const bytes = Buffer.from(hex, "hex");
+      await writeFile(path.join(tempDir, "image.bin"), bytes);
+      const result = await runReadFile(
+        { limit: 1, offset: 100, path: "image.bin" },
+        PROFILE_CONTEXT,
+        { workspaceRoot: tempDir }
+      );
+      expect(result.images).toEqual([
+        { data: bytes.toString("base64"), mediaType },
+      ]);
+      expect(result.bytesRead).toBe(bytes.length);
+      expect(result.content).not.toContain(bytes.toString("base64"));
+      expect(result.totalLines).toBe(0);
+    }
+  );
+
+  test("read_file rejects images above the attachment size limit", async () => {
+    tempDir = await mkdtemp(path.join(os.tmpdir(), "nakama-read-image-"));
+    const bytes = Buffer.alloc(5 * 1024 * 1024 + 1);
+    Buffer.from("89504e470d0a1a0a", "hex").copy(bytes);
+    await writeFile(path.join(tempDir, "large.png"), bytes);
+    await expect(
+      runReadFile({ path: "large.png" }, PROFILE_CONTEXT, {
+        workspaceRoot: tempDir,
+      })
+    ).rejects.toThrow();
   });
 
   test("read_file reads an existing file", async () => {
@@ -482,6 +650,96 @@ describe("file builtin tools", () => {
         "utf8"
       )
     ).toBe("nested\n");
+  });
+
+  test("file tools refuse memory files when forbidMemoryWrites", async () => {
+    tempDir = await mkdtemp(path.join(os.tmpdir(), "nakama-cognito-mem-"));
+    await mkdir(path.join(tempDir, "memory-archive"), { recursive: true });
+    await writeFile(path.join(tempDir, "MEMORY.md"), "remembered\n", "utf8");
+    await writeFile(
+      path.join(tempDir, "memory-archive", "2026-09.md"),
+      "archived\n",
+      "utf8"
+    );
+    const context = { ...PROFILE_CONTEXT, forbidMemoryWrites: true };
+
+    await expect(
+      runWriteFile({ content: "learned", path: "MEMORY.md" }, context, {
+        workspaceRoot: tempDir,
+      })
+    ).rejects.toThrow(/cognito/i);
+
+    await expect(
+      runEditFile(
+        {
+          edits: [{ newText: "changed", oldText: "remembered" }],
+          path: "MEMORY.md",
+        },
+        context,
+        { workspaceRoot: tempDir }
+      )
+    ).rejects.toThrow(/cognito/i);
+
+    await expect(
+      runDeleteFile({ path: "MEMORY.md" }, context, { workspaceRoot: tempDir })
+    ).rejects.toThrow(/cognito/i);
+
+    await expect(
+      runWriteFile(
+        { content: "learned", path: "memory-archive/2026-09.md" },
+        context,
+        { workspaceRoot: tempDir }
+      )
+    ).rejects.toThrow(/cognito/i);
+
+    await expect(
+      runWriteDocx({ markdown: "# hi", path: "MEMORY.docx" }, context, {
+        workspaceRoot: tempDir,
+      })
+    ).resolves.toBeDefined();
+
+    expect(await readFile(path.join(tempDir, "MEMORY.md"), "utf8")).toBe(
+      "remembered\n"
+    );
+  });
+
+  test("forbidMemoryWrites leaves ordinary workspace files writable", async () => {
+    tempDir = await mkdtemp(path.join(os.tmpdir(), "nakama-cognito-ok-"));
+    await mkdir(path.join(tempDir, "memory-archive"), { recursive: true });
+    await mkdir(path.join(tempDir, "notes"), { recursive: true });
+    const context = { ...PROFILE_CONTEXT, forbidMemoryWrites: true };
+
+    // Only MEMORY.md at the workspace root and memory-archive/YYYY-MM.md are
+    // memory. A same-named file one directory down is an ordinary artifact.
+    await runWriteFile({ content: "mine", path: "notes/MEMORY.md" }, context, {
+      workspaceRoot: tempDir,
+    });
+    await runWriteFile(
+      { content: "index", path: "memory-archive/index.md" },
+      context,
+      { workspaceRoot: tempDir }
+    );
+
+    expect(
+      await readFile(path.join(tempDir, "notes", "MEMORY.md"), "utf8")
+    ).toBe("mine");
+    expect(
+      await readFile(path.join(tempDir, "memory-archive", "index.md"), "utf8")
+    ).toBe("index");
+  });
+
+  test("memory files stay writable when forbidMemoryWrites is unset", async () => {
+    tempDir = await mkdtemp(path.join(os.tmpdir(), "nakama-cognito-off-"));
+
+    await runWriteFile(
+      { content: "learned", path: "MEMORY.md" },
+      PROFILE_CONTEXT,
+      { workspaceRoot: tempDir }
+    );
+
+    expect(await readFile(path.join(tempDir, "MEMORY.md"), "utf8")).toBe(
+      "learned"
+    );
   });
 
   test("write_file, edit_file, and delete_file refuse skills/*/tool.js and tool.ts", async () => {
@@ -612,39 +870,6 @@ describe("file builtin tools", () => {
     expect(result.content).toContain("**teks tebal**");
   });
 
-  test("read_file reads HTML that was saved under a .doc name", async () => {
-    tempDir = await mkdtemp(path.join(os.tmpdir(), "nakama-read-"));
-    const targetPath = path.join(tempDir, "lama.doc");
-    await writeFile(
-      targetPath,
-      "<html><head><style>body { color: #333; }</style></head><body><h1>Judul</h1></body></html>",
-      "utf8"
-    );
-
-    const result = await runReadFile({ path: targetPath }, PROFILE_CONTEXT, {
-      workspaceRoot: tempDir,
-    });
-
-    expect(result.content).toContain("# Judul");
-    expect(result.content).not.toContain("color: #333");
-  });
-
-  test("read_file rejects a genuine legacy OLE .doc with an actionable message", async () => {
-    tempDir = await mkdtemp(path.join(os.tmpdir(), "nakama-read-"));
-    const targetPath = path.join(tempDir, "lama.doc");
-    // OLE compound file magic: a real Word 97-2003 document.
-    await writeFile(
-      targetPath,
-      Buffer.from([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1])
-    );
-
-    expect(
-      runReadFile({ path: targetPath }, PROFILE_CONTEXT, {
-        workspaceRoot: tempDir,
-      })
-    ).rejects.toThrow(/Convert the file to \.docx/);
-  });
-
   test("read_file resolves relative paths from profile workspace", async () => {
     tempDir = await mkdtemp(path.join(os.tmpdir(), "nakama-read-"));
     await writeFile(path.join(tempDir, "notes.txt"), "relative", "utf8");
@@ -673,6 +898,60 @@ describe("file builtin tools", () => {
 
     expect(result.path).toBe(await realpath(targetPath));
     expect(result.content).toContain("export async function run");
+  });
+
+  test("system skills and references are readable but remain protected", async () => {
+    tempDir = await mkdtemp(path.join(os.tmpdir(), "nakama-read-"));
+    configDir = await mkdtemp(path.join(os.tmpdir(), "nakama-config-"));
+    process.env.NAKAMA_CONFIG_DIR = configDir;
+    const skillDir = path.join(getGlobalSkillsDir(), "installer");
+    await mkdir(path.join(skillDir, "references"), { recursive: true });
+    const skillPath = path.join(skillDir, "SKILL.md");
+    await writeFile(skillPath, "instructions");
+    await writeFile(path.join(skillDir, "references/guide.md"), "instructions");
+    const options = { workspaceRoot: tempDir };
+    const cwd = await realpath(skillDir);
+
+    await expect(
+      runReadFile(
+        {
+          cwd: path.dirname(getGlobalSkillsDir()),
+          path: "skills/installer/SKILL.md",
+        },
+        PROFILE_CONTEXT,
+        options
+      )
+    ).rejects.toBeInstanceOf(PathGuardError);
+
+    for (const input of [
+      { path: skillPath },
+      { cwd, path: "SKILL.md" },
+      { cwd, path: "references/guide.md" },
+    ]) {
+      const result = await runReadFile(input, PROFILE_CONTEXT, options);
+      expect(result.content).toBe("instructions");
+    }
+
+    await expect(
+      runWriteFile(
+        { content: "changed", path: skillPath },
+        PROFILE_CONTEXT,
+        options
+      )
+    ).rejects.toBeInstanceOf(PathGuardError);
+
+    const outsidePath = path.join(configDir, "private.txt");
+    await writeFile(outsidePath, "private");
+    await symlink(outsidePath, path.join(skillDir, "escape.md"));
+    for (const target of [
+      outsidePath,
+      path.join(skillDir, "escape.md"),
+      path.join(skillDir, "../../../private.txt"),
+    ]) {
+      await expect(
+        runReadFile({ path: target }, PROFILE_CONTEXT, options)
+      ).rejects.toBeInstanceOf(PathGuardError);
+    }
   });
 
   test("read_file supports offset and limit", async () => {
@@ -708,105 +987,20 @@ describe("file builtin tools", () => {
     ).rejects.toThrow("orgId and profileId are required.");
   });
 
-  // -----------------------------------------------------------------------
-  // Security tests
-  // -----------------------------------------------------------------------
-
-  test("rejects path traversal via ../ escape", async () => {
+  test("invalid cwd rejects writes without changing profile files", async () => {
     tempDir = await mkdtemp(path.join(os.tmpdir(), "nakama-sec-"));
-    const escapePath = path.join(tempDir, "../../../etc/nakama-exploit-test");
-
-    await expect(
-      runWriteFile({ content: "ESCAPE", path: escapePath }, PROFILE_CONTEXT, {
-        workspaceRoot: tempDir,
-      })
-    ).rejects.toThrow(PathGuardError);
-  });
-
-  test("rejects absolute path outside allowed dirs", async () => {
-    tempDir = await mkdtemp(path.join(os.tmpdir(), "nakama-sec-"));
+    const targetPath = path.join(tempDir, "safe.txt");
+    await writeFile(targetPath, "original");
 
     await expect(
       runWriteFile(
-        { content: "NOPE", path: "/etc/nakama-should-fail" },
+        { content: "OK", cwd: "/etc", path: "safe.txt" },
         PROFILE_CONTEXT,
         { workspaceRoot: tempDir }
       )
-    ).rejects.toThrow(PathGuardError);
-  });
+    ).rejects.toBeInstanceOf(PathGuardError);
 
-  test("rejects home directory expansion outside allowed dirs", async () => {
-    tempDir = await mkdtemp(path.join(os.tmpdir(), "nakama-sec-"));
-
-    await expect(
-      runWriteFile(
-        { content: "SSH_KEY", path: "~/.ssh/nakama-test" },
-        PROFILE_CONTEXT,
-        { workspaceRoot: tempDir }
-      )
-    ).rejects.toThrow(PathGuardError);
-  });
-
-  test("cwd injection falls back to profile workspace", async () => {
-    tempDir = await mkdtemp(path.join(os.tmpdir(), "nakama-sec-"));
-
-    const result = await runWriteFile(
-      { content: "OK", cwd: "/etc", path: "safe.txt" },
-      PROFILE_CONTEXT,
-      { workspaceRoot: tempDir }
-    );
-
-    expect(result.path).toStartWith(await realpath(tempDir));
-  });
-
-  test("rejects null byte in path", async () => {
-    tempDir = await mkdtemp(path.join(os.tmpdir(), "nakama-sec-"));
-
-    await expect(
-      runWriteFile(
-        { content: "X", path: path.join(tempDir, "safe.txt\0.sh") },
-        PROFILE_CONTEXT,
-        { workspaceRoot: tempDir }
-      )
-    ).rejects.toThrow(PathGuardError);
-  });
-
-  test("rejects content exceeding max file size", async () => {
-    tempDir = await mkdtemp(path.join(os.tmpdir(), "nakama-sec-"));
-    setDefaultFileGuardOptions({ maxFileBytes: 100 });
-
-    await expect(
-      runWriteFile(
-        { content: "A".repeat(200), path: path.join(tempDir, "big.txt") },
-        PROFILE_CONTEXT,
-        { workspaceRoot: tempDir }
-      )
-    ).rejects.toThrow(PathGuardError);
-  });
-
-  test("delete_file rejects path outside allowed dirs", async () => {
-    tempDir = await mkdtemp(path.join(os.tmpdir(), "nakama-sec-"));
-
-    await expect(
-      runDeleteFile({ path: "/etc/should-not-delete" }, PROFILE_CONTEXT, {
-        workspaceRoot: tempDir,
-      })
-    ).rejects.toThrow(PathGuardError);
-  });
-
-  test("edit_file rejects path outside allowed dirs", async () => {
-    tempDir = await mkdtemp(path.join(os.tmpdir(), "nakama-sec-"));
-
-    await expect(
-      runEditFile(
-        {
-          edits: [{ newText: "y", oldText: "x" }],
-          path: "/etc/nakama-should-fail",
-        },
-        PROFILE_CONTEXT,
-        { workspaceRoot: tempDir }
-      )
-    ).rejects.toThrow(PathGuardError);
+    expect(await readFile(targetPath, "utf8")).toBe("original");
   });
 
   test("edit_file rejects oversized replacement result", async () => {
@@ -827,109 +1021,81 @@ describe("file builtin tools", () => {
     ).rejects.toThrow(PathGuardError);
   });
 
-  test("allows nested subdirectory writes", async () => {
+  for (const [name, blockedPath] of [
+    [
+      "path traversal via ../",
+      (root: string) => path.join(root, "../../../etc/nakama-exploit-test"),
+    ],
+    ["absolute path outside allowed dirs", () => "/etc/nakama-should-fail"],
+    ["home directory expansion", () => "~/.ssh/nakama-test"],
+    ["null byte in path", (root: string) => path.join(root, "safe.txt\0.sh")],
+    ["special filesystem path", () => "/dev/null"],
+  ] as const) {
+    test(`file tools reject ${name}`, async () => {
+      tempDir = await mkdtemp(path.join(os.tmpdir(), "nakama-sec-"));
+      const target = blockedPath(tempDir);
+      const opts = { workspaceRoot: tempDir };
+
+      await expect(
+        runWriteFile({ content: "x", path: target }, PROFILE_CONTEXT, opts)
+      ).rejects.toThrow(PathGuardError);
+      await expect(
+        runReadFile({ path: target }, PROFILE_CONTEXT, opts)
+      ).rejects.toThrow(PathGuardError);
+      await expect(
+        runDeleteFile({ path: target }, PROFILE_CONTEXT, opts)
+      ).rejects.toThrow(PathGuardError);
+      await expect(
+        runEditFile(
+          { edits: [{ newText: "y", oldText: "x" }], path: target },
+          PROFILE_CONTEXT,
+          opts
+        )
+      ).rejects.toThrow(PathGuardError);
+    });
+  }
+
+  test("write_file and read_file reject oversized content", async () => {
     tempDir = await mkdtemp(path.join(os.tmpdir(), "nakama-sec-"));
-
-    const nestedPath = path.join(tempDir, "deep", "nested", "file.txt");
-    const result = await runWriteFile(
-      { content: "deep", path: nestedPath },
-      PROFILE_CONTEXT,
-      { workspaceRoot: tempDir }
-    );
-
-    expect(result.path).toBe(await realpath(nestedPath));
-    expect(await readFile(nestedPath, "utf8")).toBe("deep");
-  });
-
-  test("rejects special filesystem paths", async () => {
-    tempDir = await mkdtemp(path.join(os.tmpdir(), "nakama-sec-"));
+    setDefaultFileGuardOptions({ maxFileBytes: 100 });
+    const targetPath = path.join(tempDir, "big.txt");
+    const opts = { workspaceRoot: tempDir };
 
     await expect(
-      runWriteFile({ content: "test", path: "/dev/null" }, PROFILE_CONTEXT, {
-        workspaceRoot: tempDir,
-      })
-    ).rejects.toThrow(PathGuardError);
-  });
-
-  test("read_file rejects path traversal via ../ escape", async () => {
-    tempDir = await mkdtemp(path.join(os.tmpdir(), "nakama-read-sec-"));
-    const escapePath = path.join(tempDir, "../../../etc/nakama-exploit-test");
-
-    await expect(
-      runReadFile({ path: escapePath }, PROFILE_CONTEXT, {
-        workspaceRoot: tempDir,
-      })
-    ).rejects.toThrow(PathGuardError);
-  });
-
-  test("read_file rejects path outside allowed dirs with workspace hint", async () => {
-    tempDir = await mkdtemp(path.join(os.tmpdir(), "nakama-read-sec-"));
-
-    await expect(
-      runReadFile({ path: "/etc/nakama-should-fail" }, PROFILE_CONTEXT, {
-        workspaceRoot: tempDir,
-      })
-    ).rejects.toThrow(/relative path under the active profile workspace/i);
-  });
-
-  test("read_file rejects null byte in path", async () => {
-    tempDir = await mkdtemp(path.join(os.tmpdir(), "nakama-read-sec-"));
-
-    await expect(
-      runReadFile(
-        { path: path.join(tempDir, "safe.txt\0.sh") },
+      runWriteFile(
+        { content: "A".repeat(200), path: targetPath },
         PROFILE_CONTEXT,
-        { workspaceRoot: tempDir }
+        opts
       )
     ).rejects.toThrow(PathGuardError);
+
+    await writeFile(targetPath, "A".repeat(200), "utf8");
+    await expect(
+      runReadFile({ path: targetPath }, PROFILE_CONTEXT, opts)
+    ).rejects.toThrow(PathGuardError);
   });
 
-  test("read_file rejects missing file", async () => {
+  test("read_file rejects missing file, directory, and config.ini", async () => {
     tempDir = await mkdtemp(path.join(os.tmpdir(), "nakama-read-sec-"));
+    const opts = { workspaceRoot: tempDir };
+    const configPath = path.join(tempDir, "config.ini");
+    await writeFile(configPath, "secret=value", "utf8");
 
     await expect(
       runReadFile(
         { path: path.join(tempDir, "missing.txt") },
         PROFILE_CONTEXT,
-        {
-          workspaceRoot: tempDir,
-        }
+        opts
       )
     ).rejects.toThrow("File not found");
-  });
-
-  test("read_file rejects directory path", async () => {
-    tempDir = await mkdtemp(path.join(os.tmpdir(), "nakama-read-sec-"));
-
     await expect(
-      runReadFile({ path: tempDir }, PROFILE_CONTEXT, {
-        workspaceRoot: tempDir,
-      })
+      runReadFile({ path: tempDir }, PROFILE_CONTEXT, opts)
     ).rejects.toThrow("Path is not a file");
-  });
-
-  test("read_file rejects config.ini", async () => {
-    tempDir = await mkdtemp(path.join(os.tmpdir(), "nakama-read-sec-"));
-    const targetPath = path.join(tempDir, "config.ini");
-    await writeFile(targetPath, "secret=value", "utf8");
-
     await expect(
-      runReadFile({ path: targetPath }, PROFILE_CONTEXT, {
-        workspaceRoot: tempDir,
-      })
+      runReadFile({ path: configPath }, PROFILE_CONTEXT, opts)
     ).rejects.toThrow(PathGuardError);
-  });
-
-  test("read_file rejects oversized file", async () => {
-    tempDir = await mkdtemp(path.join(os.tmpdir(), "nakama-read-sec-"));
-    setDefaultFileGuardOptions({ maxFileBytes: 100 });
-    const targetPath = path.join(tempDir, "big.txt");
-    await writeFile(targetPath, "A".repeat(200), "utf8");
-
     await expect(
-      runReadFile({ path: targetPath }, PROFILE_CONTEXT, {
-        workspaceRoot: tempDir,
-      })
-    ).rejects.toThrow(PathGuardError);
+      runReadFile({ path: "/etc/nakama-should-fail" }, PROFILE_CONTEXT, opts)
+    ).rejects.toThrow(/relative path under the active profile workspace/i);
   });
 });

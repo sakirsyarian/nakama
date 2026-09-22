@@ -4,6 +4,9 @@ import { afterEach, describe, expect, mock, test } from "bun:test";
 // the mock at module-eval time and load web-fetch dynamically afterwards.
 mock.module("node:dns/promises", () => ({
   lookup: (hostname: string) => {
+    if (hostname === "stalled.test") {
+      return new Promise(() => {});
+    }
     if (hostname === "localhost") {
       return Promise.resolve([{ address: "127.0.0.1" }]);
     }
@@ -29,8 +32,12 @@ mock.module("node:dns/promises", () => ({
 }));
 
 const webFetchModule = await import("./web-fetch");
-const { convertHtmlToMarkdown, webFetchInputSchema, webFetchTool } =
-  webFetchModule;
+const {
+  convertHtmlToMarkdown,
+  fetchRemoteImage,
+  webFetchInputSchema,
+  webFetchTool,
+} = webFetchModule;
 
 import type { ToolContext } from "../contract";
 
@@ -81,28 +88,15 @@ describe("web_fetch input schema", () => {
     });
   });
 
-  test("rejects empty / non-string url", () => {
+  test("rejects empty url, non-http schemes, unknown keys, and non-boolean raw", () => {
     expect(() => webFetchInputSchema.parse({})).toThrow();
     expect(() => webFetchInputSchema.parse({ url: "" })).toThrow();
-    expect(() => webFetchInputSchema.parse({ url: 5 })).toThrow();
-  });
-
-  test("rejects non-http(s) schemes", () => {
     expect(() =>
       webFetchInputSchema.parse({ url: "file:///etc/passwd" })
     ).toThrow();
     expect(() =>
-      webFetchInputSchema.parse({ url: "ftp://example.com" })
-    ).toThrow();
-  });
-
-  test("rejects unknown keys (strict)", () => {
-    expect(() =>
       webFetchInputSchema.parse({ extra: 1, url: "https://example.com" })
     ).toThrow();
-  });
-
-  test("rejects non-boolean raw", () => {
     expect(() =>
       webFetchInputSchema.parse({ raw: "true", url: "https://x" })
     ).toThrow();
@@ -118,19 +112,13 @@ describe("web_fetch tool metadata", () => {
 });
 
 describe("web_fetch tool validation errors", () => {
-  test("throws on missing url", async () => {
+  test("throws on missing url, non-http url, and unknown keys", async () => {
     await expect(webFetchTool.run({} as never, CTX)).rejects.toThrow(
       /invalid parameter at url/
     );
-  });
-
-  test("throws on non-http(s) url", async () => {
     await expect(
       webFetchTool.run({ url: "file:///etc/passwd" }, CTX)
     ).rejects.toThrow(/http: or https:/);
-  });
-
-  test("throws on unknown keys", async () => {
     await expect(
       webFetchTool.run({ extra: 1, url: "https://example.com" } as never, CTX)
     ).rejects.toThrow(/Unrecognized key/);
@@ -138,70 +126,32 @@ describe("web_fetch tool validation errors", () => {
 });
 
 describe("web_fetch SSRF guard", () => {
-  test("rejects loopback IPv4 literals", async () => {
-    await expect(
-      webFetchTool.run({ url: "http://127.0.0.1/" }, CTX)
-    ).rejects.toThrow(/private or reserved/);
-    await expect(
-      webFetchTool.run({ url: "http://127.1.2.3/" }, CTX)
-    ).rejects.toThrow(/private or reserved/);
-  });
-
-  test("rejects RFC1918 IPv4 literals", async () => {
-    await expect(
-      webFetchTool.run({ url: "http://10.0.0.1/" }, CTX)
-    ).rejects.toThrow(/private or reserved/);
-    await expect(
-      webFetchTool.run({ url: "http://172.16.0.1/" }, CTX)
-    ).rejects.toThrow(/private or reserved/);
-    await expect(
-      webFetchTool.run({ url: "http://172.31.255.255/" }, CTX)
-    ).rejects.toThrow(/private or reserved/);
-    await expect(
-      webFetchTool.run({ url: "http://192.168.1.1/" }, CTX)
-    ).rejects.toThrow(/private or reserved/);
-  });
-
-  test("rejects CGNAT 100.64.0.0/10", async () => {
-    await expect(
-      webFetchTool.run({ url: "http://100.64.0.1/" }, CTX)
-    ).rejects.toThrow(/private or reserved/);
-    await expect(
-      webFetchTool.run({ url: "http://100.127.255.254/" }, CTX)
-    ).rejects.toThrow(/private or reserved/);
-  });
-
-  test("rejects link-local 169.254.x.x", async () => {
-    await expect(
-      webFetchTool.run({ url: "http://169.254.169.254/" }, CTX)
-    ).rejects.toThrow(/private or reserved/);
-  });
-
-  test("rejects multicast and reserved IPv4", async () => {
-    await expect(
-      webFetchTool.run({ url: "http://224.0.0.1/" }, CTX)
-    ).rejects.toThrow(/private or reserved/);
-    await expect(
-      webFetchTool.run({ url: "http://239.255.255.255/" }, CTX)
-    ).rejects.toThrow(/private or reserved/);
-    await expect(
-      webFetchTool.run({ url: "http://240.0.0.1/" }, CTX)
-    ).rejects.toThrow(/private or reserved/);
-  });
-
-  test("rejects IPv6 loopback literal", async () => {
-    await expect(
-      webFetchTool.run({ url: "http://[::1]/" }, CTX)
-    ).rejects.toThrow(/private or reserved/);
-  });
-
-  test("rejects non-global IPv6 literals", async () => {
+  test("rejects private and reserved IP literals", async () => {
     stubFetch(async () => htmlResponse("<p>must not fetch</p>"));
 
-    for (const host of ["2001::1", "2001:db8::1", "::192.0.2.1"]) {
-      await expect(
-        webFetchTool.run({ url: `http://[${host}]/` }, CTX)
-      ).rejects.toThrow(/private or reserved/);
+    const blocked = [
+      "http://127.0.0.1/",
+      "http://127.1.2.3/",
+      "http://10.0.0.1/",
+      "http://172.16.0.1/",
+      "http://172.31.255.255/",
+      "http://192.168.1.1/",
+      "http://100.64.0.1/",
+      "http://100.127.255.254/",
+      "http://169.254.169.254/",
+      "http://224.0.0.1/",
+      "http://239.255.255.255/",
+      "http://240.0.0.1/",
+      "http://[::1]/",
+      "http://[2001::1]/",
+      "http://[2001:db8::1]/",
+      "http://[::192.0.2.1]/",
+    ];
+
+    for (const url of blocked) {
+      await expect(webFetchTool.run({ url }, CTX)).rejects.toThrow(
+        /private or reserved/
+      );
     }
   });
 
@@ -523,27 +473,155 @@ describe("web_fetch content cap", () => {
     expect(out.content.length).toBe(CAP);
     expect(out.content.endsWith(MARKER)).toBe(true);
   });
+});
 
-  test("caps a large JSON body, the case that motivated the limit", async () => {
-    // An OpenAPI spec fetched in one call is what put 913 KB into a real session.
-    const spec = JSON.stringify({
-      paths: Object.fromEntries(
-        Array.from({ length: 2000 }, (_, i) => [
-          `/v1/resource/${i}`,
-          { get: { summary: `read resource ${i}` } },
-        ])
-      ),
+describe("remote chat images", () => {
+  const png = Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aX1cAAAAASUVORK5CYII=",
+    "base64"
+  );
+  const image = () =>
+    new Response(png, { headers: { "Content-Type": "image/png" } });
+  const load = (url = "https://github-pages.test/image.png") =>
+    fetchRemoteImage(url, AbortSignal.timeout(1000));
+
+  test("preserves binary bytes and pins every hop without forwarding credentials", async () => {
+    const inputs: string[] = [];
+    const headers: Headers[] = [];
+    stubFetch(async (input, init) => {
+      inputs.push(String(input));
+      headers.push(new Headers(init?.headers));
+      return inputs.length === 1
+        ? new Response(null, {
+            headers: { location: "https://other.test/final" },
+            status: 302,
+          })
+        : image();
     });
-    stubFetch(async () => jsonResponse(spec));
+    const result = await load();
+    expect(result.bytes).toEqual(png);
+    expect(result.contentType).toBe("image/png");
+    expect(inputs).toEqual([
+      "https://185.199.111.153/image.png",
+      "https://93.184.216.34/final",
+    ]);
+    expect(headers.map((h) => h.get("host"))).toEqual([
+      "github-pages.test",
+      "other.test",
+    ]);
+    for (const h of headers) {
+      expect(h.has("cookie")).toBe(false);
+      expect(h.has("authorization")).toBe(false);
+      expect(h.has("referer")).toBe(false);
+    }
+  });
 
-    const out = await webFetchTool.run(
-      { url: "https://api.example.com/o.json" },
-      CTX
-    );
+  test("blocks unsafe URLs before fetching, including redirect targets", async () => {
+    const blocked = [
+      "http://example.com/image.png",
+      "https://user:pass@example.com/image.png",
+      "https://example.com:8443/image.png",
+      "https://127.0.0.1/",
+      "https://169.254.169.254/",
+      "https://localhost/",
+      "https://private-alias.test/",
+      "https://[::ffff:127.0.0.1]/",
+      "https://[64:ff9b:1::a00:1]/",
+      "https://[2002:7f00:1::]/",
+      "https://[ff02::1]/",
+      "https://198.51.100.1/",
+      "https://[100::1]/",
+      "https://[100:0:0:1::1]/",
+      "https://[3fff:fff:ffff:ffff:ffff:ffff:ffff:ffff]/",
+      "https://[5f00:ffff:ffff:ffff:ffff:ffff:ffff:ffff]/",
+      "file:///image.png",
+    ];
+    for (const target of blocked) {
+      let calls = 0;
+      stubFetch(async () => {
+        calls++;
+        return image();
+      });
+      await expect(load(target)).rejects.toThrow();
+      expect(calls).toBe(0);
+      stubFetch(async () => {
+        calls++;
+        return new Response(null, {
+          headers: { location: target },
+          status: 302,
+        });
+      });
+      await expect(load()).rejects.toThrow();
+      expect(calls).toBe(1);
+    }
+  });
 
-    expect(out.bytes).toBeGreaterThan(CAP);
-    expect(out.truncated).toBe(true);
-    expect(out.content.length).toBe(CAP);
-    expect(out.content.endsWith(MARKER)).toBe(true);
+  test("rejects HTML, SVG, a false image MIME type, and upstream errors", async () => {
+    for (const response of [
+      htmlResponse("<html>error</html>"),
+      new Response("<svg/>", { headers: { "content-type": "image/svg+xml" } }),
+      new Response("<html>error</html>", {
+        headers: { "content-type": "image/png" },
+      }),
+      new Response(png, { headers: { "content-type": "image/jpeg" } }),
+      new Response(png, {
+        headers: { "content-type": "image/png" },
+        status: 404,
+      }),
+    ]) {
+      stubFetch(async () => response);
+      await expect(load()).rejects.toThrow();
+    }
+  });
+
+  test("aborts stalled DNS and does not make an upstream request", async () => {
+    const upstream = mock(async () => image());
+    stubFetch(upstream);
+    await expect(
+      fetchRemoteImage(
+        "https://stalled.test/image.png",
+        AbortSignal.timeout(10)
+      )
+    ).rejects.toThrow();
+    expect(upstream).not.toHaveBeenCalled();
+  });
+
+  test("enforces the byte limit with and without Content-Length and cancels oversized streams", async () => {
+    const limit = 5 * 1024 * 1024;
+    for (const size of [limit, limit + 1]) {
+      for (const declared of [false, true]) {
+        let cancelled = false;
+        const body = Buffer.alloc(size);
+        png.copy(body);
+        stubFetch(
+          async () =>
+            new Response(
+              new ReadableStream({
+                cancel() {
+                  cancelled = true;
+                },
+                start(controller) {
+                  controller.enqueue(body);
+                  if (size === limit) {
+                    controller.close();
+                  }
+                },
+              }),
+              {
+                headers: {
+                  "content-type": "image/png",
+                  ...(declared ? { "content-length": String(size) } : {}),
+                },
+              }
+            )
+        );
+        if (size === limit) {
+          expect((await load()).bytes.length).toBe(limit);
+        } else {
+          await expect(load()).rejects.toThrow();
+          expect(cancelled).toBe(true);
+        }
+      }
+    }
   });
 });

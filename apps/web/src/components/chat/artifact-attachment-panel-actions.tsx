@@ -1,17 +1,17 @@
-import {
-  ArrowDown01Icon,
-  ArrowExpand01Icon,
-  ArrowShrink02Icon,
-  CheckmarkCircle01Icon,
-} from "hugeicons-react";
-import { Button } from "@/components/ui/button";
+import { Button } from "@nakama/ui/button";
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
-import { Spinner } from "@/components/ui/spinner";
+} from "@nakama/ui/dropdown-menu";
+import {
+  ArrowDown01Icon,
+  ArrowExpand01Icon,
+  ArrowShrink02Icon,
+  CheckmarkCircle01Icon,
+  Download04Icon,
+} from "hugeicons-react";
 
 export function ArtifactAttachmentPanelActions({
   copied,
@@ -25,13 +25,6 @@ export function ArtifactAttachmentPanelActions({
   onCopy,
   onToggleFullscreen,
   additionalMenuItems,
-  canEdit = false,
-  editing = false,
-  saving = false,
-  saveDisabled = false,
-  onEdit,
-  onCancelEdit,
-  onSave,
 }: {
   copied: boolean;
   loading: boolean;
@@ -44,109 +37,61 @@ export function ArtifactAttachmentPanelActions({
   onCopy: () => void;
   onToggleFullscreen: () => void;
   additionalMenuItems?: React.ReactNode;
-  canEdit?: boolean;
-  editing?: boolean;
-  saving?: boolean;
-  saveDisabled?: boolean;
-  onEdit?: () => void;
-  onCancelEdit?: () => void;
-  onSave?: () => void;
 }) {
   return (
     <>
-      {editing ? (
-        <div className="inline-flex h-7 items-stretch overflow-hidden rounded-md border border-border bg-muted">
-          <button
-            className="px-2.5 font-medium text-foreground text-xs transition-colors hover:bg-muted/80 disabled:pointer-events-none disabled:opacity-50"
-            disabled={saving}
-            onClick={onCancelEdit}
-            type="button"
-          >
-            Cancel
-          </button>
-          <div aria-hidden className="w-px self-stretch bg-border" />
-          <button
-            className="px-2.5 font-medium text-foreground text-xs transition-colors hover:bg-muted/80 disabled:pointer-events-none disabled:opacity-50"
-            disabled={saveDisabled || saving}
-            onClick={onSave}
-            type="button"
-          >
-            {saving ? (
-              <span className="inline-flex items-center gap-1.5">
-                <Spinner className="size-3.5" />
-                Saving
-              </span>
-            ) : (
-              "Save"
-            )}
-          </button>
-        </div>
-      ) : (
-        <div className="inline-flex h-7 items-stretch overflow-hidden rounded-md border border-border bg-muted">
-          <button
-            className="px-2.5 font-medium text-foreground text-xs transition-colors hover:bg-muted/80 disabled:pointer-events-none disabled:opacity-50"
-            disabled={copyDisabled || (loading && !content)}
-            onClick={onCopy}
-            type="button"
-          >
-            {copied ? (
-              <span className="inline-flex items-center gap-1.5">
-                <CheckmarkCircle01Icon
-                  aria-hidden
-                  className="size-3.5 text-emerald-600 dark:text-emerald-400"
-                />
-                Copied
-              </span>
-            ) : (
-              "Copy"
-            )}
-          </button>
-          {canEdit ? (
-            <>
-              <div aria-hidden className="w-px self-stretch bg-border" />
+      <div className="inline-flex h-7 items-stretch overflow-hidden rounded-md border border-border bg-muted">
+        <button
+          className="px-2.5 font-medium text-foreground text-xs transition-colors hover:bg-muted/80 disabled:pointer-events-none disabled:opacity-50"
+          disabled={copyDisabled || (loading && !content)}
+          onClick={onCopy}
+          type="button"
+        >
+          {copied ? (
+            <span className="inline-flex items-center gap-1.5">
+              <CheckmarkCircle01Icon
+                aria-hidden
+                className="size-3.5 text-emerald-600 dark:text-emerald-400"
+              />
+              Copied
+            </span>
+          ) : (
+            "Copy"
+          )}
+        </button>
+        <div aria-hidden className="w-px self-stretch bg-border" />
+        <DropdownMenu>
+          <DropdownMenuTrigger
+            render={
               <button
-                className="px-2.5 font-medium text-foreground text-xs transition-colors hover:bg-muted/80 disabled:pointer-events-none disabled:opacity-50"
-                disabled={loading && !content}
-                onClick={onEdit}
+                aria-label="More artifact actions"
+                className="inline-flex items-center justify-center px-1.5 text-foreground transition-colors hover:bg-muted/80"
                 type="button"
-              >
-                Edit
-              </button>
-            </>
-          ) : null}
-          <div aria-hidden className="w-px self-stretch bg-border" />
-          <DropdownMenu>
-            <DropdownMenuTrigger
-              render={
-                <button
-                  aria-label="More artifact actions"
-                  className="inline-flex items-center justify-center px-1.5 text-foreground transition-colors hover:bg-muted/80"
-                  type="button"
-                />
-              }
+              />
+            }
+          >
+            <ArrowDown01Icon aria-hidden className="size-3.5" />
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" className="min-w-44">
+            <DropdownMenuItem
+              className="cursor-pointer"
+              onClick={() => {
+                const link = document.createElement("a");
+                link.href = downloadUrl;
+                link.download = filename;
+                link.rel = "noopener";
+                document.body.append(link);
+                link.click();
+                link.remove();
+              }}
             >
-              <ArrowDown01Icon aria-hidden className="size-3.5" />
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="end" className="min-w-44">
-              <DropdownMenuItem
-                className="cursor-pointer"
-                onClick={() => {
-                  const link = document.createElement("a");
-                  link.href = downloadUrl;
-                  link.download = filename;
-                  link.rel = "noopener";
-                  document.body.append(link);
-                  link.click();
-                  link.remove();
-                }}
-              >
-                {downloadLabel}
-              </DropdownMenuItem>
-              {additionalMenuItems}
-            </DropdownMenuContent>
-          </DropdownMenu>
-        </div>
-      )}
+              <Download04Icon aria-hidden className="size-4" />
+              {downloadLabel}
+            </DropdownMenuItem>
+            {additionalMenuItems}
+          </DropdownMenuContent>
+        </DropdownMenu>
+      </div>
 
       <Button
         aria-label={fullscreen ? "Exit fullscreen" : "Enter fullscreen"}

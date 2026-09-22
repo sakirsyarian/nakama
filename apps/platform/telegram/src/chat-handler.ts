@@ -121,23 +121,21 @@ export function createChatHandler(deps: ChatHandlerDeps) {
       : null;
 
     if (groupDecision && !groupDecision.shouldHandle) {
-      const parts = [
-        "Ignored Telegram group message",
-        `reason=${groupDecision.reason}`,
-        `bot=@${botInfo?.username ?? "unknown"}`,
-        `messageId=${ctx.message?.message_id ?? "unknown"}`,
-        `textBytes=${Buffer.byteLength(text ?? "", "utf8")}`,
-      ];
-      if (process.env.NAKAMA_CH_DEBUG === "1") {
-        parts.splice(
-          3,
-          0,
+      if (process.env.NAKAMA_CH_DEBUG !== "1") {
+        return;
+      }
+      console.log(
+        [
+          "Ignored Telegram group message",
+          `reason=${groupDecision.reason}`,
+          `bot=@${botInfo?.username ?? "unknown"}`,
           `botId=${botInfo?.id ?? "unknown"}`,
           `chatId=${chatId}`,
-          `userId=${userId}`
-        );
-      }
-      console.log(parts.join(" "));
+          `userId=${userId}`,
+          `messageId=${ctx.message?.message_id ?? "unknown"}`,
+          `textBytes=${Buffer.byteLength(text ?? "", "utf8")}`,
+        ].join(" ")
+      );
       return;
     }
 
@@ -514,7 +512,7 @@ export function createChatHandler(deps: ChatHandlerDeps) {
       await telegram.send(formatClientError(error));
       return;
     } finally {
-      clearActiveStream(conversationKey);
+      clearActiveStream(conversationKey, signal);
       typingLoop.stop();
     }
 
@@ -540,6 +538,13 @@ export function createChatHandler(deps: ChatHandlerDeps) {
     channelOrgKey: string,
     messageText: string | undefined
   ): Promise<boolean> {
+    // A bot owned by an org answers only for that org, so neither the picker
+    // nor a stored per-user selection may move the chat to another tenant.
+    if (config.orgId) {
+      client.setOrgId(config.orgId);
+      return true;
+    }
+
     const orgContext = await prepareChannelOrgContext({
       getSelectedOrgId: () => getOrgSelection(orgStore, channelOrgKey)?.orgId,
       listOrgs: () => client.listUserOrgs(),
@@ -576,6 +581,11 @@ export function createChatHandler(deps: ChatHandlerDeps) {
     conversationKey: string,
     telegram: TelegramRichMessenger
   ): Promise<void> {
+    if (config.orgId) {
+      await telegram.send("This bot serves a single organization.");
+      return;
+    }
+
     const { orgs } = await client.listUserOrgs();
 
     if (orgs.length === 0) {
@@ -621,6 +631,12 @@ export function createChatHandler(deps: ChatHandlerDeps) {
     isTopic: boolean,
     telegram: TelegramRichMessenger
   ): Promise<void> {
+    if (config.owner) {
+      await telegram.send(
+        `This connection belongs to agent ${config.owner.profileId}.`
+      );
+      return;
+    }
     const { orgs } = await client.listUserOrgs();
     const currentOrgId = getOrgSelection(orgStore, channelOrgKey)?.orgId;
     const currentOrg = currentOrgId
@@ -778,6 +794,27 @@ export function createChatHandler(deps: ChatHandlerDeps) {
   }
 
   async function resolveSession(chatId: string): Promise<RemoteChatSession> {
+    if (config.owner) {
+      await resolveSessionProfileId(chatId);
+      const stored = sessionStore.get(chatId);
+      if (stored) {
+        const { sessions } = await client.listSessions(
+          config.owner.profileId,
+          "telegram"
+        );
+        if (
+          stored.profileId !== config.owner.profileId ||
+          !sessions.some(
+            (session) =>
+              session.id === stored.sessionId &&
+              session.profileId === config.owner!.profileId
+          )
+        ) {
+          sessionStore.delete(chatId);
+          await sessionStore.save();
+        }
+      }
+    }
     const existing = sessionStore.get(chatId);
 
     if (existing) {
@@ -804,8 +841,9 @@ export function createChatHandler(deps: ChatHandlerDeps) {
     chatId: string,
     profileId?: string
   ): Promise<RemoteChatSession> {
-    const resolvedProfileId =
-      profileId ?? (await resolveSessionProfileId(chatId));
+    const resolvedProfileId = config.owner
+      ? await resolveSessionProfileId(chatId)
+      : (profileId ?? (await resolveSessionProfileId(chatId)));
     const session = await client.createSession("telegram", {
       profileId: resolvedProfileId,
     });
@@ -822,6 +860,13 @@ export function createChatHandler(deps: ChatHandlerDeps) {
   }
 
   async function resolveSessionProfileId(chatId: string): Promise<string> {
+    if (config.owner) {
+      const { profiles } = await client.listProfiles(config.owner.orgId);
+      if (!profiles.some((profile) => profile.id === config.owner!.profileId)) {
+        throw new Error("The connection owner is unavailable.");
+      }
+      return config.owner.profileId;
+    }
     const profiles = await listSelectableProfiles();
     const storedProfileId = sessionStore.get(chatId)?.profileId;
 

@@ -1,4 +1,10 @@
+import uFuzzy from "@leeoniya/ufuzzy";
 import type { SkillSummary } from "@nakama/core/contract";
+
+const commandSearch = new uFuzzy({
+  compare: () => 0,
+  intraIns: Number.POSITIVE_INFINITY,
+});
 
 export interface SkillSlashRange {
   end: number;
@@ -12,7 +18,10 @@ export interface SkillTokenRange {
   start: number;
 }
 
+export type ComposerAddCommandAction = "add-mcp" | "add-tool" | "add-plugin";
+
 export interface ReservedSlashCommand {
+  action?: ComposerAddCommandAction;
   description: string;
   name: string;
 }
@@ -33,8 +42,31 @@ const HIDDEN_SLASH_SKILL_NAMES = new Set<string>([
 /** Composer slash tokens that are not skill names (must not become `/skill …`). */
 export const RESERVED_COMPOSER_SLASH_COMMANDS: ReservedSlashCommand[] = [
   {
+    description: "Enable automatic learning after complex turns",
+    name: "enable-learning-loop",
+  },
+  {
     description: "Distill a reusable skill from sources",
     name: "learn",
+  },
+];
+
+/** Opens a dialog instead of inserting text. Shown when the user can assign tools. */
+export const COMPOSER_ADD_SLASH_COMMANDS: ReservedSlashCommand[] = [
+  {
+    action: "add-plugin",
+    description: "Enable a plugin for this agent",
+    name: "add-plugin",
+  },
+  {
+    action: "add-tool",
+    description: "Assign a tool to this agent",
+    name: "add-tool",
+  },
+  {
+    action: "add-mcp",
+    description: "Assign or add an MCP server",
+    name: "add-mcp",
   },
 ];
 
@@ -68,22 +100,45 @@ export function findActiveSkillSlashRange(
 }
 
 export function filterReservedSlashCommands(
-  query: string
+  query: string,
+  commands: ReservedSlashCommand[] = RESERVED_COMPOSER_SLASH_COMMANDS
 ): ReservedSlashCommand[] {
   const normalized = query.trim().toLowerCase();
 
   if (!normalized) {
-    return [...RESERVED_COMPOSER_SLASH_COMMANDS];
+    return [...commands];
   }
 
-  // Name-prefix only — description matching made "/re" steal focus via "reusable".
-  return RESERVED_COMPOSER_SLASH_COMMANDS.filter((command) =>
-    command.name.toLowerCase().startsWith(normalized)
+  // Search names only: description matches can steal focus from commands.
+  const needle = normalized.replace(/[-_]/g, "");
+  if (!needle) {
+    return [];
+  }
+  const [indices, info, order] = commandSearch.search(
+    commands.map((command) => command.name.toLowerCase().replace(/[-_]/g, "")),
+    needle
   );
+  const matches =
+    info && order ? order.map((index) => info.idx[index]) : indices;
+  return (matches ?? []).map((index) => commands[index]);
+}
+
+export function matchComposerAddCommand(
+  text: string
+): ComposerAddCommandAction | null {
+  const token = text.trim();
+  const command = COMPOSER_ADD_SLASH_COMMANDS.find(
+    (item) => `/${item.name}` === token
+  );
+  return command?.action ?? null;
 }
 
 export function profileCanUseLearnCommand(skills: SkillSummary[]): boolean {
   return skills.some((skill) => skill.name === "manage-skills");
+}
+
+export function matchComposerLearningLoopCommand(text: string): boolean {
+  return text.trim() === "/enable-learning-loop";
 }
 
 export function filterSkillsForSlashQuery(
@@ -108,9 +163,18 @@ export function filterSkillsForSlashQuery(
 
 export function filterComposerSlashSuggestions(
   skills: SkillSummary[],
-  query: string
+  query: string,
+  options: { enableAddCommands?: boolean } = {}
 ): ComposerSlashSuggestion[] {
-  const commands = profileCanUseLearnCommand(skills)
+  const addCommands = options.enableAddCommands
+    ? filterReservedSlashCommands(query, COMPOSER_ADD_SLASH_COMMANDS).map(
+        (command) => ({
+          command,
+          kind: "command" as const,
+        })
+      )
+    : [];
+  const learnCommands = profileCanUseLearnCommand(skills)
     ? filterReservedSlashCommands(query).map((command) => ({
         command,
         kind: "command" as const,
@@ -123,7 +187,7 @@ export function filterComposerSlashSuggestions(
     })
   );
 
-  return [...commands, ...skillSuggestions];
+  return [...addCommands, ...learnCommands, ...skillSuggestions];
 }
 
 export function replaceSlashRangeWithSkillInvocation(

@@ -24,6 +24,8 @@ CREATE TABLE IF NOT EXISTS tools (
   description TEXT NOT NULL,
   handler_type TEXT NOT NULL,
   handler_config TEXT DEFAULT '{}' NOT NULL,
+  plugin_id TEXT,
+  plugin_key TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -46,6 +48,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   title TEXT,
+  pinned INTEGER NOT NULL DEFAULT 0,
   model TEXT,
   agent_todos TEXT DEFAULT '[]' NOT NULL,
   agent_questionnaire TEXT,
@@ -77,6 +80,7 @@ CREATE TABLE IF NOT EXISTS attachments (
   size_bytes INTEGER NOT NULL,
   storage_path TEXT NOT NULL,
   created_at TEXT NOT NULL,
+  ephemeral INTEGER DEFAULT 0 NOT NULL,
   FOREIGN KEY (org_id) REFERENCES organizations (id) ON DELETE CASCADE,
   FOREIGN KEY (profile_id) REFERENCES profiles (id) ON DELETE CASCADE,
   FOREIGN KEY (session_id) REFERENCES sessions (id) ON DELETE SET NULL
@@ -219,6 +223,8 @@ CREATE TABLE IF NOT EXISTS skills (
   disable_model_invocation INTEGER DEFAULT 0 NOT NULL,
   enabled INTEGER DEFAULT 1 NOT NULL,
   created_by TEXT NOT NULL DEFAULT 'bundled',
+  plugin_id TEXT,
+  plugin_key TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -262,6 +268,7 @@ CREATE TABLE IF NOT EXISTS users (
   is_platform_admin INTEGER DEFAULT 0 NOT NULL,
   -- Legacy: pre-org USER.md; migrateLegacyUserContextToOrgMembers copies into org_members (#550).
   user_context TEXT,
+  disabled_at TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -321,6 +328,7 @@ CREATE TABLE IF NOT EXISTS org_memory_proposals (
   session_id TEXT,
   proposed_by_user_id TEXT,
   bullet TEXT NOT NULL,
+  source_document_ids TEXT,
   status TEXT NOT NULL,
   pinned INTEGER NOT NULL DEFAULT 0,
   reviewer_user_id TEXT,
@@ -332,6 +340,7 @@ CREATE TABLE IF NOT EXISTS org_memory_proposals (
 CREATE INDEX IF NOT EXISTS org_memory_proposals_org_status ON org_memory_proposals (org_id, status);
 
 CREATE TABLE IF NOT EXISTS skill_proposals (
+  supporting_files TEXT,
   id TEXT PRIMARY KEY NOT NULL,
   org_id TEXT NOT NULL,
   profile_id TEXT NOT NULL,
@@ -423,6 +432,19 @@ CREATE TABLE IF NOT EXISTS browser_sessions (
 CREATE UNIQUE INDEX IF NOT EXISTS browser_sessions_token_hash_unique
   ON browser_sessions (session_token_hash);
 
+CREATE TABLE IF NOT EXISTS password_reset_tokens (
+  id TEXT PRIMARY KEY NOT NULL,
+  user_id TEXT NOT NULL,
+  token_hash TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  consumed_at TEXT,
+  created_at TEXT NOT NULL,
+  FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS password_reset_tokens_token_hash_unique
+  ON password_reset_tokens (token_hash);
+
 CREATE TABLE IF NOT EXISTS workspace_settings (
   id TEXT PRIMARY KEY NOT NULL,
   vision_model TEXT,
@@ -512,6 +534,38 @@ CREATE UNIQUE INDEX IF NOT EXISTS artifact_shares_active_path_unique
   ON artifact_shares (org_id, profile_id, source_path)
   WHERE revoked_at IS NULL;
 
+-- Security audit ledger. Deliberately has no foreign keys so account or org
+-- erasure cannot remove the historical record.
+CREATE TABLE IF NOT EXISTS audit_events (
+  id TEXT PRIMARY KEY NOT NULL,
+  actor_user_id TEXT,
+  org_id TEXT,
+  action TEXT NOT NULL,
+  resource_type TEXT NOT NULL,
+  resource_id TEXT,
+  metadata TEXT NOT NULL DEFAULT '{}',
+  request_id TEXT,
+  created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS audit_events_created
+  ON audit_events (created_at DESC, id DESC);
+
+CREATE INDEX IF NOT EXISTS audit_events_org_created
+  ON audit_events (org_id, created_at DESC, id DESC);
+
+CREATE TRIGGER IF NOT EXISTS audit_events_no_update
+BEFORE UPDATE ON audit_events
+BEGIN
+  SELECT RAISE(ABORT, 'audit_events are append-only');
+END;
+
+CREATE TRIGGER IF NOT EXISTS audit_events_no_delete
+BEFORE DELETE ON audit_events
+BEGIN
+  SELECT RAISE(ABORT, 'audit_events are append-only');
+END;
+
 -- Append-only profile change ledger (no UPDATE/DELETE API; cascade only with org/profile cleanup).
 CREATE TABLE IF NOT EXISTS profile_change_events (
   id TEXT PRIMARY KEY NOT NULL,
@@ -529,3 +583,35 @@ CREATE TABLE IF NOT EXISTS profile_change_events (
 
 CREATE INDEX IF NOT EXISTS profile_change_events_profile_created
   ON profile_change_events (profile_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS plugin_releases (
+  plugin_id TEXT NOT NULL,
+  version TEXT NOT NULL,
+  manifest TEXT NOT NULL,
+  digest TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (plugin_id, version)
+);
+
+CREATE TABLE IF NOT EXISTS org_plugins (
+  org_id TEXT NOT NULL,
+  plugin_id TEXT NOT NULL,
+  selected_version TEXT,
+  database_generation TEXT,
+  lifecycle_state TEXT NOT NULL,
+  revision INTEGER NOT NULL,
+  pending_operation TEXT,
+  last_lifecycle_error TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (org_id, plugin_id),
+  FOREIGN KEY (org_id) REFERENCES organizations (id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS file_pins (
+  org_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  profile_id TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+  path TEXT NOT NULL,
+  PRIMARY KEY (org_id, user_id, profile_id, path)
+);

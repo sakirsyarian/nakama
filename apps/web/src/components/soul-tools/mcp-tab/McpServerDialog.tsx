@@ -2,12 +2,7 @@ import type {
   CreateMcpServerRequest,
   McpServerSummary,
 } from "@nakama/core/contract";
-import { type ComponentProps, useState } from "react";
-import { McpServerAssignList } from "@/components/McpServerAssignList";
-import { McpImportConfigDialog } from "@/components/soul-tools/mcp-tab/mcp-import-config-dialog";
-import { McpServerDialogForm } from "@/components/soul-tools/mcp-tab/mcp-server-dialog-form";
-import { useMcpServerDialogState } from "@/components/soul-tools/mcp-tab/use-mcp-server-dialog-state";
-import { Button } from "@/components/ui/button";
+import { Button } from "@nakama/ui/button";
 import {
   Dialog,
   DialogContent,
@@ -15,9 +10,14 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
-} from "@/components/ui/dialog";
-import { Spinner } from "@/components/ui/spinner";
-import { cn } from "@/lib/utils";
+} from "@nakama/ui/dialog";
+import { Spinner } from "@nakama/ui/spinner";
+import { cn } from "@nakama/ui/utils";
+import { type ComponentProps, useState } from "react";
+import { McpServerAssignList } from "@/components/McpServerAssignList";
+import { McpImportConfigDialog } from "@/components/soul-tools/mcp-tab/mcp-import-config-dialog";
+import { McpServerDialogForm } from "@/components/soul-tools/mcp-tab/mcp-server-dialog-form";
+import { useMcpServerDialogState } from "@/components/soul-tools/mcp-tab/use-mcp-server-dialog-state";
 
 type AddMcpMode = "existing" | "new";
 type McpServerDialogState = ReturnType<typeof useMcpServerDialogState>;
@@ -100,6 +100,7 @@ function McpServerDialogPanels({
   busy,
   availableServers,
   onAssign,
+  onTestConnection,
   onOpenChange,
   state,
 }: {
@@ -107,6 +108,7 @@ function McpServerDialogPanels({
   busy: boolean;
   availableServers: McpServerSummary[];
   onAssign: (serverId: string) => void;
+  onTestConnection?: (server: McpServerSummary) => void;
   onOpenChange: (open: boolean) => void;
   state: McpServerDialogState;
 }) {
@@ -125,6 +127,7 @@ function McpServerDialogPanels({
         <McpServerAssignList
           disabled={busy}
           onAssign={onAssign}
+          onTestConnection={onTestConnection}
           servers={availableServers}
         />
       </div>
@@ -176,6 +179,7 @@ function McpServerDialogCreateForm({
         headers={state.headers}
         idPrefix={state.idPrefix}
         isEdit={state.isEdit}
+        kind={state.kind}
         loadingForm={state.loadingForm}
         name={state.name}
         nameAutoFocus={nameAutoFocus}
@@ -186,7 +190,7 @@ function McpServerDialogCreateForm({
         onCommandChange={(value) => {
           state.setCommand(value);
           if (value.trim()) {
-            state.setTransport("stdio");
+            state.selectKind("stdio");
           }
           state.clearTestResult();
         }}
@@ -198,27 +202,20 @@ function McpServerDialogCreateForm({
           state.setHeaders(nextHeaders);
           state.clearTestResult();
         }}
+        onKindChange={state.selectKind}
         onNameChange={(value) => {
           state.setName(value);
           state.clearTestResult();
         }}
         onOpenImport={state.openImportDialog}
         onTestConnection={() => void state.handleTestConnection()}
-        onTransportChange={(nextTransport) => {
-          state.setTransport(nextTransport);
-          state.clearTestResult();
-        }}
         onUrlChange={(value) => {
           state.setUrl(value);
-          if (value.trim()) {
-            state.setTransport("http");
-          }
           state.clearTestResult();
         }}
         submitError={state.submitError}
         testing={state.testing}
         testResult={state.testResult}
-        transport={state.transport}
         url={state.url}
       />
 
@@ -232,10 +229,110 @@ function McpServerDialogCreateForm({
           Cancel
         </Button>
         <Button disabled={state.formDisabled || !state.canSubmit} type="submit">
-          {busy ? <Spinner className="size-4" /> : submitLabel}
+          {busy ? (
+            <Spinner className="size-4" />
+          ) : (state.kind === "signin" ||
+              state.testResult?.requiresAuthorization) &&
+            !state.isEdit ? (
+            "Add and sign in"
+          ) : (
+            submitLabel
+          )}
         </Button>
       </DialogFooter>
     </form>
+  );
+}
+
+function McpServerDialogHeader({
+  canAssignExisting,
+  error,
+  formDisabled,
+  idPrefix,
+  isEdit,
+  mode,
+  onAssign,
+  onModeChange,
+  transport,
+}: {
+  canAssignExisting: boolean;
+  error: string | null;
+  formDisabled: boolean;
+  idPrefix: string;
+  isEdit: boolean;
+  mode: AddMcpMode;
+  onAssign?: (serverId: string) => void;
+  onModeChange: (mode: AddMcpMode) => void;
+  transport: string;
+}) {
+  return (
+    <DialogHeader className="gap-2">
+      <DialogTitle>{isEdit ? "Edit MCP server" : "Add MCP server"}</DialogTitle>
+      <DialogDescription>
+        {mcpServerDialogDescription({
+          canAssignExisting,
+          isEdit,
+          onAssign,
+          transport,
+        })}
+      </DialogDescription>
+      {canAssignExisting ? (
+        <McpServerModeTabs
+          formDisabled={formDisabled}
+          idPrefix={idPrefix}
+          mode={mode}
+          onModeChange={onModeChange}
+        />
+      ) : null}
+      {error ? (
+        <p className="text-destructive text-sm" role="alert">
+          {error}
+        </p>
+      ) : null}
+    </DialogHeader>
+  );
+}
+
+function McpServerDialogBody({
+  assignMode,
+  availableServers,
+  busy,
+  canAssignExisting,
+  onAssign,
+  onTestConnection,
+  onOpenChange,
+  state,
+}: {
+  assignMode: boolean;
+  availableServers: McpServerSummary[];
+  busy: boolean;
+  canAssignExisting: boolean;
+  onAssign?: (serverId: string) => void;
+  onTestConnection?: (server: McpServerSummary) => void;
+  onOpenChange: (open: boolean) => void;
+  state: McpServerDialogState;
+}) {
+  if (canAssignExisting && onAssign) {
+    return (
+      <McpServerDialogPanels
+        assignMode={assignMode}
+        availableServers={availableServers}
+        busy={busy}
+        onAssign={onAssign}
+        onOpenChange={onOpenChange}
+        onTestConnection={onTestConnection}
+        state={state}
+      />
+    );
+  }
+
+  return (
+    <McpServerDialogCreateForm
+      busy={busy}
+      onOpenChange={onOpenChange}
+      state={state}
+      submitLabel={state.isEdit ? "Save changes" : "Add server"}
+    />
   );
 }
 
@@ -244,17 +341,21 @@ export function McpServerDialog({
   busy,
   server,
   availableServers,
+  error = null,
   onOpenChange,
   onSubmit,
   onAssign,
+  onTestConnection,
 }: {
   open: boolean;
   busy: boolean;
   server?: McpServerSummary | null;
   availableServers?: McpServerSummary[];
+  error?: string | null;
   onOpenChange: (open: boolean) => void;
   onSubmit: (request: CreateMcpServerRequest) => Promise<void>;
   onAssign?: (serverId: string) => void;
+  onTestConnection?: (server: McpServerSummary) => void;
 }) {
   const state = useMcpServerDialogState({ busy, onSubmit, open, server });
   const canAssignExisting =
@@ -271,51 +372,31 @@ export function McpServerDialog({
     }
   }
 
-  const assignMode = canAssignExisting && mode === "existing";
-
   return (
     <>
       <Dialog onOpenChange={onOpenChange} open={open}>
         <DialogContent className="gap-6 p-6 sm:max-w-lg">
-          <DialogHeader className="gap-2">
-            <DialogTitle>
-              {state.isEdit ? "Edit MCP server" : "Add MCP server"}
-            </DialogTitle>
-            <DialogDescription>
-              {mcpServerDialogDescription({
-                canAssignExisting,
-                isEdit: state.isEdit,
-                onAssign,
-                transport: state.transport,
-              })}
-            </DialogDescription>
-            {canAssignExisting ? (
-              <McpServerModeTabs
-                formDisabled={state.formDisabled}
-                idPrefix={state.idPrefix}
-                mode={mode}
-                onModeChange={setMode}
-              />
-            ) : null}
-          </DialogHeader>
-
-          {canAssignExisting && onAssign ? (
-            <McpServerDialogPanels
-              assignMode={assignMode}
-              availableServers={availableServers ?? []}
-              busy={busy}
-              onAssign={onAssign}
-              onOpenChange={onOpenChange}
-              state={state}
-            />
-          ) : (
-            <McpServerDialogCreateForm
-              busy={busy}
-              onOpenChange={onOpenChange}
-              state={state}
-              submitLabel={state.isEdit ? "Save changes" : "Add server"}
-            />
-          )}
+          <McpServerDialogHeader
+            canAssignExisting={canAssignExisting}
+            error={error}
+            formDisabled={state.formDisabled}
+            idPrefix={state.idPrefix}
+            isEdit={state.isEdit}
+            mode={mode}
+            onAssign={onAssign}
+            onModeChange={setMode}
+            transport={state.transport}
+          />
+          <McpServerDialogBody
+            assignMode={canAssignExisting && mode === "existing"}
+            availableServers={availableServers ?? []}
+            busy={busy}
+            canAssignExisting={canAssignExisting}
+            onAssign={onAssign}
+            onOpenChange={onOpenChange}
+            onTestConnection={onTestConnection}
+            state={state}
+          />
         </DialogContent>
       </Dialog>
 

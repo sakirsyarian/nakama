@@ -1,4 +1,6 @@
 import type { OrgMemberSummary, OrgRole } from "@nakama/core/contract";
+import { Card, CardContent } from "@nakama/ui/card";
+import { toast } from "@nakama/ui/toast";
 import { useReducer } from "react";
 import {
   type OrgMemberAddCredentials,
@@ -11,7 +13,6 @@ import {
   OrgMembersSecretBanner,
 } from "@/components/settings/org-members-card-header";
 import { OrgMembersTable } from "@/components/settings/org-members-table";
-import { Card, CardContent } from "@/components/ui/card";
 import { useAuth } from "@/context/use-auth";
 import {
   useAddOrgMember,
@@ -196,11 +197,16 @@ export function OrgMembersCard() {
         onError: (err) =>
           dispatch({ type: "patch", values: { formError: formatError(err) } }),
         onSuccess: (result) => {
+          if (result.delivered) {
+            toast(`Invitation sent to ${email}.`);
+          }
           dispatch({
             type: "patch",
             values: {
               inviteOpen: false,
-              secretHint: "Share this invite token with the recipient.",
+              secretHint: result.token
+                ? "Email delivery failed. Share this invite token manually."
+                : null,
               secretValue: result.token,
             },
           });

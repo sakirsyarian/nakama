@@ -3,6 +3,8 @@ import type {
   ProviderModelOption,
   UpdateProviderRequest,
 } from "@nakama/core/contract";
+import { Button } from "@nakama/ui/button";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@nakama/ui/tooltip";
 import {
   Delete02Icon,
   Edit03Icon,
@@ -23,12 +25,6 @@ import {
 } from "@/components/settings/provider-instance-dialogs";
 import { useProviderInstanceCard } from "@/components/settings/use-provider-instance-card";
 import { isShortlistBrowseProvider } from "@/components/shortlist-browse-providers.shared";
-import { Button } from "@/components/ui/button";
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipTrigger,
-} from "@/components/ui/tooltip";
 
 function ProviderActionButton({
   label,
@@ -139,13 +135,17 @@ function ProviderInstanceTableRow({
           ) : null}
           <ProviderActionButton
             label={
-              card.isChatgpt
+              card.isXaiOAuth
                 ? instance.hasApiKey
-                  ? "Reconnect ChatGPT"
-                  : "Connect ChatGPT"
-                : instance.hasApiKey
-                  ? "Update key"
-                  : "Add key"
+                  ? "Reconnect Grok"
+                  : "Connect Grok"
+                : card.isChatgpt
+                  ? instance.hasApiKey
+                    ? "Reconnect ChatGPT"
+                    : "Connect ChatGPT"
+                  : instance.hasApiKey
+                    ? "Update key"
+                    : "Add key"
             }
             onClick={() => card.setReplaceKeyOpen(true)}
           >
@@ -263,9 +263,11 @@ function ProviderInstanceCardDialogs({
         onOpenChange={card.setReplaceKeyOpen}
         onSave={() => void card.handleReplaceKey()}
         onToggleShowApiKey={() => card.setShowApiKey((current) => !current)}
+        onXaiOAuthChange={card.setXaiOAuth}
         open={card.replaceKeyOpen}
         providerType={card.providerType}
         showApiKey={card.showApiKey}
+        xaiOAuth={card.xaiOAuth}
       />
 
       {card.isCompatibleLike ? (

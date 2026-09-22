@@ -10,6 +10,8 @@ const FORCE_REFRESH_BUNDLED_SKILL_NAMES = new Set<string>([
   "coding-agent",
   "coding-backend-cursor",
   "agent-browser",
+  "save-artifact",
+  "archive-profile-memory",
 ]);
 
 const RENAMED_BUNDLED_SKILL_DIRS = [

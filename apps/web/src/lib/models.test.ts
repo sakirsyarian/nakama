@@ -1,17 +1,74 @@
 import { describe, expect, test } from "bun:test";
 import { USER_PROVIDER_NAMES } from "@nakama/core/provider-resolution";
 import {
+  appendOpenRouterModelRow,
+  buildCreateProviderRequest,
   encodeModelSelection,
   filterVisionCapableProviderGroups,
   firstAvailableProviderOption,
   hasOpenCodeZenProvider,
   isOpenCodeZenBaseUrl,
   isProviderTypeAlreadyConfigured,
+  knownModelSelection,
   PROVIDER_OPTIONS,
   profileModelSelectionValue,
   resolveModelThinkingSupport,
   resolveModelVisionSupport,
+  validateCustomModelsInput,
 } from "./models";
+
+describe("buildCreateProviderRequest", () => {
+  test.each([
+    ["openai_compatible", true, true],
+    ["openrouter", true, false],
+    ["xai_oauth", true, false],
+    ["cerebras", true, false],
+    ["fireworks", true, false],
+    ["ollama", true, false],
+    ["opencode_go", true, false],
+    ["openai", false, false],
+  ] as const)(
+    "preserves custom-model handling for %s",
+    (provider, populated, empty) => {
+      for (const customModels of [undefined, [], [{ id: "custom-model" }]]) {
+        const request = buildCreateProviderRequest({
+          apiKey: "key",
+          customModels,
+          provider,
+        });
+        const include =
+          customModels && (customModels.length ? populated : empty);
+        expect(request).toEqual({
+          apiKey: "key",
+          type: provider,
+          ...(include ? { customModels } : {}),
+        });
+      }
+    }
+  );
+
+  test("keeps normalized connection fields and model selection", () => {
+    expect(
+      buildCreateProviderRequest({
+        apiKey: "key",
+        baseUrl: " http://localhost:11434 ",
+        displayName: " Local ",
+        hostMode: "local",
+        model: "model-1",
+        provider: "ollama",
+        wireApi: "responses",
+      })
+    ).toEqual({
+      apiKey: "key",
+      baseUrl: "http://localhost:11434",
+      hostMode: "local",
+      label: "Local",
+      model: "model-1",
+      type: "ollama",
+      wireApi: "responses",
+    });
+  });
+});
 
 function group(
   providerId: string,
@@ -21,6 +78,14 @@ function group(
     | "opencode_go"
     | "openrouter"
     | "deepseek"
+    | "doubao"
+    | "xiaomi"
+    | "together"
+    | "vercel_ai_gateway"
+    | "mistral"
+    | "qwen"
+    | "qwen_cn"
+    | "perplexity"
     | "cerebras"
     | "fireworks",
   flags?: {
@@ -54,6 +119,22 @@ function group(
 }
 
 describe("resolveModelThinkingSupport", () => {
+  test("treats xiaomi models as opt-in only for thinking", () => {
+    expect(
+      resolveModelThinkingSupport(
+        encodeModelSelection("xm-1", "model-1"),
+        group("xm-1", "xiaomi")
+      )
+    ).toBe(false);
+
+    expect(
+      resolveModelThinkingSupport(
+        encodeModelSelection("xm-1", "model-1"),
+        group("xm-1", "xiaomi", { supportsThinking: true })
+      )
+    ).toBe(true);
+  });
+
   test("treats openai-compatible models as opt-in only", () => {
     expect(
       resolveModelThinkingSupport(
@@ -118,6 +199,109 @@ describe("resolveModelThinkingSupport", () => {
     ).toBe(true);
   });
 
+  test("treats together models as opt-in only for thinking", () => {
+    expect(
+      resolveModelThinkingSupport(
+        encodeModelSelection("tg-1", "model-1"),
+        group("tg-1", "together")
+      )
+    ).toBe(false);
+
+    expect(
+      resolveModelThinkingSupport(
+        encodeModelSelection("tg-1", "model-1"),
+        group("tg-1", "together", { supportsThinking: true })
+      )
+    ).toBe(true);
+  });
+
+  test("treats vercel_ai_gateway models as opt-in only for thinking", () => {
+    expect(
+      resolveModelThinkingSupport(
+        encodeModelSelection("vag-1", "model-1"),
+        group("vag-1", "vercel_ai_gateway")
+      )
+    ).toBe(false);
+
+    expect(
+      resolveModelThinkingSupport(
+        encodeModelSelection("vag-1", "model-1"),
+        group("vag-1", "vercel_ai_gateway", { supportsThinking: true })
+      )
+    ).toBe(true);
+  });
+
+  test("treats mistral models as opt-in only", () => {
+    expect(
+      resolveModelThinkingSupport(
+        encodeModelSelection("mi-1", "model-1"),
+        group("mi-1", "mistral")
+      )
+    ).toBe(false);
+
+    expect(
+      resolveModelThinkingSupport(
+        encodeModelSelection("mi-1", "model-1"),
+        group("mi-1", "mistral", { supportsThinking: true })
+      )
+    ).toBe(true);
+  });
+
+  test("treats qwen models as opt-in only for thinking", () => {
+    expect(
+      resolveModelThinkingSupport(
+        encodeModelSelection("qw-1", "model-1"),
+        group("qw-1", "qwen")
+      )
+    ).toBe(false);
+
+    expect(
+      resolveModelThinkingSupport(
+        encodeModelSelection("qw-1", "model-1"),
+        group("qw-1", "qwen", { supportsThinking: true })
+      )
+    ).toBe(true);
+
+    expect(
+      resolveModelThinkingSupport(
+        encodeModelSelection("qw-cn-1", "model-1"),
+        group("qw-cn-1", "qwen_cn", { supportsThinking: true })
+      )
+    ).toBe(true);
+  });
+
+  test("treats doubao models as opt-in only", () => {
+    expect(
+      resolveModelThinkingSupport(
+        encodeModelSelection("db-1", "model-1"),
+        group("db-1", "doubao")
+      )
+    ).toBe(false);
+
+    expect(
+      resolveModelThinkingSupport(
+        encodeModelSelection("db-1", "model-1"),
+        group("db-1", "doubao", { supportsThinking: true })
+      )
+    ).toBe(true);
+  });
+
+  test("treats perplexity models as opt-in only", () => {
+    expect(
+      resolveModelThinkingSupport(
+        encodeModelSelection("pplx-1", "model-1"),
+        group("pplx-1", "perplexity")
+      )
+    ).toBe(false);
+
+    expect(
+      resolveModelThinkingSupport(
+        encodeModelSelection("pplx-1", "model-1"),
+        group("pplx-1", "perplexity", { supportsThinking: true })
+      )
+    ).toBe(true);
+  });
+
   test("treats cerebras models as opt-in only", () => {
     expect(
       resolveModelThinkingSupport(
@@ -152,6 +336,22 @@ describe("resolveModelThinkingSupport", () => {
 });
 
 describe("resolveModelVisionSupport", () => {
+  test("treats xiaomi models as opt-in only for vision", () => {
+    expect(
+      resolveModelVisionSupport(
+        encodeModelSelection("xm-1", "model-1"),
+        group("xm-1", "xiaomi")
+      )
+    ).toBe(false);
+
+    expect(
+      resolveModelVisionSupport(
+        encodeModelSelection("xm-1", "model-1"),
+        group("xm-1", "xiaomi", { supportsVision: true })
+      )
+    ).toBe(true);
+  });
+
   test("treats openai-compatible and opencode_go models as opt-in only", () => {
     expect(
       resolveModelVisionSupport(
@@ -191,6 +391,22 @@ describe("resolveModelVisionSupport", () => {
     ).toBe(false);
   });
 
+  test("treats doubao models as opt-in only for vision", () => {
+    expect(
+      resolveModelVisionSupport(
+        encodeModelSelection("db-1", "model-1"),
+        group("db-1", "doubao")
+      )
+    ).toBe(false);
+
+    expect(
+      resolveModelVisionSupport(
+        encodeModelSelection("db-1", "model-1"),
+        group("db-1", "doubao", { supportsVision: true })
+      )
+    ).toBe(true);
+  });
+
   test("treats cerebras models as opt-in only for vision", () => {
     expect(
       resolveModelVisionSupport(
@@ -203,6 +419,54 @@ describe("resolveModelVisionSupport", () => {
       resolveModelVisionSupport(
         encodeModelSelection("cb-1", "model-1"),
         group("cb-1", "cerebras", { supportsVision: true })
+      )
+    ).toBe(true);
+  });
+
+  test("treats together models as opt-in only for vision", () => {
+    expect(
+      resolveModelVisionSupport(
+        encodeModelSelection("tg-1", "model-1"),
+        group("tg-1", "together")
+      )
+    ).toBe(false);
+
+    expect(
+      resolveModelVisionSupport(
+        encodeModelSelection("tg-1", "model-1"),
+        group("tg-1", "together", { supportsVision: true })
+      )
+    ).toBe(true);
+  });
+
+  test("treats qwen models as opt-in only for vision", () => {
+    expect(
+      resolveModelVisionSupport(
+        encodeModelSelection("qw-1", "model-1"),
+        group("qw-1", "qwen")
+      )
+    ).toBe(false);
+
+    expect(
+      resolveModelVisionSupport(
+        encodeModelSelection("qw-1", "model-1"),
+        group("qw-1", "qwen", { supportsVision: true })
+      )
+    ).toBe(true);
+  });
+
+  test("treats vercel_ai_gateway models as opt-in only for vision", () => {
+    expect(
+      resolveModelVisionSupport(
+        encodeModelSelection("vag-1", "model-1"),
+        group("vag-1", "vercel_ai_gateway")
+      )
+    ).toBe(false);
+
+    expect(
+      resolveModelVisionSupport(
+        encodeModelSelection("vag-1", "model-1"),
+        group("vag-1", "vercel_ai_gateway", { supportsVision: true })
       )
     ).toBe(true);
   });
@@ -305,10 +569,19 @@ describe("firstAvailableProviderOption", () => {
         new Set([
           "openai",
           "chatgpt",
+          "xai_oauth",
           "anthropic",
           "openrouter",
           "gemini",
           "deepseek",
+          "doubao",
+          "together",
+          "xiaomi",
+          "vercel_ai_gateway",
+          "mistral",
+          "qwen",
+          "qwen_cn",
+          "perplexity",
           "cerebras",
           "cloudflare",
           "fireworks",
@@ -350,6 +623,36 @@ describe("profileModelSelectionValue", () => {
     expect(profileModelSelectionValue("openai-1::gpt-5.6-luna", groups)).toBe(
       "openai-1::gpt-5.6-luna"
     );
+  });
+});
+
+describe("knownModelSelection", () => {
+  const groups = group("openai-1", "openai");
+
+  test("keeps a remembered pick that still exists", () => {
+    expect(knownModelSelection("openai-1::model-1", groups)).toBe(
+      "openai-1::model-1"
+    );
+  });
+
+  test("re-encodes a bare model id onto its provider", () => {
+    expect(knownModelSelection("model-1", groups)).toBe("openai-1::model-1");
+  });
+
+  test("drops a pick whose provider or model is gone", () => {
+    expect(knownModelSelection("openai-1::retired-model", groups)).toBeNull();
+    expect(knownModelSelection("deleted-provider::model-9", groups)).toBeNull();
+  });
+
+  test("keeps the pick while the catalog has not loaded", () => {
+    expect(knownModelSelection("openai-1::model-1", [])).toBe(
+      "openai-1::model-1"
+    );
+  });
+
+  test("returns null for an empty selection", () => {
+    expect(knownModelSelection(null, groups)).toBeNull();
+    expect(knownModelSelection("", groups)).toBeNull();
   });
 });
 
@@ -395,5 +698,61 @@ describe("hasOpenCodeZenProvider", () => {
         { baseUrl: "https://opencode.ai/zen/go/v1", type: "opencode_go" },
       ])
     ).toBe(false);
+  });
+});
+
+describe("validateCustomModelsInput", () => {
+  test("requires both $/1M rates or neither", () => {
+    expect(
+      validateCustomModelsInput([{ id: "m", inputPerMillionUsd: 1 }])
+    ).toContain("both input and output");
+    expect(
+      validateCustomModelsInput([
+        { id: "m", inputPerMillionUsd: 1, outputPerMillionUsd: 3 },
+      ])
+    ).toBeNull();
+    expect(validateCustomModelsInput([{ id: "m" }])).toBeNull();
+    expect(validateCustomModelsInput([{ id: " " }])).toBe(
+      "Add at least one model."
+    );
+  });
+});
+
+describe("appendOpenRouterModelRow", () => {
+  test("keeps the context window the browse row carried", () => {
+    expect(
+      appendOpenRouterModelRow(
+        [],
+        "anthropic/claude-sonnet-4-6",
+        "Sonnet 4.6",
+        {
+          contextWindow: 1_000_000,
+        }
+      )
+    ).toEqual([
+      {
+        contextWindow: 1_000_000,
+        default: true,
+        id: "anthropic/claude-sonnet-4-6",
+        name: "Sonnet 4.6",
+      },
+    ]);
+  });
+
+  test("preserves existing rows and moves the default to the picked model", () => {
+    expect(
+      appendOpenRouterModelRow(
+        [
+          { contextWindow: 32_000, default: true, id: "a/one", name: "One" },
+          { id: "a/two" },
+          { id: "   " },
+        ],
+        "a/two",
+        "Two"
+      )
+    ).toEqual([
+      { contextWindow: 32_000, default: false, id: "a/one", name: "One" },
+      { default: true, id: "a/two", name: "a/two" },
+    ]);
   });
 });

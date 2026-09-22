@@ -15,6 +15,36 @@ import {
   syncWhatsAppOwnerPairing,
 } from "./whatsapp-config";
 
+describe("organization isolation", () => {
+  test("isolates settings and reconnects between organizations", async () => {
+    await withTempHomedir("nakama-wa-orgs-", async () => {
+      await saveWhatsAppConfig({ profileId: "well-test" }, "org_a");
+      await saveWhatsAppConfig({ profileId: "finance" }, "org_b");
+      await syncWhatsAppOwnerPairing(
+        { ownerJid: "628111111111@s.whatsapp.net" },
+        "org_a"
+      );
+      await syncWhatsAppOwnerPairing(
+        { ownerJid: "628222222222@s.whatsapp.net" },
+        "org_b"
+      );
+      expect((await loadWhatsAppConfigFile("org_a"))?.profileId).toBe(
+        "well-test"
+      );
+      expect((await loadWhatsAppConfigFile("org_b"))?.profileId).toBe(
+        "finance"
+      );
+      expect(await loadWhatsAppConfigFile()).toBeNull();
+      expect(await loadWhatsAppConfigFile("org_c")).toBeNull();
+      await resetWhatsAppSessionForReconnect("org_a");
+      expect((await loadWhatsAppConfigFile("org_a"))?.pairedJid).toBeNull();
+      expect((await loadWhatsAppConfigFile("org_b"))?.pairedJid).toBe(
+        "628222222222@s.whatsapp.net"
+      );
+    });
+  });
+});
+
 describe("maskPhoneNumber", () => {
   test("masks long phone numbers with plus prefix", () => {
     expect(maskPhoneNumber("+1234567890")).toBe(
@@ -38,89 +68,75 @@ describe("normalizePairingCode", () => {
 });
 
 describe("isWhatsAppUserAuthorized", () => {
-  test("returns true when JID matches pairedLid", () => {
-    expect(
-      isWhatsAppUserAuthorized("236283431522503@lid", {
+  const cases: Array<{
+    jid: string | readonly string[];
+    access: Parameters<typeof isWhatsAppUserAuthorized>[1];
+    ok: boolean;
+  }> = [
+    {
+      access: {
         pairedJid: "6281379292556@s.whatsapp.net",
         pairedLid: "236283431522503@lid",
-      })
-    ).toBe(true);
-  });
-
-  test("returns true when JID matches pairedJid", () => {
-    expect(
-      isWhatsAppUserAuthorized("1234567890@s.whatsapp.net", {
-        pairedJid: "1234567890@s.whatsapp.net",
-        pairedLid: null,
-      })
-    ).toBe(true);
-  });
-
-  test("returns true when inbound JID includes a device suffix", () => {
-    expect(
-      isWhatsAppUserAuthorized("6281379292556:12@s.whatsapp.net", {
-        pairedJid: "6281379292556@s.whatsapp.net",
-        pairedLid: null,
-      })
-    ).toBe(true);
-  });
-
-  test("returns true when pairedLid includes a device suffix", () => {
-    expect(
-      isWhatsAppUserAuthorized("128415361462410@lid", {
+      },
+      jid: "236283431522503@lid",
+      ok: true,
+    },
+    {
+      access: { pairedJid: "1234567890@s.whatsapp.net", pairedLid: null },
+      jid: "1234567890@s.whatsapp.net",
+      ok: true,
+    },
+    {
+      access: { pairedJid: "6281379292556@s.whatsapp.net", pairedLid: null },
+      jid: "6281379292556:12@s.whatsapp.net",
+      ok: true,
+    },
+    {
+      access: {
         pairedJid: "6281379292556@s.whatsapp.net",
         pairedLid: "128415361462410:25@lid",
-      })
-    ).toBe(true);
-  });
-
-  test("returns true when pairedJid includes a device suffix", () => {
-    expect(
-      isWhatsAppUserAuthorized("6281379292556@s.whatsapp.net", {
+      },
+      jid: "128415361462410@lid",
+      ok: true,
+    },
+    {
+      access: {
         pairedJid: "6281379292556:12@s.whatsapp.net",
         pairedLid: null,
-      })
-    ).toBe(true);
-  });
-
-  test("returns false when JID does not match pairedJid", () => {
-    expect(
-      isWhatsAppUserAuthorized("9999999999@s.whatsapp.net", {
-        pairedJid: "1234567890@s.whatsapp.net",
-        pairedLid: null,
-      })
-    ).toBe(false);
-  });
-
-  test("returns false when pairedJid is null", () => {
-    expect(
-      isWhatsAppUserAuthorized("1234567890@s.whatsapp.net", {
-        pairedJid: null,
-        pairedLid: null,
-      })
-    ).toBe(false);
-  });
-
-  test("returns true when any candidate JID matches", () => {
-    expect(
-      isWhatsAppUserAuthorized(
-        ["104784384290844@lid", "1234567890@s.whatsapp.net"],
-        {
-          pairedJid: "1234567890@s.whatsapp.net",
-          pairedLid: null,
-        }
-      )
-    ).toBe(true);
-  });
-
-  test("returns true when JID matches an allowed phone", () => {
-    expect(
-      isWhatsAppUserAuthorized("628111111111@s.whatsapp.net", {
+      },
+      jid: "6281379292556@s.whatsapp.net",
+      ok: true,
+    },
+    {
+      access: { pairedJid: "1234567890@s.whatsapp.net", pairedLid: null },
+      jid: "9999999999@s.whatsapp.net",
+      ok: false,
+    },
+    {
+      access: { pairedJid: null, pairedLid: null },
+      jid: "1234567890@s.whatsapp.net",
+      ok: false,
+    },
+    {
+      access: { pairedJid: "1234567890@s.whatsapp.net", pairedLid: null },
+      jid: ["104784384290844@lid", "1234567890@s.whatsapp.net"],
+      ok: true,
+    },
+    {
+      access: {
         allowedPhones: ["628111111111"],
         pairedJid: "1234567890@s.whatsapp.net",
         pairedLid: null,
-      })
-    ).toBe(true);
+      },
+      jid: "628111111111@s.whatsapp.net",
+      ok: true,
+    },
+  ];
+
+  test("authorizes paired JIDs, LIDs, device suffixes, and allowlisted phones", () => {
+    for (const { jid, access, ok } of cases) {
+      expect(isWhatsAppUserAuthorized(jid, access)).toBe(ok);
+    }
   });
 });
 
@@ -277,8 +293,8 @@ describe("resetWhatsAppSessionForReconnect", () => {
 
   test("throws when WhatsApp is not configured", async () => {
     await withTempHomedir("nakama-core-wa-reset-", async () => {
-      expect(resetWhatsAppSessionForReconnect()).rejects.toThrow(
-        "Enable WhatsApp in Integrations before reconnecting."
+      await expect(resetWhatsAppSessionForReconnect()).rejects.toThrow(
+        "Enable WhatsApp in this agent’s Connections before reconnecting."
       );
     });
   });

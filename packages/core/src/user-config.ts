@@ -10,6 +10,7 @@ import {
   serializeCustomModels,
   validateDisplayName,
 } from "./compatible-provider-config";
+import { readEnvValue } from "./config";
 import type {
   ChatgptOAuthCredentials,
   CustomModelEntry,
@@ -18,6 +19,7 @@ import type {
   ThinkingSettings,
   TranscriptionSettings,
   VisionSettings,
+  XaiOAuthCredentials,
 } from "./contract";
 import { ensureDir, readTextOrNull, writeTextFile } from "./fs";
 import {
@@ -55,6 +57,9 @@ export interface ProviderInstance {
   label: string;
   type: UserProviderName;
   wireApi?: import("./contract").WireApi;
+  xaiAccessToken?: string;
+  xaiRefreshToken?: string;
+  xaiTokenExpiresAt?: string;
 }
 
 export interface UserConfig {
@@ -82,16 +87,27 @@ const PROVIDER_TYPE_LABELS: Record<UserProviderName, string> = {
   chatgpt: "ChatGPT (Plus/Pro)",
   cloudflare: "Cloudflare Worker AI",
   deepseek: "DeepSeek",
+  doubao: "Doubao (Volcengine)",
   fireworks: "Fireworks",
   gemini: "Gemini",
   minimax: "MiniMax",
   minimax_cn: "MiniMax (CN)",
+  mistral: "Mistral",
+  moonshot: "Moonshot Kimi",
+  moonshot_cn: "Moonshot Kimi (CN)",
   ollama: "Ollama",
   openai: "OpenAI",
   openai_compatible: "Custom",
   opencode_go: "OpenCode Go",
   openrouter: "OpenRouter",
+  perplexity: "Perplexity Sonar",
+  qwen: "Qwen (DashScope)",
+  qwen_cn: "Qwen (DashScope CN)",
+  together: "Together AI",
+  vercel_ai_gateway: "Vercel AI Gateway",
   xai: "xAI Grok",
+  xai_oauth: "Grok (SuperGrok / Premium+)",
+  xiaomi: "Xiaomi MiMo",
   zhipu: "GLM (Z.ai)",
   zhipu_cn: "GLM (CN)",
 };
@@ -172,6 +188,10 @@ export function isProviderConfigured(
     return false;
   }
 
+  if (active.type === "chatgpt") {
+    return isChatgptProviderConnected(active);
+  }
+
   if (active.type === "openai_compatible") {
     return Boolean(active.baseUrl?.trim() && active.label.trim());
   }
@@ -190,7 +210,7 @@ export function isProviderConfigured(
       }
 
       const envVar = apiKeyEnvVarForProvider(active.type);
-      return Boolean(envVar && env[envVar]?.trim());
+      return Boolean(envVar && readEnvValue(env, envVar));
     }
 
     return true;
@@ -201,7 +221,7 @@ export function isProviderConfigured(
   }
 
   const envVar = apiKeyEnvVarForProvider(active.type);
-  return Boolean(envVar && env[envVar]?.trim());
+  return Boolean(envVar && readEnvValue(env, envVar));
 }
 
 export function isValidTimezone(timezone: string): boolean {
@@ -224,6 +244,18 @@ export function validateTimezone(
   }
 
   return value;
+}
+
+// Org id reaches this as a path segment, so anything that could climb out of
+// the config dir is rejected here rather than at each caller.
+const ORG_ID_SEGMENT = /^[A-Za-z0-9][\w.-]{0,63}$/;
+
+export function getOrgConfigDir(orgId: string): string {
+  if (!ORG_ID_SEGMENT.test(orgId)) {
+    throw new Error(`Invalid organization id: ${orgId}`);
+  }
+
+  return join(getUserConfigDir(), "orgs", orgId);
 }
 
 export function getUserConfigDir(): string {
@@ -627,15 +659,9 @@ function loadProvidersFromSections(
     const baseUrl = values.base_url?.trim()
       ? normalizeBaseUrl(values.base_url)
       : undefined;
-    const customModels =
-      type === "openai_compatible" ||
-      type === "openrouter" ||
-      type === "cerebras" ||
-      type === "fireworks" ||
-      type === "ollama" ||
-      type === "opencode_go"
-        ? parseCustomModelsJson(values.models_json)
-        : undefined;
+    // Writer persists models_json for every type that has a shortlist/catalog
+    // override; load any present JSON so restarts keep shortlists.
+    const customModels = parseCustomModelsJson(values.models_json);
     const hostMode =
       type === "ollama"
         ? (parseOllamaHostMode(values.host_mode) ?? undefined)
@@ -649,14 +675,23 @@ function loadProvidersFromSections(
       id,
       label,
       type,
+      ...(values.xai_access_token?.trim()
+        ? { xaiAccessToken: values.xai_access_token.trim() }
+        : {}),
       ...(values.chatgpt_access_token?.trim()
         ? { chatgptAccessToken: values.chatgpt_access_token.trim() }
+        : {}),
+      ...(values.xai_refresh_token?.trim()
+        ? { xaiRefreshToken: values.xai_refresh_token.trim() }
         : {}),
       ...(values.chatgpt_refresh_token?.trim()
         ? { chatgptRefreshToken: values.chatgpt_refresh_token.trim() }
         : {}),
       ...(values.chatgpt_account_id?.trim()
         ? { chatgptAccountId: values.chatgpt_account_id.trim() }
+        : {}),
+      ...(values.xai_token_expires_at?.trim()
+        ? { xaiTokenExpiresAt: values.xai_token_expires_at.trim() }
         : {}),
       ...(values.chatgpt_token_expires_at?.trim()
         ? { chatgptTokenExpiresAt: values.chatgpt_token_expires_at.trim() }
@@ -700,8 +735,16 @@ function buildProviderSectionValues(
     values.models_json = serializeCustomModels(provider.customModels);
   }
 
+  if (provider.xaiAccessToken?.trim()) {
+    values.xai_access_token = provider.xaiAccessToken.trim();
+  }
+
   if (provider.chatgptAccessToken?.trim()) {
     values.chatgpt_access_token = provider.chatgptAccessToken.trim();
+  }
+
+  if (provider.xaiRefreshToken?.trim()) {
+    values.xai_refresh_token = provider.xaiRefreshToken.trim();
   }
 
   if (provider.chatgptRefreshToken?.trim()) {
@@ -710,6 +753,10 @@ function buildProviderSectionValues(
 
   if (provider.chatgptAccountId?.trim()) {
     values.chatgpt_account_id = provider.chatgptAccountId.trim();
+  }
+
+  if (provider.xaiTokenExpiresAt?.trim()) {
+    values.xai_token_expires_at = provider.xaiTokenExpiresAt.trim();
   }
 
   if (provider.chatgptTokenExpiresAt?.trim()) {
@@ -837,7 +884,6 @@ const API_KEY_FORMAT_RULES: Partial<
   anthropic: { minLength: 30, prefix: "sk-ant-" },
   cerebras: { minLength: 20, prefix: "csk-" },
   deepseek: { minLength: 30, prefix: "sk-" },
-  gemini: { minLength: 30, prefix: "AIza" },
   openai: { minLength: 40, prefix: "sk-" },
   openrouter: { minLength: 20, prefix: "sk-or-" },
 };
@@ -926,4 +972,42 @@ export function chatgptOAuthNeedsRefresh(
   }
 
   return expiresAt - now <= 5 * 60 * 1000;
+}
+
+export function readXaiOAuthFromInstance(
+  instance: ProviderInstance | null | undefined
+): XaiOAuthCredentials | null {
+  if (instance?.type !== "xai_oauth") {
+    return null;
+  }
+  const accessToken = instance.xaiAccessToken?.trim();
+  const refreshToken = instance.xaiRefreshToken?.trim();
+  const expiresAt = instance.xaiTokenExpiresAt?.trim();
+  return accessToken && refreshToken && expiresAt
+    ? { accessToken, expiresAt, refreshToken }
+    : null;
+}
+
+export function applyXaiOAuthToInstance(
+  instance: ProviderInstance,
+  oauth: XaiOAuthCredentials
+): ProviderInstance {
+  if (
+    !oauth ||
+    typeof oauth.accessToken !== "string" ||
+    !oauth.accessToken.trim() ||
+    typeof oauth.refreshToken !== "string" ||
+    !oauth.refreshToken.trim() ||
+    typeof oauth.expiresAt !== "string" ||
+    !Number.isFinite(Date.parse(oauth.expiresAt))
+  ) {
+    throw new Error("Invalid Grok OAuth credentials. Sign in again.");
+  }
+  return {
+    ...instance,
+    apiKey: "",
+    xaiAccessToken: oauth.accessToken.trim(),
+    xaiRefreshToken: oauth.refreshToken.trim(),
+    xaiTokenExpiresAt: oauth.expiresAt,
+  };
 }

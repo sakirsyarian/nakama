@@ -2,9 +2,11 @@ import { describe, expect, test } from "bun:test";
 import {
   getDefaultModel,
   getModelById,
+  getModelsForProvider,
   isOpenRouterModelSlug,
   modelSupportsVision,
   resolveModel,
+  resolveModelLimits,
 } from "./models";
 
 describe("isOpenRouterModelSlug", () => {
@@ -18,6 +20,49 @@ describe("isOpenRouterModelSlug", () => {
 });
 
 describe("resolveModel", () => {
+  test("defaults ChatGPT to Terra without changing OpenAI", () => {
+    expect(resolveModel("chatgpt")).toBe("gpt-5.6-terra");
+    expect(getDefaultModel("chatgpt", [])).toBe("gpt-5.6-terra");
+    expect(getDefaultModel("openai")).toBe("gpt-5.4");
+    expect(getModelsForProvider("chatgpt").map((model) => model.id)).toEqual([
+      "gpt-5.6-terra",
+      "gpt-5.6-sol",
+      "gpt-5.6-luna",
+      "gpt-6-astra",
+      "gpt-5.5",
+    ]);
+  });
+
+  test("honors ChatGPT instance defaults without replacing explicit selections", () => {
+    const customModels = [
+      { id: "gpt-5.6-sol" },
+      { default: true, id: "gpt-5.6-luna" },
+    ];
+    expect(resolveModel("chatgpt", undefined, customModels)).toBe(
+      "gpt-5.6-luna"
+    );
+    expect(getDefaultModel("chatgpt", [{ id: "account-model" }])).toBe(
+      "account-model"
+    );
+    expect(resolveModel("chatgpt", " gpt-5.4 ", customModels)).toBe("gpt-5.4");
+  });
+
+  test("uses xiaomi custom model shortlist when provided", () => {
+    const customModels = [
+      { default: true, id: "mimo-v2.5", name: "MiMo V2.5" },
+    ];
+    expect(resolveModel("xiaomi", "mimo-v2.5", customModels)).toBe("mimo-v2.5");
+    expect(resolveModel("xiaomi", "unknown-model", customModels)).toBe(
+      "mimo-v2.5"
+    );
+  });
+
+  test("resolves catalog models for Xiaomi MiMo", () => {
+    expect(resolveModel("xiaomi", "mimo-v2.5-pro")).toBe("mimo-v2.5-pro");
+    expect(resolveModel("xiaomi", "mimo-v2.5")).toBe("mimo-v2.5");
+    expect(getDefaultModel("xiaomi")).toBe("mimo-v2.5-pro");
+  });
+
   test("passes through custom OpenRouter slugs", () => {
     expect(resolveModel("openrouter", "google/gemini-2.5-pro-preview")).toBe(
       "google/gemini-2.5-pro-preview"
@@ -40,6 +85,24 @@ describe("resolveModel", () => {
   test("resolves catalog models for Gemini", () => {
     expect(resolveModel("gemini", "gemini-2.5-pro")).toBe("gemini-2.5-pro");
     expect(getDefaultModel("gemini")).toBe("gemini-2.5-flash");
+  });
+
+  test("exposes current Gemini limits and standard text prices without changing defaults", () => {
+    for (const [id, input, output] of [
+      ["gemini-2.5-flash", 0.3, 2.5],
+      ["gemini-2.5-pro", 1.25, 10],
+      ["gemini-3.8-flash", 0.75, 3.75],
+      ["gemini-3.1-pro-preview", 2, 12],
+    ] as const) {
+      expect(getModelById(id)).toMatchObject({
+        contextWindow: 1_048_576,
+        inputPerMillionUsd: input,
+        maxOutputTokens: 65_536,
+        outputPerMillionUsd: output,
+        provider: "gemini",
+      });
+    }
+    expect(getModelById("gemini-3.8-flash")?.default).not.toBe(true);
   });
 
   test("resolves custom shortlist models for OpenAI", () => {
@@ -85,6 +148,165 @@ describe("resolveModel", () => {
   test("resolves catalog models for DeepSeek", () => {
     expect(resolveModel("deepseek", "deepseek-v4-pro")).toBe("deepseek-v4-pro");
     expect(getDefaultModel("deepseek")).toBe("deepseek-v4-flash");
+  });
+
+  test("resolves catalog models for Together AI", () => {
+    expect(resolveModel("together", "openai/gpt-oss-120b")).toBe(
+      "openai/gpt-oss-120b"
+    );
+    expect(
+      resolveModel("together", "meta-llama/Llama-3.3-70B-Instruct-Turbo")
+    ).toBe("meta-llama/Llama-3.3-70B-Instruct-Turbo");
+    expect(getDefaultModel("together")).toBe("openai/gpt-oss-120b");
+    expect(getModelById("Qwen/Qwen3.5-9B")?.supportsVision).toBe(true);
+    expect(getModelById("Qwen/Qwen3.5-9B")?.supportsThinking).toBe(true);
+    expect(getModelById("MiniMaxAI/MiniMax-M3")?.supportsVision).toBe(true);
+    expect(getModelById("MiniMaxAI/MiniMax-M3")?.supportsThinking).toBe(true);
+    expect(getModelById("MiniMaxAI/MiniMax-M3")?.contextWindow).toBe(1_048_576);
+    expect(getModelById("openai/gpt-oss-120b")?.supportsThinking).toBe(true);
+  });
+
+  test("uses together custom model shortlist when provided", () => {
+    const customModels = [
+      { default: true, id: "Qwen/Qwen3.5-9B", name: "Qwen3.5 9B" },
+    ];
+    expect(resolveModel("together", "Qwen/Qwen3.5-9B", customModels)).toBe(
+      "Qwen/Qwen3.5-9B"
+    );
+    expect(resolveModel("together", "unknown-model", customModels)).toBe(
+      "Qwen/Qwen3.5-9B"
+    );
+  });
+
+  test("resolves catalog models for Vercel AI Gateway", () => {
+    expect(resolveModel("vercel_ai_gateway", "openai/gpt-4o-mini")).toBe(
+      "openai/gpt-4o-mini"
+    );
+    expect(
+      resolveModel("vercel_ai_gateway", "anthropic/claude-sonnet-4.5")
+    ).toBe("anthropic/claude-sonnet-4.5");
+    expect(getDefaultModel("vercel_ai_gateway")).toBe("openai/gpt-4o-mini");
+    expect(getModelById("openai/gpt-4o-mini")?.supportsVision).toBe(true);
+    expect(getModelById("openai/gpt-5")?.supportsThinking).toBe(true);
+    expect(getModelById("meta/llama-3.3-70b")?.supportsVision).toBe(false);
+    expect(getModelById("deepseek/deepseek-v4-flash")?.supportsThinking).toBe(
+      true
+    );
+  });
+
+  test("uses vercel_ai_gateway custom model shortlist when provided", () => {
+    const customModels = [{ default: true, id: "openai/gpt-5", name: "GPT-5" }];
+    expect(
+      resolveModel("vercel_ai_gateway", "openai/gpt-5", customModels)
+    ).toBe("openai/gpt-5");
+    expect(
+      resolveModel("vercel_ai_gateway", "unknown-model", customModels)
+    ).toBe("openai/gpt-5");
+  });
+
+  test("resolves catalog models for Mistral", () => {
+    expect(resolveModel("mistral", "mistral-large-2512")).toBe(
+      "mistral-large-2512"
+    );
+    expect(getDefaultModel("mistral")).toBe("mistral-small-2603");
+    expect(getModelById("mistral-small-2603")?.supportsThinking).toBe(true);
+    expect(getModelById("mistral-small-2603")?.supportsVision).toBe(true);
+    expect(getModelById("ministral-3b-2512")?.supportsVision).toBe(true);
+  });
+
+  test("uses mistral custom model shortlist when provided", () => {
+    const customModels = [
+      { default: true, id: "mistral-small-2603", name: "Mistral Small 4" },
+    ];
+    expect(resolveModel("mistral", "mistral-small-2603", customModels)).toBe(
+      "mistral-small-2603"
+    );
+    expect(resolveModel("mistral", "unknown-model", customModels)).toBe(
+      "mistral-small-2603"
+    );
+  });
+
+  test("resolves catalog models for Qwen DashScope intl and CN", () => {
+    expect(resolveModel("qwen", "qwen3.7-plus")).toBe("qwen3.7-plus");
+    expect(resolveModel("qwen", "qwen3-vl-plus")).toBe("qwen3-vl-plus");
+    expect(resolveModel("qwen_cn", "qwen-flash")).toBe("qwen-flash");
+    expect(getDefaultModel("qwen")).toBe("qwen3.7-plus");
+    expect(getDefaultModel("qwen_cn")).toBe("qwen3.7-plus");
+    expect(getModelById("qwen3.7-plus")?.supportsThinking).toBe(true);
+    expect(getModelById("qwen3.7-plus")?.contextWindow).toBe(1_000_000);
+    expect(getModelById("qwen3.7-plus")?.supportsVision).toBe(true);
+    expect(getModelById("qwen3-vl-plus")?.supportsVision).toBe(true);
+    expect(getModelById("qwen3-vl-plus")?.supportsThinking).toBe(true);
+    expect(getModelById("qwen-flash")?.supportsThinking).toBe(true);
+    expect(getModelById("qwen-flash")?.inputPerMillionUsd).toBe(0.05);
+  });
+
+  test("resolves catalog models for Doubao", () => {
+    expect(resolveModel("doubao", "doubao-seed-2-1-turbo-260628")).toBe(
+      "doubao-seed-2-1-turbo-260628"
+    );
+    expect(resolveModel("doubao", "doubao-seed-1-8-251228")).toBe(
+      "doubao-seed-1-8-251228"
+    );
+    expect(getDefaultModel("doubao")).toBe("doubao-seed-2-1-pro-260628");
+    expect(getModelById("doubao-seed-2-1-pro-260628")?.supportsThinking).toBe(
+      true
+    );
+    expect(getModelById("doubao-seed-2-1-pro-260628")?.supportsVision).toBe(
+      true
+    );
+    expect(getModelById("doubao-seed-2-1-turbo-260628")?.supportsVision).toBe(
+      true
+    );
+    expect(getModelById("doubao-seed-1-8-251228")?.supportsThinking).toBe(true);
+    expect(getModelById("doubao-seed-1-8-251228")?.supportsVision).toBe(true);
+    expect(getModelById("doubao-seed-2-1-pro-260628")?.contextWindow).toBe(
+      256_000
+    );
+    expect(getModelById("doubao-seed-2-1-pro-260628")?.maxOutputTokens).toBe(
+      256_000
+    );
+  });
+
+  test("uses qwen custom model shortlist when provided", () => {
+    const customModels = [
+      { default: true, id: "qwen-flash", name: "Qwen Flash" },
+    ];
+    expect(resolveModel("qwen", "qwen-flash", customModels)).toBe("qwen-flash");
+    expect(resolveModel("qwen", "unknown-model", customModels)).toBe(
+      "qwen-flash"
+    );
+    expect(resolveModel("qwen_cn", "qwen-flash", customModels)).toBe(
+      "qwen-flash"
+    );
+  });
+
+  test("uses doubao custom model shortlist when provided", () => {
+    const customModels = [
+      {
+        default: true,
+        id: "doubao-seed-2-1-turbo-260628",
+        name: "Doubao Seed 2.1 Turbo",
+      },
+    ];
+    expect(
+      resolveModel("doubao", "doubao-seed-2-1-turbo-260628", customModels)
+    ).toBe("doubao-seed-2-1-turbo-260628");
+    expect(resolveModel("doubao", "unknown-model", customModels)).toBe(
+      "doubao-seed-2-1-turbo-260628"
+    );
+  });
+
+  test("resolves the current Perplexity Sonar catalog", () => {
+    expect(getDefaultModel("perplexity")).toBe("sonar");
+    expect(resolveModel("perplexity", "sonar-pro")).toBe("sonar-pro");
+    expect(getModelById("sonar")?.contextWindow).toBe(128_000);
+    expect(getModelById("sonar")?.inputPerMillionUsd).toBe(1);
+    expect(getModelById("sonar")?.outputPerMillionUsd).toBe(1);
+    expect(getModelById("sonar-pro")?.contextWindow).toBe(200_000);
+    expect(getModelById("sonar-pro")?.supportsVision).toBe(true);
+    expect(getModelById("sonar-reasoning-pro")?.supportsThinking).toBe(true);
+    expect(getModelById("sonar-deep-research")?.supportsVision).toBe(false);
   });
 
   test("resolves catalog models for Cerebras", () => {
@@ -184,9 +406,45 @@ describe("resolveModel", () => {
       "glm-5.2"
     );
   });
+
+  test("resolves Moonshot models from discovered custom models", () => {
+    const customModels = [
+      { default: true, id: "kimi-k2.5-turbo-preview" },
+      { id: "kimi-k2.5" },
+      { id: "moonshot-v1-128k" },
+    ];
+
+    expect(resolveModel("moonshot", "kimi-k2.5", customModels)).toBe(
+      "kimi-k2.5"
+    );
+    expect(getDefaultModel("moonshot", customModels)).toBe(
+      "kimi-k2.5-turbo-preview"
+    );
+    expect(getDefaultModel("moonshot_cn", customModels)).toBe(
+      "kimi-k2.5-turbo-preview"
+    );
+  });
+
+  test("keeps Moonshot region catalogs independent", () => {
+    // Both platforms expose overlapping ids, so an id discovered on one
+    // instance still resolves against that instance's own list.
+    const cnModels = [{ default: true, id: "moonshot-v1-8k-vision-preview" }];
+
+    expect(
+      resolveModel("moonshot_cn", "moonshot-v1-8k-vision-preview", cnModels)
+    ).toBe("moonshot-v1-8k-vision-preview");
+    expect(resolveModel("moonshot", "not-a-real-model", cnModels)).toBe(
+      "moonshot-v1-8k-vision-preview"
+    );
+  });
 });
 
 describe("modelSupportsVision", () => {
+  test("reads Xiaomi MiMo vision flags from the curated catalog", () => {
+    expect(modelSupportsVision("mimo-v2.5-pro", "xiaomi")).toBe(false);
+    expect(modelSupportsVision("mimo-v2.5", "xiaomi")).toBe(true);
+  });
+
   test("keeps MiniMax models opt-in only (discovered lists)", () => {
     expect(modelSupportsVision("MiniMax-M3", "minimax")).toBe(false);
 
@@ -207,6 +465,22 @@ describe("modelSupportsVision", () => {
     ).toBe(true);
   });
 
+  test("keeps Moonshot models opt-in only (discovered lists)", () => {
+    // Intl K2.x is text-only; the CN platform exposes vision variants, so
+    // vision comes from discovered metadata, never from the id.
+    expect(modelSupportsVision("kimi-k2.5", "moonshot")).toBe(false);
+    expect(
+      modelSupportsVision("moonshot-v1-8k-vision-preview", "moonshot_cn", [
+        { id: "moonshot-v1-8k-vision-preview" },
+      ])
+    ).toBe(false);
+
+    expect(
+      modelSupportsVision("moonshot-v1-8k-vision-preview", "moonshot_cn", [
+        { id: "moonshot-v1-8k-vision-preview", supportsVision: true },
+      ])
+    ).toBe(true);
+  });
   test("treats openai-compatible models as opt-in only", () => {
     expect(
       modelSupportsVision("qwen-vl", "openai_compatible", [{ id: "qwen-vl" }])
@@ -223,5 +497,96 @@ describe("modelSupportsVision", () => {
     expect(
       modelSupportsVision("opencode-go/kimi-k2.7-code", "opencode_go")
     ).toBe(false);
+  });
+
+  test("reads Together AI vision flags from the curated catalog", () => {
+    expect(modelSupportsVision("openai/gpt-oss-120b", "together")).toBe(false);
+    expect(modelSupportsVision("Qwen/Qwen3.5-9B", "together")).toBe(true);
+    expect(modelSupportsVision("MiniMaxAI/MiniMax-M3", "together")).toBe(true);
+  });
+
+  test("reads Vercel AI Gateway vision flags from the curated catalog", () => {
+    expect(modelSupportsVision("openai/gpt-4o-mini", "vercel_ai_gateway")).toBe(
+      true
+    );
+    expect(modelSupportsVision("meta/llama-3.3-70b", "vercel_ai_gateway")).toBe(
+      false
+    );
+  });
+
+  test("reads Mistral vision flags from the curated catalog", () => {
+    expect(modelSupportsVision("mistral-small-2603", "mistral")).toBe(true);
+    expect(modelSupportsVision("mistral-large-2512", "mistral")).toBe(true);
+    expect(modelSupportsVision("ministral-14b-2512", "mistral")).toBe(true);
+  });
+
+  test("reads Qwen DashScope vision flags from the curated catalog", () => {
+    expect(modelSupportsVision("qwen3.7-plus", "qwen")).toBe(true);
+    expect(modelSupportsVision("qwen-plus", "qwen")).toBe(false);
+    expect(modelSupportsVision("qwen3-vl-plus", "qwen")).toBe(true);
+    expect(modelSupportsVision("qwen3-vl-plus", "qwen_cn")).toBe(true);
+    expect(modelSupportsVision("qwen-flash", "qwen_cn")).toBe(false);
+  });
+
+  test("reads Doubao vision flags from the curated catalog", () => {
+    expect(modelSupportsVision("doubao-seed-2-1-pro-260628", "doubao")).toBe(
+      true
+    );
+    expect(modelSupportsVision("doubao-seed-2-1-turbo-260628", "doubao")).toBe(
+      true
+    );
+    expect(modelSupportsVision("doubao-seed-1-8-251228", "doubao")).toBe(true);
+  });
+
+  test("reads Perplexity vision flags from the curated catalog", () => {
+    expect(modelSupportsVision("sonar", "perplexity")).toBe(true);
+    expect(modelSupportsVision("sonar-pro", "perplexity")).toBe(true);
+    expect(modelSupportsVision("sonar-deep-research", "perplexity")).toBe(
+      false
+    );
+  });
+});
+
+describe("resolveModelLimits", () => {
+  test("keeps ChatGPT limits separate from OpenAI for the same model id", () => {
+    expect(resolveModelLimits("chatgpt", "gpt-5.6-luna")).toEqual({
+      contextWindow: 272_000,
+      maxOutputTokens: 8192,
+    });
+    expect(resolveModelLimits("openai", "gpt-5.6-luna")).toEqual({
+      contextWindow: 1_050_000,
+      maxOutputTokens: 128_000,
+    });
+  });
+
+  test("uses the instance entry for a model the catalog does not know", () => {
+    expect(
+      resolveModelLimits("openai_compatible", "my-org/llama-4-1m", [
+        { contextWindow: 1_000_000, id: "my-org/llama-4-1m" },
+      ])
+    ).toEqual({ contextWindow: 1_000_000, maxOutputTokens: 8192 });
+  });
+
+  test("falls back to 128k when nothing declares a window", () => {
+    expect(
+      resolveModelLimits("openai_compatible", "my-org/llama-4-1m").contextWindow
+    ).toBe(128_000);
+    expect(
+      resolveModelLimits("openai_compatible", "my-org/llama-4-1m", [
+        { id: "my-org/llama-4-1m" },
+      ]).contextWindow
+    ).toBe(128_000);
+  });
+
+  test("prefers the instance entry over the catalog", () => {
+    expect(
+      resolveModelLimits("chatgpt", "gpt-5.6-luna", [
+        {
+          contextWindow: 32_000,
+          id: "gpt-5.6-luna",
+          maxOutputTokens: 4096,
+        },
+      ])
+    ).toEqual({ contextWindow: 32_000, maxOutputTokens: 4096 });
   });
 });

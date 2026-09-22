@@ -1,5 +1,6 @@
 import {
   applyChatgptOAuthToInstance,
+  applyXaiOAuthToInstance,
   createProviderInstanceId,
   defaultOllamaBaseUrl,
   defaultOllamaLabel,
@@ -16,6 +17,7 @@ import {
   type ProviderClient,
   type ProviderInstance,
   parseWireApi,
+  readXaiOAuthFromInstance,
   resolveOllamaHostMode,
   type UserConfig,
   validateCustomModels,
@@ -33,6 +35,7 @@ import type { DatabaseAdapter } from "@nakama/db";
 import {
   getDefaultModel,
   getModelById,
+  getModelsForProvider,
   getModelsForProviderInstance,
   isCompatibleModelId,
   isOpenRouterModelSlug,
@@ -60,6 +63,7 @@ export function toProviderInstanceSummary(
     hasApiKey:
       Boolean(instance.apiKey.trim()) ||
       chatgptConnected ||
+      Boolean(readXaiOAuthFromInstance(instance)) ||
       instance.type === "openai_compatible" ||
       (instance.type === "ollama" && !isOllamaCloudInstance(instance)),
     hostMode:
@@ -108,6 +112,14 @@ export function modelExistsOnInstance(
     return true;
   }
 
+  // Keep saved selections resolvable after retirement from the ChatGPT picker.
+  if (
+    instance.type === "chatgpt" &&
+    (trimmed === "gpt-5.4" || trimmed === "gpt-5.4-mini")
+  ) {
+    return true;
+  }
+
   if (instance.type === "openrouter" && isOpenRouterModelSlug(trimmed)) {
     return true;
   }
@@ -148,18 +160,26 @@ export function modelExistsOnInstance(
   }
 
   if (
-    instance.type === "openai" ||
-    instance.type === "anthropic" ||
-    instance.type === "gemini" ||
-    instance.type === "deepseek"
+    (instance.type === "openai" ||
+      instance.type === "anthropic" ||
+      instance.type === "gemini" ||
+      instance.type === "deepseek" ||
+      instance.type === "doubao" ||
+      instance.type === "vercel_ai_gateway" ||
+      instance.type === "together" ||
+      instance.type === "xiaomi" ||
+      instance.type === "mistral" ||
+      instance.type === "qwen" ||
+      instance.type === "qwen_cn" ||
+      instance.type === "perplexity") &&
+    instance.customModels?.length
   ) {
-    if (instance.customModels?.length) {
-      return findCustomModel(instance.customModels, trimmed) !== undefined;
-    }
-    return Boolean(getModelById(trimmed)?.provider === instance.type);
+    return findCustomModel(instance.customModels, trimmed) !== undefined;
   }
 
-  return Boolean(getModelById(trimmed)?.provider === instance.type);
+  return getModelsForProvider(instance.type).some(
+    (model) => model.id === trimmed
+  );
 }
 
 export function resolveDefaultModelForInstance(
@@ -190,9 +210,41 @@ export function buildProviderInstanceFromCreateRequest(
     !apiKey &&
     type !== "openai_compatible" &&
     type !== "ollama" &&
-    type !== "chatgpt"
+    type !== "chatgpt" &&
+    type !== "xai_oauth"
   ) {
     throw new NakamaApiError("API key is required.", 400);
+  }
+
+  if (type === "xai_oauth") {
+    if (!request.xaiOAuth) {
+      throw new NakamaApiError(
+        "Sign in with Grok before saving this provider.",
+        400
+      );
+    }
+
+    const label = request.label?.trim()
+      ? validateProviderInstanceLabel(request.label, type)
+      : normalizeProviderInstanceLabel(
+          type,
+          "Grok (SuperGrok / Premium+)",
+          existing
+        );
+
+    return applyXaiOAuthToInstance(
+      {
+        apiKey: "",
+        createdAt: new Date().toISOString(),
+        id: createProviderInstanceId(),
+        label,
+        type,
+        ...(request.customModels?.length
+          ? { customModels: validateCustomModels(request.customModels) }
+          : {}),
+      },
+      request.xaiOAuth
+    );
   }
 
   if (type === "chatgpt") {
@@ -269,6 +321,10 @@ export function applyProviderInstanceUpdate(
     next.apiKey = validateProviderApiKeyFormat(request.apiKey, instance.type);
   }
 
+  if (request.xaiOAuth && instance.type === "xai_oauth") {
+    return applyXaiOAuthToInstance(next, request.xaiOAuth);
+  }
+
   if (request.chatgptOAuth && instance.type === "chatgpt") {
     return applyChatgptOAuthToInstance(next, request.chatgptOAuth);
   }
@@ -310,9 +366,18 @@ export function applyProviderInstanceUpdate(
     } else if (
       instance.type === "openai" ||
       instance.type === "chatgpt" ||
+      instance.type === "xai_oauth" ||
       instance.type === "anthropic" ||
       instance.type === "gemini" ||
-      instance.type === "deepseek"
+      instance.type === "deepseek" ||
+      instance.type === "doubao" ||
+      instance.type === "together" ||
+      instance.type === "xiaomi" ||
+      instance.type === "vercel_ai_gateway" ||
+      instance.type === "mistral" ||
+      instance.type === "qwen" ||
+      instance.type === "qwen_cn" ||
+      instance.type === "perplexity"
     ) {
       next.customModels = validateCustomModels(request.customModels);
     }

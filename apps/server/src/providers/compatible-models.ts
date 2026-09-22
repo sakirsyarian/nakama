@@ -128,10 +128,22 @@ export function catalogCustomModelsToCatalog(
     }
     if (entry.supportsVision !== undefined) {
       model.supportsVision = entry.supportsVision;
+    } else if (provider === "chatgpt" || provider === "xai_oauth") {
+      model.supportsVision = true;
     }
     if (entry.supportsThinking !== undefined) {
       model.supportsThinking = entry.supportsThinking;
-    } else if (provider === "deepseek") {
+    } else if (
+      provider === "deepseek" ||
+      provider === "doubao" ||
+      provider === "together" ||
+      provider === "xiaomi" ||
+      provider === "vercel_ai_gateway" ||
+      provider === "mistral" ||
+      provider === "qwen" ||
+      provider === "qwen_cn" ||
+      provider === "perplexity"
+    ) {
       model.supportsThinking = false;
     }
     if (entry.inputPerMillionUsd !== undefined) {
@@ -143,54 +155,6 @@ export function catalogCustomModelsToCatalog(
 
     return model;
   });
-}
-
-export function openCodeGoCustomModelsToCatalog(
-  entries: CustomModelEntry[],
-  staticModels: ProviderModelOption[]
-): ProviderModelOption[] {
-  return catalogCustomModelsToCatalog(entries, staticModels, "opencode_go");
-}
-
-export function mergeOpenRouterCatalog(
-  staticModels: ProviderModelOption[],
-  customEntries: CustomModelEntry[]
-): ProviderModelOption[] {
-  const byId = new Map(staticModels.map((model) => [model.id, { ...model }]));
-
-  for (const entry of customEntries) {
-    const existing = byId.get(entry.id);
-    byId.set(entry.id, {
-      ...(existing ?? {
-        contextWindow: DEFAULT_CONTEXT_WINDOW,
-        id: entry.id,
-        maxOutputTokens: DEFAULT_MAX_OUTPUT,
-        provider: "openrouter" as const,
-      }),
-      id: entry.id,
-      name: entry.name?.trim() || existing?.name || entry.id,
-      provider: "openrouter",
-      supportsThinking: resolveOpenRouterCatalogThinking(entry),
-      ...(entry.supportsVision === undefined
-        ? {}
-        : { supportsVision: entry.supportsVision }),
-      ...(entry.default
-        ? { default: true }
-        : existing?.default
-          ? { default: true }
-          : {}),
-      ...(entry.inputPerMillionUsd === undefined
-        ? {}
-        : { inputPerMillionUsd: entry.inputPerMillionUsd }),
-      ...(entry.outputPerMillionUsd === undefined
-        ? {}
-        : { outputPerMillionUsd: entry.outputPerMillionUsd }),
-    });
-  }
-
-  return [...byId.values()].sort((left, right) =>
-    left.name.localeCompare(right.name)
-  );
 }
 
 export function customModelsToCatalog(
@@ -324,9 +288,18 @@ export function getModelsForProviderInstance(
   if (
     instance.type === "openai" ||
     instance.type === "chatgpt" ||
+    instance.type === "xai_oauth" ||
     instance.type === "anthropic" ||
     instance.type === "gemini" ||
     instance.type === "deepseek" ||
+    instance.type === "doubao" ||
+    instance.type === "together" ||
+    instance.type === "xiaomi" ||
+    instance.type === "vercel_ai_gateway" ||
+    instance.type === "mistral" ||
+    instance.type === "qwen" ||
+    instance.type === "qwen_cn" ||
+    instance.type === "perplexity" ||
     instance.type === "opencode_go"
   ) {
     const entries = instance.customModels ?? [];
@@ -347,20 +320,6 @@ export function getModelsForProviderInstance(
   return annotate(
     AVAILABLE_MODELS.filter((model) => model.provider === instance.type)
   );
-}
-
-export function getModelsForConfiguredProvider(
-  provider: ProviderName | null,
-  instance: ProviderInstance | null | undefined,
-  currentModel?: string | null
-): ProviderModelOption[] {
-  if (!instance) {
-    return provider
-      ? AVAILABLE_MODELS.filter((model) => model.provider === provider)
-      : AVAILABLE_MODELS;
-  }
-
-  return getModelsForProviderInstance(instance, currentModel);
 }
 
 export function resolveOpenRouterDefaultModel(
@@ -634,11 +593,4 @@ export function compatibleModelSupportsThinking(
   customModels: CustomModelEntry[] | undefined
 ): boolean {
   return findCustomModel(customModels, modelId)?.supportsThinking === true;
-}
-
-export function compatibleModelSupportsVision(
-  modelId: string,
-  customModels: CustomModelEntry[] | undefined
-): boolean {
-  return findCustomModel(customModels, modelId)?.supportsVision === true;
 }

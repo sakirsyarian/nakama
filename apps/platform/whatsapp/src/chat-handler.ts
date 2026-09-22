@@ -1,5 +1,11 @@
 import type { NakamaClient, RemoteChatSession } from "@nakama/client";
-import { deliverTurnArtifactShares, isAttachOnlyCommand } from "@nakama/core";
+import {
+  extractPairedTurnArtifacts,
+  isAttachOnlyCommand,
+  isFreshReportRequest,
+  isScratchArtifactPath,
+  pushDeliverableArtifact,
+} from "@nakama/core";
 import { formatClientError } from "@nakama/core/api-error";
 import {
   clearActiveStream,
@@ -28,7 +34,9 @@ import type { WhatsAppAuthStore } from "./auth-store";
 import {
   maybeSendRequestedWhatsAppArtifactAttachment,
   maybeSendWhatsAppAttachOnlyCommand,
+  sendArtifactDocumentForPath,
 } from "./channel-artifact-flow";
+import { isChannelDebugEnabled } from "./channel-log";
 import type { WhatsAppBridgeConfig } from "./config";
 import {
   HELP_TEXT,
@@ -76,6 +84,9 @@ export interface ChatHandlerDeps {
 
 export function createChatHandler(deps: ChatHandlerDeps) {
   const { client, config, authStore, sessionStore, orgStore, getSocket } = deps;
+  if (config.orgId) {
+    client.setOrgId(config.orgId);
+  }
 
   return async function handleMessage(
     data: Pick<WhatsAppInboundChat, "jid" | "text"> &
@@ -97,14 +108,16 @@ export function createChatHandler(deps: ChatHandlerDeps) {
         text: trimmed,
       })
     ) {
-      console.log(
-        [
-          "Ignored WhatsApp outbound echo",
-          `jid=${maskWhatsAppJid(jid)}`,
-          `fromMe=${inbound.fromMe ? "yes" : "no"}`,
-          `textBytes=${Buffer.byteLength(trimmed, "utf8")}`,
-        ].join(" ")
-      );
+      if (isChannelDebugEnabled()) {
+        console.log(
+          [
+            "Ignored WhatsApp outbound echo",
+            `jid=${maskWhatsAppJid(jid)}`,
+            `fromMe=${inbound.fromMe ? "yes" : "no"}`,
+            `textBytes=${Buffer.byteLength(trimmed, "utf8")}`,
+          ].join(" ")
+        );
+      }
       return;
     }
 
@@ -126,15 +139,17 @@ export function createChatHandler(deps: ChatHandlerDeps) {
       : null;
 
     if (groupDecision && !groupDecision.shouldHandle) {
-      console.log(
-        [
-          "Ignored WhatsApp group message",
-          `reason=${groupDecision.reason}`,
-          `jid=${maskWhatsAppJid(jid)}`,
-          `sender=${maskWhatsAppJid(inbound.senderJid)}`,
-          `textBytes=${Buffer.byteLength(trimmed, "utf8")}`,
-        ].join(" ")
-      );
+      if (isChannelDebugEnabled()) {
+        console.log(
+          [
+            "Ignored WhatsApp group message",
+            `reason=${groupDecision.reason}`,
+            `jid=${maskWhatsAppJid(jid)}`,
+            `sender=${maskWhatsAppJid(inbound.senderJid)}`,
+            `textBytes=${Buffer.byteLength(trimmed, "utf8")}`,
+          ].join(" ")
+        );
+      }
       return;
     }
 
@@ -173,15 +188,17 @@ export function createChatHandler(deps: ChatHandlerDeps) {
 
       if (!authorized) {
         if (!authStore.getConfig()?.pairingCode) {
-          console.log(
-            [
-              "Ignored WhatsApp message",
-              "reason=unauthorized",
-              `jid=${maskWhatsAppJid(jid)}`,
-              `sender=${maskWhatsAppJid(inbound.senderJid)}`,
-              `textBytes=${Buffer.byteLength(trimmed, "utf8")}`,
-            ].join(" ")
-          );
+          if (isChannelDebugEnabled()) {
+            console.log(
+              [
+                "Ignored WhatsApp message",
+                "reason=unauthorized",
+                `jid=${maskWhatsAppJid(jid)}`,
+                `sender=${maskWhatsAppJid(inbound.senderJid)}`,
+                `textBytes=${Buffer.byteLength(trimmed, "utf8")}`,
+              ].join(" ")
+            );
+          }
           return;
         }
 
@@ -341,6 +358,10 @@ export function createChatHandler(deps: ChatHandlerDeps) {
     messageText: string,
     replyJid: string
   ): Promise<boolean> {
+    if (config.orgId) {
+      client.setOrgId(config.orgId);
+      return true;
+    }
     const orgContext = await prepareChannelOrgContext({
       getSelectedOrgId: () => orgStore.get(channelOrgKey)?.orgId,
       listOrgs: () => client.listUserOrgs(),
@@ -377,6 +398,10 @@ export function createChatHandler(deps: ChatHandlerDeps) {
     jid: string,
     text: string
   ): Promise<void> {
+    if (config.orgId) {
+      await sendText(jid, "This number serves a single organization.");
+      return;
+    }
     const { orgs } = await client.listUserOrgs();
 
     if (orgs.length === 0) {
@@ -422,7 +447,16 @@ export function createChatHandler(deps: ChatHandlerDeps) {
     const profileId = sessionStore.get(conversationKey)?.profileId;
     const socket = getSocket();
 
-    if (profileId && socket) {
+    // ponytail: imperative phrases only; use an explicit send tool for richer requests.
+    // Freshness markers (harian/today/…) mean "build it now": never serve the
+    // registry without an agent turn, or yesterday's file goes out as today's.
+    const wantsFreshReport = isFreshReportRequest(attachUserText);
+    const createsArtifact =
+      wantsFreshReport ||
+      /^\s*(?:(?:please|tolong)\s+)?(?:collect|create|generate|save|buat(?:kan)?|rekap(?:kan)?)\b/i.test(
+        attachUserText
+      );
+    if (profileId && socket && !createsArtifact) {
       const attached = await maybeSendRequestedWhatsAppArtifactAttachment({
         attachUserText,
         client,
@@ -500,7 +534,7 @@ export function createChatHandler(deps: ChatHandlerDeps) {
       await sendText(jid, formatClientError(error));
       return;
     } finally {
-      clearActiveStream(conversationKey);
+      clearActiveStream(conversationKey, signal);
       typingLoop.stop();
     }
 
@@ -511,26 +545,39 @@ export function createChatHandler(deps: ChatHandlerDeps) {
     }
 
     if (profileId) {
-      await deliverTurnArtifactShares({
-        conversationKey,
-        publish: (path) => client.publishProfileArtifactShare(profileId, path),
-        sendFooter: (footer) => sendText(jid, footer, { raw: true }),
-        session,
-        sessionStore,
+      const artifacts = extractPairedTurnArtifacts(await session.getMessages());
+      if (artifacts.length === 0) {
+        return;
+      }
+      let registry = sessionStore.getDeliverableArtifacts(conversationKey);
+      for (const artifact of artifacts) {
+        registry = pushDeliverableArtifact(registry, {
+          ...artifact,
+          sharePath: null,
+          shareUrl: null,
+        });
+      }
+      sessionStore.updateArtifactState(conversationKey, {
+        deliverableArtifacts: registry,
       });
+      await sessionStore.save();
 
-      // Same-turn "save and send me the file": registry is empty before the
-      // agent runs, so attach after shares are minted.
+      // Scratch-looking writes stay retrievable via /attach but never blast
+      // into the group unasked.
+      const deliverable = artifacts.filter(
+        (artifact) => !isScratchArtifactPath(artifact.path)
+      );
       const postTurnSocket = getSocket();
-      if (postTurnSocket) {
-        await maybeSendRequestedWhatsAppArtifactAttachment({
-          attachUserText,
+      if (!postTurnSocket) {
+        return;
+      }
+      for (const artifact of deliverable) {
+        await sendArtifactDocumentForPath({
+          ...artifact,
           client,
-          conversationKey,
           jid,
           profileId,
           sendPlain: (text) => sendText(jid, text),
-          sessionStore,
           socket: postTurnSocket,
         });
       }
@@ -568,6 +615,13 @@ export function createChatHandler(deps: ChatHandlerDeps) {
   }
 
   async function resolveProfileId(): Promise<string> {
+    if (config.owner) {
+      const { profiles } = await client.listProfiles(config.owner.orgId);
+      if (!profiles.some((profile) => profile.id === config.owner!.profileId)) {
+        throw new Error("The connection owner is unavailable.");
+      }
+      return config.owner.profileId;
+    }
     const fileConfig = authStore.getConfig();
     const preferredProfileId =
       fileConfig?.profileId?.trim() || config.profileId;
@@ -580,6 +634,20 @@ export function createChatHandler(deps: ChatHandlerDeps) {
     const existing = sessionStore.get(jid);
 
     if (existing && existing.profileId === profileId) {
+      if (config.owner) {
+        const { sessions } = await client.listSessions(profileId, "whatsapp");
+        if (
+          !sessions.some(
+            (session) =>
+              session.id === existing.sessionId &&
+              session.profileId === profileId
+          )
+        ) {
+          sessionStore.delete(jid);
+          await sessionStore.save();
+          return createAndBindSession(jid, profileId);
+        }
+      }
       const hot = sessionStore.getHotSession<RemoteChatSession>(jid);
       if (hot) {
         return hot;
@@ -603,7 +671,9 @@ export function createChatHandler(deps: ChatHandlerDeps) {
     jid: string,
     profileId?: string
   ): Promise<RemoteChatSession> {
-    const resolvedProfileId = profileId ?? (await resolveProfileId());
+    const resolvedProfileId = config.owner
+      ? await resolveProfileId()
+      : (profileId ?? (await resolveProfileId()));
     const session = await client.createSession("whatsapp", {
       profileId: resolvedProfileId,
     });

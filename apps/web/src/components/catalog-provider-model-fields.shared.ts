@@ -3,9 +3,18 @@ import type { SelectedProvider } from "@/lib/models";
 export const CATALOG_SHORTLIST_PROVIDERS = [
   "openai",
   "chatgpt",
+  "xai_oauth",
   "anthropic",
   "gemini",
   "deepseek",
+  "doubao",
+  "together",
+  "xiaomi",
+  "vercel_ai_gateway",
+  "mistral",
+  "qwen",
+  "qwen_cn",
+  "perplexity",
   "opencode_go",
 ] as const;
 

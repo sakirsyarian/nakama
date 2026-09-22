@@ -5,7 +5,7 @@ description: "Configure LLM providers, API keys, and models in Nakama Settings."
 
 ## Configure a provider
 
-1. Open **Settings** in the Nakama dashboard
+1. Sign in as a platform admin and open **Settings**
 2. Go to **LLM providers**
 3. Add a provider and paste your API key
 4. Browse or enter models for that provider
@@ -19,6 +19,24 @@ During [First-time setup](/first-time-setup), the wizard uses the same provider 
 
 ![Configure your LLM provider in the setup wizard](/screenshots/setup-step-provider.png)
 
+## Mount provider API keys
+
+Keep provider secrets outside Nakama's data directory by setting the provider's
+API-key variable with a `_FILE` suffix. Its value is the path to a readable
+secret file:
+
+```sh
+OPENAI_API_KEY_FILE=/run/secrets/openai_api_key
+```
+
+This works for built-in providers that expose an API-key environment variable,
+including `ANTHROPIC_API_KEY_FILE` and `GEMINI_API_KEY_FILE`. On first boot,
+set `NAKAMA_PROVIDER` as well when more than one provider secret is mounted.
+
+Nakama trims the file contents and leaves the API key empty in its saved
+settings. A directly set API-key variable takes priority over its `_FILE`
+partner. Startup fails when a configured secret file cannot be read.
+
 ## Supported providers
 
 Nakama supports these built-in provider types:
@@ -27,10 +45,19 @@ Nakama supports these built-in provider types:
 |---|---|
 | OpenAI | GPT models; required for OpenAI audio transcription (Telegram voice notes) |
 | ChatGPT (Plus/Pro) | Sign in with ChatGPT; uses your plan quota via Codex (not API credits). One account per Nakama instance |
+| Grok (SuperGrok / Premium+) | Sign in with your xAI subscription; API eligibility depends on your plan |
 | Anthropic | Claude models |
 | OpenRouter | Route to many models through one API key |
 | Gemini | Google Gemini models |
 | DeepSeek | DeepSeek models |
+| Doubao (Volcengine) | Seed models via Volcengine Ark China (`https://ark.cn-beijing.volces.com/api/v3`); set `DOUBAO_API_KEY` |
+| Together AI | Open-source and hosted models via Together |
+| Xiaomi MiMo | MiMo models via `api.xiaomimimo.com` (pay-as-you-go; override base URL for Token Plan clusters) |
+| Vercel AI Gateway | One Vercel key → many labs' models (`creator/model` ids) |
+| Mistral | Mistral models (Small 4, Medium 3.5, Large 3, Ministral 3) |
+| Qwen (DashScope) | Alibaba DashScope international (`QWEN_API_KEY`) |
+| Qwen (DashScope CN) | Alibaba DashScope China (`QWEN_CN_API_KEY`) |
+| Perplexity Sonar | Search-grounded Sonar models with citation links |
 | Cerebras | Cerebras models |
 | Cloudflare Worker AI | Workers AI models; add an API key and account ID in Settings (saved to `config.ini`). Llama 3.1 8B is the cheaper catalog option. `CLOUDFLARE_ACCOUNT_ID` is a fallback only |
 | Fireworks | Fireworks AI models |
@@ -48,6 +75,7 @@ Some capabilities depend on the active provider:
 - **Audio transcription** (Telegram voice notes) — requires an OpenAI provider and a transcription model in **Settings → Audio transcription model** (ChatGPT Plus/Pro cannot replace this)
 - **Image parsing** — used when the chat model cannot see images. Set **Settings → Image parsing model**. The list only includes models marked as vision-capable. For a custom endpoint, turn **Vision** on for that model under **Settings → LLM providers**
 - **Responses API endpoints**: a custom endpoint that serves `/responses` rather than `/chat/completions`. Set **API** to Responses under **Settings → LLM providers**, or answer `responses` in the CLI setup wizard. Required for endpoints that do not serve chat/completions at all, and it keeps reasoning available alongside tools on models that reject the pair on chat/completions
+- **Context window**: models in the built-in catalog carry their own size. A model Nakama does not recognise (a custom endpoint, an OpenRouter slug, a self-hosted build) falls back to 128k, which cuts history early on a larger model and overflows a smaller one. Set **Context** for that model under **Settings → LLM providers** to the real token window; leave it on auto to keep the fallback. Browsing models.dev fills it in for you
 - **Coding agent provider passthrough** — spawn-time credentials for Claude Code / Codex / OpenCode; see [Coding agent](/coding-agent)
 
 ## Per-profile models
@@ -64,6 +92,18 @@ ChatGPT Plus/Pro is **not** an OpenAI API key. In **Settings → LLM providers**
 - Usage comes from your ChatGPT plan quota, not pay-as-you-go API billing
 - Whisper transcription and image generation still need a regular OpenAI API key provider
 - Coding-agent provider passthrough does not apply to this provider type — use **Integrations → Coding agents → harness login** with `codex login` for Codex CLI subscription use
+
+## Grok (SuperGrok / Premium+)
+
+Connect your Grok subscription to chat with Grok models in Nakama without entering an API key.
+
+1. In **Settings → LLM providers → Add provider**, choose **Grok (SuperGrok / Premium+)**.
+2. Click **Sign in with Grok**, open the displayed link, and enter the code. For Premium+, use the xAI account linked to your X account.
+3. Approve access, choose a model, and click **Add provider**.
+
+Nakama refreshes the saved session automatically. Use **Reconnect Grok** if access is revoked. The connected account is shared across the Nakama instance.
+
+xAI controls subscription API eligibility and usage limits. A successful sign-in does not guarantee model access; a 402 or 403 response can indicate a quota or plan restriction.
 
 ## Next steps
 

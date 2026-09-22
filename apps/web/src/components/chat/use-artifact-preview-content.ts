@@ -1,6 +1,5 @@
 import { useEffect, useState } from "react";
 import {
-  artifactPreviewErrorMessage,
   type ChatArtifactRef,
   isHtmlArtifactMimeType,
   isImageArtifactMimeType,
@@ -10,33 +9,6 @@ import {
   resolveArtifactMimeType,
 } from "@/lib/chat-artifacts";
 import { client, formatError } from "@/lib/client";
-
-type ArtifactPreviewCacheEntry = {
-  content: string | null;
-  mediaBlob: Blob | null;
-};
-
-const previewCache = new Map<string, ArtifactPreviewCacheEntry>();
-
-export function artifactPreviewCacheKey(profileId: string, path: string) {
-  return `${profileId}:${path}`;
-}
-
-export function clearArtifactPreviewCache() {
-  previewCache.clear();
-}
-
-function readPreviewCache(key: string): ArtifactPreviewCacheEntry | undefined {
-  return previewCache.get(key);
-}
-
-function writePreviewCache(
-  key: string,
-  patch: Partial<ArtifactPreviewCacheEntry>
-) {
-  const current = previewCache.get(key) ?? { content: null, mediaBlob: null };
-  previewCache.set(key, { ...current, ...patch });
-}
 
 export function useAuthenticatedImagePreview(
   profileId: string | null | undefined,
@@ -82,7 +54,7 @@ export function useAuthenticatedImagePreview(
       .catch((fetchError) => {
         if (!cancelled) {
           setBlob(null);
-          setError(artifactPreviewErrorMessage(formatError(fetchError)));
+          setError(formatError(fetchError));
         }
       });
 
@@ -117,6 +89,7 @@ export function useArtifactPreviewContent({
   isHtml,
   isImage,
   isVideo,
+  isPdf,
   isWordDocument,
   profileId,
   artifact,
@@ -126,56 +99,30 @@ export function useArtifactPreviewContent({
   isHtml: boolean;
   isImage: boolean;
   isVideo: boolean;
+  isPdf: boolean;
   isWordDocument: boolean;
   profileId: string;
   artifact: ChatArtifactRef;
 }) {
-  const cacheKey = artifactPreviewCacheKey(profileId, artifact.path);
-  const cached = readPreviewCache(cacheKey);
-  const isBinaryMedia = isImage || isVideo;
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [content, setContentState] = useState<string | null>(
-    cached?.content ?? null
-  );
-  const [mediaBlob, setMediaBlob] = useState<Blob | null>(
-    cached?.mediaBlob ?? null
-  );
-  const [activeCacheKey, setActiveCacheKey] = useState(cacheKey);
+  const [content, setContent] = useState<string | null>(null);
+  const [mediaBlob, setMediaBlob] = useState<Blob | null>(null);
   const mediaPreviewUrl = useBlobObjectUrl(mediaBlob);
+  const isBinaryMedia = isImage || isVideo || isPdf;
   // Load image bytes eagerly so chat chips can show a real thumbnail before the panel opens.
   const shouldLoad = open || isImage;
-
-  if (activeCacheKey !== cacheKey) {
-    const next = readPreviewCache(cacheKey);
-    setActiveCacheKey(cacheKey);
-    setContentState(next?.content ?? null);
-    setMediaBlob(next?.mediaBlob ?? null);
-    setError(null);
-    setLoading(false);
-  }
-
-  function setContent(next: string) {
-    setContentState(next);
-    writePreviewCache(cacheKey, { content: next });
-  }
 
   useEffect(() => {
     if (!(shouldLoad && canPreview)) {
       return;
     }
 
-    const cachedEntry = readPreviewCache(cacheKey);
     if (isBinaryMedia) {
-      const cachedBlob = cachedEntry?.mediaBlob ?? null;
-      if (cachedBlob) {
-        setMediaBlob(cachedBlob);
-        setLoading(false);
+      if (mediaBlob !== null) {
         return;
       }
-    } else if (cachedEntry?.content != null) {
-      setContentState(cachedEntry.content);
-      setLoading(false);
+    } else if (content !== null) {
       return;
     }
 
@@ -201,6 +148,18 @@ export function useArtifactPreviewContent({
         const servedAsImage = isImageArtifactMimeType(contentType);
         const servedAsVideo = isVideoArtifactMimeType(contentType);
 
+        if (isPdf) {
+          if (contentType !== "application/pdf") {
+            setError(
+              "Preview is not available for this file type. Download instead."
+            );
+            return;
+          }
+
+          setMediaBlob(new Blob([result.data], { type: contentType }));
+          return;
+        }
+
         if (isImage) {
           if (!servedAsImage) {
             setError(
@@ -209,9 +168,7 @@ export function useArtifactPreviewContent({
             return;
           }
 
-          const blob = new Blob([result.data], { type: contentType });
-          writePreviewCache(cacheKey, { mediaBlob: blob });
-          setMediaBlob(blob);
+          setMediaBlob(new Blob([result.data], { type: contentType }));
           return;
         }
 
@@ -223,9 +180,7 @@ export function useArtifactPreviewContent({
             return;
           }
 
-          const blob = new Blob([result.data], { type: contentType });
-          writePreviewCache(cacheKey, { mediaBlob: blob });
-          setMediaBlob(blob);
+          setMediaBlob(new Blob([result.data], { type: contentType }));
           return;
         }
 
@@ -249,13 +204,11 @@ export function useArtifactPreviewContent({
           return;
         }
 
-        const text = new TextDecoder().decode(result.data);
-        writePreviewCache(cacheKey, { content: text });
-        setContentState(text);
+        setContent(new TextDecoder().decode(result.data));
       })
       .catch((fetchError) => {
         if (!cancelled) {
-          setError(artifactPreviewErrorMessage(formatError(fetchError)));
+          setError(formatError(fetchError));
         }
       })
       .finally(() => {
@@ -270,11 +223,13 @@ export function useArtifactPreviewContent({
   }, [
     shouldLoad,
     canPreview,
-    cacheKey,
+    content,
+    mediaBlob,
     isBinaryMedia,
     isHtml,
     isImage,
     isVideo,
+    isPdf,
     isWordDocument,
     profileId,
     artifact.path,
@@ -286,6 +241,7 @@ export function useArtifactPreviewContent({
     error,
     imagePreviewUrl: isImage ? mediaPreviewUrl : null,
     loading,
+    pdfPreviewUrl: isPdf ? mediaPreviewUrl : null,
     setContent,
     videoPreviewUrl: isVideo ? mediaPreviewUrl : null,
   };

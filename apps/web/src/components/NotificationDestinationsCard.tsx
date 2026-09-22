@@ -2,16 +2,21 @@ import type {
   NotificationDestinationSummary,
   NotificationDestinationWithSecret,
 } from "@nakama/core/contract";
+import { Button } from "@nakama/ui/button";
+import { ConfirmDialog } from "@nakama/ui/dialog";
+import { Input } from "@nakama/ui/input";
+import { Spinner } from "@nakama/ui/spinner";
+import { cn } from "@nakama/ui/utils";
 import {
   CheckmarkCircle01Icon,
   Copy01Icon,
   Delete02Icon,
   RefreshIcon,
+  ViewIcon,
+  ViewOffIcon,
 } from "hugeicons-react";
-import { useState } from "react";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Spinner } from "@/components/ui/spinner";
+import { useEffect, useState } from "react";
+import { useProfilesQuery } from "@/hooks/use-app-queries";
 import {
   useCreateNotificationDestination,
   useDeleteNotificationDestination,
@@ -23,9 +28,9 @@ import { formatError } from "@/lib/client";
 import {
   buildNotificationWebhookUrl,
   formatTelegramDestinationLabel,
+  maskWebhookApiKey,
   parseTelegramTopicLink,
 } from "@/lib/notification-destinations";
-import { cn } from "@/lib/utils";
 
 function CopyButtonIcon({ copied }: { copied: boolean }) {
   const iconTransition =
@@ -61,12 +66,14 @@ function LatestSecret({
 }) {
   const [copiedCurl, setCopiedCurl] = useState(false);
   const [copiedApiKey, setCopiedApiKey] = useState(false);
+  const [revealed, setRevealed] = useState(false);
 
   if (!latestSecret) {
     return null;
   }
 
   const apiKey = latestSecret.apiKey;
+  const displayApiKey = revealed ? apiKey : maskWebhookApiKey(apiKey);
   const origin = typeof window === "undefined" ? "" : window.location.origin;
   const webhookUrl = buildNotificationWebhookUrl(
     origin,
@@ -110,12 +117,23 @@ function LatestSecret({
           <p className="font-medium text-foreground text-sm">
             Latest webhook credentials ready
           </p>
-          <p className="text-muted-foreground text-xs [text-wrap:pretty]">
-            Copy the curl command, or expand details if you need the raw URL and
-            API key.
-          </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
+          <Button
+            aria-label={revealed ? "Hide API key" : "Reveal API key"}
+            className="min-w-[6.75rem] justify-center"
+            onClick={() => setRevealed((current) => !current)}
+            size="sm"
+            type="button"
+            variant="outline"
+          >
+            {revealed ? (
+              <ViewOffIcon className="size-3.5" />
+            ) : (
+              <ViewIcon className="size-3.5" />
+            )}
+            {revealed ? "Hide" : "Reveal"}
+          </Button>
           <Button
             className="min-w-[6.75rem] justify-center"
             onClick={() => void copyCurlExample()}
@@ -153,13 +171,13 @@ function LatestSecret({
           <div>
             <p className="text-muted-foreground text-xs">API key</p>
             <code className="block break-all text-foreground text-xs">
-              {apiKey}
+              {displayApiKey}
             </code>
           </div>
           <div>
             <p className="text-muted-foreground text-xs">Example curl</p>
             <pre className="mt-1 overflow-x-auto rounded-md border border-border bg-background p-3 text-foreground text-xs">
-              <code>{curlExample}</code>
+              <code>{curlExample.replace(apiKey, displayApiKey)}</code>
             </pre>
           </div>
         </div>
@@ -169,11 +187,15 @@ function LatestSecret({
 }
 
 export function NotificationDestinationsCard() {
+  const { data: profiles = [] } = useProfilesQuery();
+  const [profileId, setProfileId] = useState("");
   const { data, isLoading, error } = useNotificationDestinations();
   const createMutation = useCreateNotificationDestination();
   const rotateMutation = useRegenerateNotificationDestinationKey();
   const deleteMutation = useDeleteNotificationDestination();
   const updateMutation = useUpdateNotificationDestination();
+  const [deleteTarget, setDeleteTarget] =
+    useState<NotificationDestinationSummary | null>(null);
 
   const [name, setName] = useState("");
   const [topicLink, setTopicLink] = useState("");
@@ -185,6 +207,20 @@ export function NotificationDestinationsCard() {
   const [editingError, setEditingError] = useState<string | null>(null);
 
   const destinations = data?.destinations ?? [];
+
+  useEffect(() => {
+    if (!latestSecret) {
+      return;
+    }
+
+    const timer = window.setTimeout(() => {
+      setLatestSecret(null);
+    }, 60_000);
+
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, [latestSecret]);
 
   function resetForm() {
     setName("");
@@ -208,6 +244,7 @@ export function NotificationDestinationsCard() {
         name: name.trim() || `Telegram topic ${parsedTopic.topicId}`,
         telegram: {
           chatId: parsedTopic.chatId,
+          profileId,
           topicId: parsedTopic.topicId,
         },
       },
@@ -238,17 +275,10 @@ export function NotificationDestinationsCard() {
 
   async function handleDelete(destinationId: string) {
     setFormError(null);
-
-    deleteMutation.mutate(destinationId, {
-      onError: (mutationError) => {
-        setFormError(formatError(mutationError));
-      },
-      onSuccess: () => {
-        if (latestSecret?.destination.id === destinationId) {
-          setLatestSecret(null);
-        }
-      },
-    });
+    await deleteMutation.mutateAsync(destinationId);
+    if (latestSecret?.destination.id === destinationId) {
+      setLatestSecret(null);
+    }
   }
 
   function startEditing(destination: (typeof destinations)[number]) {
@@ -285,6 +315,7 @@ export function NotificationDestinationsCard() {
           name: destination.name,
           telegram: {
             chatId: destination.telegram.chatId,
+            profileId: profileId || destination.telegram.profileId,
             ...(parsedTopicId === null ? {} : { topicId: parsedTopicId }),
           },
         },
@@ -301,48 +332,59 @@ export function NotificationDestinationsCard() {
   }
 
   return (
-    <div className="space-y-4 py-4">
-      <div className="space-y-1">
-        <p className="font-medium text-foreground text-sm [text-wrap:balance]">
-          Notification Destinations
+    <div className="space-y-8">
+      <label className="flex flex-col gap-2 text-sm">
+        Agent
+        <select
+          className="rounded-md border bg-background p-2"
+          onChange={(event) => setProfileId(event.target.value)}
+          value={profileId}
+        >
+          <option value="">Choose an agent</option>
+          {profiles.map((profile) => (
+            <option key={profile.id} value={profile.id}>
+              {profile.name}
+            </option>
+          ))}
+        </select>
+      </label>
+      <div className="divide-y divide-border overflow-hidden rounded-xl border border-border bg-card">
+        <p className="px-4 py-3 font-medium text-foreground text-sm">
+          Notification destinations
         </p>
-      </div>
-
-      <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_minmax(0,2fr)]">
-        <label className="flex flex-col gap-1.5">
-          <span className="text-muted-foreground text-xs">Name</span>
+        <label className="flex flex-col gap-3 px-4 py-3 sm:flex-row sm:items-center">
+          <span className="shrink-0 text-foreground text-sm sm:w-36">Name</span>
           <Input
+            className="min-w-0 flex-1"
             onChange={(event) => setName(event.target.value)}
             value={name}
           />
         </label>
-        <label className="flex flex-col gap-1.5">
-          <span className="text-muted-foreground text-xs">
+        <label className="flex flex-col gap-3 px-4 py-3 sm:flex-row sm:items-start">
+          <span className="shrink-0 text-foreground text-sm sm:w-36 sm:pt-2">
             Telegram topic link
           </span>
-          <Input
-            onChange={(event) => setTopicLink(event.target.value)}
-            placeholder="https://t.me/c/3734526664/167"
-            value={topicLink}
-          />
+          <div className="min-w-0 flex-1 space-y-2">
+            <Input
+              onChange={(event) => setTopicLink(event.target.value)}
+              placeholder="https://t.me/c/3734526664/167"
+              value={topicLink}
+            />
+            <p className="text-muted-foreground text-xs">
+              Paste the topic link from Telegram.
+            </p>
+          </div>
         </label>
-      </div>
-
-      <div className="rounded-lg border border-border border-dashed bg-muted/20 p-3 text-muted-foreground text-xs">
-        Open the Telegram topic, copy its link, and paste it here. Nakama will
-        extract the Chat ID and Topic ID for you automatically.
-      </div>
-
-      <div className="flex flex-wrap items-center gap-3">
-        <Button
-          className="min-w-[10.5rem] justify-center"
-          disabled={createMutation.isPending}
-          onClick={handleCreate}
-        >
-          {createMutation.isPending ? <Spinner className="size-4" /> : null}
-          Create destination
-        </Button>
-        <span className="text-muted-foreground text-xs">Channel: Telegram</span>
+        <div className="flex justify-end px-4 py-3">
+          <Button
+            disabled={createMutation.isPending}
+            onClick={handleCreate}
+            size="sm"
+          >
+            {createMutation.isPending ? <Spinner className="size-4" /> : null}
+            Create destination
+          </Button>
+        </div>
       </div>
 
       {formError ? (
@@ -358,7 +400,7 @@ export function NotificationDestinationsCard() {
             <Spinner className="size-5" />
           </div>
         ) : destinations.length === 0 ? (
-          <div className="rounded-lg border border-border border-dashed p-4 text-muted-foreground text-sm">
+          <div className="rounded-xl border border-border bg-card px-4 py-8 text-center text-muted-foreground text-sm">
             No notification destinations yet.
           </div>
         ) : (
@@ -371,7 +413,7 @@ export function NotificationDestinationsCard() {
               editingTopicId={editingTopicId}
               key={destination.id}
               latestSecret={latestSecret}
-              onDelete={() => handleDelete(destination.id)}
+              onDelete={() => setDeleteTarget(destination)}
               onEditingTopicIdChange={setEditingTopicId}
               onRotate={() => handleRotate(destination.id)}
               onSaveTopic={() => handleUpdateTopic(destination)}
@@ -383,6 +425,14 @@ export function NotificationDestinationsCard() {
           ))
         )}
       </div>
+      {deleteTarget ? (
+        <ConfirmDialog
+          description={`Delete "${deleteTarget.name}"? Its webhook will stop accepting notifications.`}
+          onClose={() => setDeleteTarget(null)}
+          onConfirm={() => handleDelete(deleteTarget.id)}
+          title="Delete notification destination?"
+        />
+      ) : null}
     </div>
   );
 }
@@ -421,7 +471,7 @@ function NotificationDestinationItem({
   const isEditing = editingId === destination.id;
 
   return (
-    <div className="space-y-3 rounded-3xl border border-border p-4">
+    <div className="space-y-3 rounded-xl border border-border bg-card p-4">
       <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
         <div className="min-w-0 space-y-1">
           <p className="font-medium text-foreground text-sm">
@@ -511,7 +561,7 @@ function NotificationDestinationItem({
       ) : null}
 
       {latestSecret?.destination.id === destination.id ? (
-        <LatestSecret latestSecret={latestSecret} />
+        <LatestSecret key={latestSecret.apiKey} latestSecret={latestSecret} />
       ) : null}
     </div>
   );

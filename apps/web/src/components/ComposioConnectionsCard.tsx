@@ -7,20 +7,22 @@ import type {
   ProfileSummary,
   UpdateProfileComposioToolkitsRequest,
 } from "@nakama/core/contract";
+import { Button } from "@nakama/ui/button";
+import { ConfirmDialog } from "@nakama/ui/dialog";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@nakama/ui/dropdown-menu";
+import { Input } from "@nakama/ui/input";
+import { cn } from "@nakama/ui/utils";
 import { useQueries } from "@tanstack/react-query";
 import { MoreHorizontalIcon, Search01Icon } from "hugeicons-react";
 import { useDeferredValue, useMemo, useState } from "react";
 import { ComposioProfileAssignPicker } from "@/components/ComposioProfileAssignPicker";
 import { ComposioToolkitLogo } from "@/components/ComposioToolkitLogo";
 import { IntegrationCardShell } from "@/components/integration-settings.shared";
-import { Button } from "@/components/ui/button";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
-import { Input } from "@/components/ui/input";
 import { useAuth } from "@/context/use-auth";
 import { useProfilesQuery } from "@/hooks/use-app-queries";
 import {
@@ -35,7 +37,6 @@ import {
   useUpdateProfileComposioToolkitsMutation,
 } from "@/hooks/use-composio";
 import { formatError } from "@/lib/client";
-import { cn } from "@/lib/utils";
 
 const CATALOG_PAGE_SIZE = 15;
 const EMPTY_PROFILES: ProfileSummary[] = [];
@@ -979,6 +980,7 @@ function ComposioConnectionsReady({
   embedded: boolean;
   state: ReturnType<typeof useComposioConnectionsState>;
 }) {
+  const [disconnectTarget, setDisconnectTarget] = useState<string | null>(null);
   const data = state.toolkitsQuery.data;
   const configured =
     state.settings?.configured === true || data?.configured === true;
@@ -1017,12 +1019,23 @@ function ComposioConnectionsReady({
         isOrgAdmin={state.isOrgAdmin}
         onConnect={(slug) => state.connectMutation.mutate(slug)}
         onDisable={(slug) => state.disableMutation.mutate(slug)}
-        onDisconnect={(slug) => state.disconnectMutation.mutate(slug)}
+        onDisconnect={setDisconnectTarget}
         onEnable={(slug) => state.enableMutation.mutate(slug)}
         onSync={(slug) => state.syncMutation.mutate(slug)}
         onToggleProfile={state.toggleProfileAssignment}
         profiles={state.profiles}
       />
+      {disconnectTarget ? (
+        <ConfirmDialog
+          confirmLabel="Disconnect"
+          description={`Disconnect ${disconnectTarget}? You will need to reconnect to use this account again.`}
+          onClose={() => setDisconnectTarget(null)}
+          onConfirm={() =>
+            state.disconnectMutation.mutateAsync(disconnectTarget)
+          }
+          title="Disconnect toolkit?"
+        />
+      ) : null}
     </IntegrationCardShell>
   );
 }

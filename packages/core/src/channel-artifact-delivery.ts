@@ -1,6 +1,7 @@
 import {
   type ChannelArtifactRef,
   extractPairedTurnArtifacts,
+  isScratchArtifactPath,
 } from "./channel-artifacts";
 import type { ChatMessage } from "./contract";
 
@@ -17,7 +18,7 @@ export interface PublishArtifactShareResult {
 }
 
 const ATTACH_NOUN =
-  "file|document|attachment|artifact|pdf|csv|zip|image|photo|screenshot|report|deck";
+  "file|document|attachment|artifact|pdf|csv|zip|image|photo|screenshot|report|deck|dokumen|lampiran|laporan";
 
 /** Phrase matching for Telegram (and legacy callers). Discord natural-language
  * sends use the send_discord_artifact tool instead. */
@@ -32,6 +33,8 @@ const ATTACH_INTENT_PATTERNS = [
   ),
   /\bsend\s+(?:me\s+)?(?:the\s+)?\S+\.(?:pdf|csv|png|jpe?g|gif|webp|zip|txt|md)\b/i,
   /\battach\s+it\b/i,
+  /\bsend\s+it\s+(?:to\s+(?:this|the)\s+(?:group|chat)|here)\b/i,
+  new RegExp(String.raw`\bkirim(?:kan)?\s+(?:${ATTACH_NOUN})(?:nya)?\b`, "i"),
   /^\/attach(?:@\w+)?(?:\s|$)/i,
 ];
 
@@ -43,9 +46,31 @@ export interface ListedArtifactCandidate {
   updatedAt: string;
 }
 
+const FRESHNESS_MARKERS =
+  "harian|hari\\s+ini|terbaru|today|daily|latest|yang\\s+baru|update|diperbarui";
+
+const FILENAME_TOKEN = /\S+\.[a-z0-9]{2,5}\b/gi;
+
+export function isFreshReportRequest(text: string): boolean {
+  // Filenames can carry a marker word (`daily-report.csv`, `update-harga.csv`)
+  // and those requests still want the file itself, not a fresh agent turn.
+  const normalized = text.trim().replace(FILENAME_TOKEN, " ");
+  if (!normalized) {
+    return false;
+  }
+
+  return new RegExp(String.raw`\b(?:${FRESHNESS_MARKERS})\b`, "i").test(
+    normalized
+  );
+}
+
 export function isAttachIntent(text: string): boolean {
   const normalized = text.trim();
   if (!normalized) {
+    return false;
+  }
+
+  if (/\b(?:jangan|tidak\s+usah)\s+kirim(?:kan)?\b/i.test(normalized)) {
     return false;
   }
 
@@ -218,7 +243,9 @@ export async function deliverTurnArtifactShares(input: {
   };
 }): Promise<DeliverableChannelArtifact[]> {
   const messages = await input.session.getMessages();
-  const paired = extractPairedTurnArtifacts(messages);
+  const paired = extractPairedTurnArtifacts(messages).filter(
+    (artifact) => !isScratchArtifactPath(artifact.path)
+  );
   if (paired.length === 0) {
     return [];
   }

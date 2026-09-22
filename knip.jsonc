@@ -2,17 +2,60 @@
   "$schema": "https://unpkg.com/knip@6/schema-jsonc.json",
   // First-run baseline: teach the graph, then ignore leftovers instead of deleting unused code.
   "workspaces": {
+    "packages/telegram-manager": {
+      // Generated JavaScript is shipped for Git installs; analyze its TypeScript source.
+      "ignore": ["dist/**"]
+    },
+    "packages/plugins/google-meet": {
+      "entry": [
+        "src/actions.ts",
+        "src/worker.ts",
+        "src/ui.tsx",
+        "actions/actions.js",
+        "workers/meet.js",
+        "ui/app.js",
+        "extension/background.js",
+        "extension/content.js",
+        "extension/microphone.js",
+        "extension/offscreen.js",
+        "extension/popup.js"
+      ]
+    },
+    "apps/desktop": {
+      "entry": ["preload.cjs", "tests/smoke.mjs"],
+      // The packaged runtime copies workspace sources and generated declarations.
+      "ignore": ["dist/**"],
+      // PowerShell 7 is supplied by the Windows build host.
+      "ignoreBinaries": ["pwsh"],
+      "project": ["*.mjs", "*.cjs", "tests/*.mjs", "scripts/*.mjs"]
+    },
+    "packages/plugins/supermemory": {
+      "entry": [
+        "src/worker.ts",
+        "workers/server.js",
+        "src/actions.ts",
+        "src/ui.tsx",
+        "actions/actions.js",
+        "ui/app.js"
+      ]
+    },
+    "packages/plugins/workflows": {
+      "entry": [
+        "src/actions.ts",
+        "src/ui.tsx",
+        "actions/actions.js",
+        "ui/app.js"
+      ]
+    },
     "apps/server": {
       "entry": ["src/index.ts", "scripts/*.ts"]
     },
     "apps/web": {
-      "entry": ["src/shims/*.ts"]
+      "entry": ["src/shims/*.ts", "sw/service-worker.ts"]
     },
     // Not in package.json#workspaces; Knip would skip it otherwise.
     "docs/website": {}
   },
-  // Leftover unused deps: Biome via Ultracite.
-  "ignoreDependencies": ["@biomejs/biome"],
   // Type-only import Knip cannot resolve.
   "ignoreUnresolved": ["../../services/auth-service"],
   // Leftover unused exports/types/duplicates on the current tree. New files still fail.
@@ -26,16 +69,12 @@
     "apps/server/src/providers/compatible-models.ts": ["exports"],
     "apps/server/src/providers/anthropic/index.ts": ["exports"],
     "apps/server/src/providers/models.ts": ["exports"],
-    "apps/server/src/providers/shared.ts": ["exports"],
     "apps/server/src/providers/usage-tracking.ts": ["exports", "types"],
     "apps/server/src/http/org-guards.ts": ["exports"],
     "apps/server/src/http/public-routes.ts": ["exports"],
     "apps/server/src/services/skills-service.ts": ["exports"],
     "apps/server/src/services/coding-agent-bash-env.ts": ["exports"],
-    "apps/server/src/services/coding-agent-harness-service.ts": [
-      "exports",
-      "types"
-    ],
+    "apps/server/src/services/coding-agent-harness-service.ts": ["exports"],
     "apps/server/src/services/coding-agent-spawn-env.ts": ["exports"],
     "apps/server/src/services/composio-api-client.ts": ["exports", "types"],
     "apps/server/src/services/data-portability.ts": ["exports"],
@@ -96,11 +135,11 @@
     "apps/web/src/hooks/use-timezones.ts": ["exports"],
     "apps/web/src/hooks/use-resource-mutations.ts": ["exports"],
     "apps/web/src/lib/demo-login.ts": ["exports"],
-    "apps/web/src/components/ui/card.tsx": ["exports"],
-    "apps/web/src/components/ui/input-group.tsx": ["exports"],
+    "packages/ui/src/card.tsx": ["exports"],
+    "packages/ui/src/input-group.tsx": ["exports"],
     "apps/server/src/services/timezone-city-aliases.ts": ["exports"],
-    "apps/web/src/components/ui/command.tsx": ["exports"],
-    "apps/web/src/components/ui/dialog.tsx": ["exports"],
+    "packages/ui/src/command.tsx": ["exports"],
+    "packages/ui/src/dialog.tsx": ["exports"],
     "apps/web/src/pages/automations/automations-page.shared.ts": ["exports"],
     "apps/web/src/hooks/use-composio.ts": ["exports"],
     "apps/web/src/hooks/use-system-status.ts": ["exports"],
@@ -142,7 +181,6 @@
     "apps/web/src/components/FireworksModelsBrowseList.tsx": ["types"],
     "apps/web/src/components/ModelBrowseShell.tsx": ["types"],
     "apps/web/src/lib/thinking-settings.ts": ["duplicates"],
-    "packages/core/src/email-config.ts": ["duplicates"],
     "docs/website/mdx-components.tsx": ["unlisted"]
   }
 }

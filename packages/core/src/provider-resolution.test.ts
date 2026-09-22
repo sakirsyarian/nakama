@@ -1,4 +1,7 @@
 import { describe, expect, test } from "bun:test";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   apiKeyEnvVarForProvider,
   defaultDiscoveryBaseUrl,
@@ -16,13 +19,23 @@ describe("parseProviderName", () => {
     expect(parseProviderName("openai_compatible")).toBe("openai_compatible");
     expect(parseProviderName("opencode_go")).toBe("opencode_go");
     expect(parseProviderName("deepseek")).toBe("deepseek");
+    expect(parseProviderName("doubao")).toBe("doubao");
+    expect(parseProviderName("mistral")).toBe("mistral");
+    expect(parseProviderName("perplexity")).toBe("perplexity");
     expect(parseProviderName("cerebras")).toBe("cerebras");
     expect(parseProviderName("fireworks")).toBe("fireworks");
     expect(parseProviderName("minimax")).toBe("minimax");
     expect(parseProviderName("minimax_cn")).toBe("minimax_cn");
     expect(parseProviderName("zhipu")).toBe("zhipu");
     expect(parseProviderName("zhipu_cn")).toBe("zhipu_cn");
+    expect(parseProviderName("moonshot")).toBe("moonshot");
+    expect(parseProviderName("moonshot_cn")).toBe("moonshot_cn");
     expect(parseProviderName("xai")).toBe("xai");
+    expect(parseProviderName("together")).toBe("together");
+    expect(parseProviderName("qwen")).toBe("qwen");
+    expect(parseProviderName("qwen_cn")).toBe("qwen_cn");
+    expect(parseProviderName("vercel_ai_gateway")).toBe("vercel_ai_gateway");
+    expect(parseProviderName("xiaomi")).toBe("xiaomi");
   });
 
   test("rejects unknown values", () => {
@@ -69,6 +82,41 @@ describe("resolveProvider", () => {
     expect(provider).toBe("gemini");
   });
 
+  test("uses an API key mounted through a companion file variable", () => {
+    const directory = mkdtempSync(join(tmpdir(), "nakama-provider-key-"));
+    const keyPath = join(directory, "gemini");
+    writeFileSync(keyPath, "mounted-secret\n");
+
+    try {
+      expect(
+        resolveProvider({
+          env: { GEMINI_API_KEY_FILE: keyPath },
+        })
+      ).toBe("gemini");
+    } finally {
+      rmSync(directory, { force: true, recursive: true });
+    }
+  });
+
+  test("prefers a direct API key over its companion file", () => {
+    expect(
+      resolveProvider({
+        env: {
+          GEMINI_API_KEY: "direct-secret",
+          GEMINI_API_KEY_FILE: "/missing/secret",
+        },
+      })
+    ).toBe("gemini");
+  });
+
+  test("fails when a configured API key file cannot be read", () => {
+    expect(() =>
+      resolveProvider({
+        env: { GEMINI_API_KEY_FILE: "/missing/secret" },
+      })
+    ).toThrow();
+  });
+
   test("returns null when multiple env API keys are set", () => {
     const provider = resolveProvider({
       env: {
@@ -94,6 +142,88 @@ describe("resolveProvider deepseek", () => {
     });
 
     expect(provider).toBeNull();
+  });
+});
+
+describe("resolveProvider together", () => {
+  test("auto-resolves Together when it is the only env API key", () => {
+    const provider = resolveProvider({
+      env: {
+        TOGETHER_API_KEY: "tg-test",
+      },
+    });
+
+    expect(provider).toBe("together");
+  });
+});
+
+describe("resolveProvider qwen", () => {
+  test("auto-resolves Qwen intl when it is the only env API key", () => {
+    const provider = resolveProvider({
+      env: {
+        QWEN_API_KEY: "qwen-test",
+      },
+    });
+
+    expect(provider).toBe("qwen");
+  });
+
+  test("auto-resolves Qwen CN when it is the only env API key", () => {
+    const provider = resolveProvider({
+      env: {
+        QWEN_CN_API_KEY: "qwen-cn-test",
+      },
+    });
+
+    expect(provider).toBe("qwen_cn");
+  });
+});
+
+describe("resolveProvider vercel_ai_gateway", () => {
+  test("auto-resolves Vercel AI Gateway when it is the only env API key", () => {
+    const provider = resolveProvider({
+      env: {
+        VERCEL_AI_GATEWAY_API_KEY: "vgw-test",
+      },
+    });
+
+    expect(provider).toBe("vercel_ai_gateway");
+  });
+});
+
+describe("resolveProvider mistral", () => {
+  test("auto-resolves Mistral when it is the only env API key", () => {
+    const provider = resolveProvider({
+      env: {
+        MISTRAL_API_KEY: "ms-test",
+      },
+    });
+
+    expect(provider).toBe("mistral");
+  });
+});
+
+describe("resolveProvider doubao", () => {
+  test("auto-resolves Doubao when it is the only env API key", () => {
+    const provider = resolveProvider({
+      env: {
+        DOUBAO_API_KEY: "db-test",
+      },
+    });
+
+    expect(provider).toBe("doubao");
+  });
+});
+
+describe("resolveProvider perplexity", () => {
+  test("auto-resolves Perplexity when it is the only env API key", () => {
+    const provider = resolveProvider({
+      env: {
+        PERPLEXITY_API_KEY: "pplx-test",
+      },
+    });
+
+    expect(provider).toBe("perplexity");
   });
 });
 
@@ -129,12 +259,21 @@ describe("isDiscoveryModelProvider", () => {
     expect(isDiscoveryModelProvider("zhipu")).toBe(true);
     expect(isDiscoveryModelProvider("zhipu_cn")).toBe(true);
     expect(isDiscoveryModelProvider("xai")).toBe(true);
+    expect(isDiscoveryModelProvider("moonshot")).toBe(true);
+    expect(isDiscoveryModelProvider("moonshot_cn")).toBe(true);
   });
 
   test("excludes catalog providers", () => {
     expect(isDiscoveryModelProvider("deepseek")).toBe(false);
+    expect(isDiscoveryModelProvider("doubao")).toBe(false);
+    expect(isDiscoveryModelProvider("together")).toBe(false);
+    expect(isDiscoveryModelProvider("vercel_ai_gateway")).toBe(false);
+    expect(isDiscoveryModelProvider("mistral")).toBe(false);
+    expect(isDiscoveryModelProvider("qwen")).toBe(false);
+    expect(isDiscoveryModelProvider("qwen_cn")).toBe(false);
     expect(isDiscoveryModelProvider("openai")).toBe(false);
     expect(isDiscoveryModelProvider("opencode_go")).toBe(false);
+    expect(isDiscoveryModelProvider("xiaomi")).toBe(false);
   });
 });
 
@@ -152,10 +291,28 @@ describe("defaultDiscoveryBaseUrl", () => {
     expect(defaultDiscoveryBaseUrl("zhipu_cn")).toBe(
       "https://open.bigmodel.cn/api/paas/v4"
     );
+    expect(defaultDiscoveryBaseUrl("moonshot")).toBe(
+      "https://api.moonshot.ai/v1"
+    );
+    expect(defaultDiscoveryBaseUrl("moonshot_cn")).toBe(
+      "https://api.moonshot.cn/v1"
+    );
   });
 
   test("returns null when the family has no fixed default", () => {
     expect(defaultDiscoveryBaseUrl("openai_compatible")).toBeNull();
     expect(defaultDiscoveryBaseUrl("deepseek")).toBeNull();
+  });
+});
+
+describe("resolveProvider xiaomi", () => {
+  test("auto-resolves Xiaomi MiMo when it is the only env API key", () => {
+    const provider = resolveProvider({
+      env: {
+        XIAOMI_API_KEY: "xm-test",
+      },
+    });
+
+    expect(provider).toBe("xiaomi");
   });
 });

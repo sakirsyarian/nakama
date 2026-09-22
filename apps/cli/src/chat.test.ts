@@ -14,9 +14,12 @@ import {
   formatErrorLines,
   formatSoulStatusLines,
   formatStatusLines,
+  formatToolCall,
   isEscInterruptKey,
   needsTrailingStreamNewline,
+  previewToolValue,
   runCleanupThenExit,
+  toolResultFailed,
 } from "./chat";
 
 describe("needsTrailingStreamNewline", () => {
@@ -90,6 +93,42 @@ describe("formatBusyDropLine", () => {
   });
 });
 
+describe("tool rendering", () => {
+  test("shows a compact summary without raw arguments and fits the terminal", () => {
+    const input = { command: "bun test\n--coverage", secret: "hidden" };
+    expect(formatToolCall("bash", input, "done", 400, 80)).toBe(
+      "✓ bash bun test --coverage  0.4s"
+    );
+    expect(
+      formatToolCall(
+        "read_file",
+        { path: "src/chat.ts" },
+        "running",
+        undefined,
+        80
+      )
+    ).toBe("⠋ read_file src/chat.ts");
+    expect(
+      formatToolCall("bash", input, "error", 400, 20).length
+    ).toBeLessThanOrEqual(18);
+    expect(
+      formatToolCall("custom", { secret: "hidden" }, "done", undefined, 80)
+    ).toBe("✓ custom");
+  });
+
+  test("previews tool values without flooding the terminal", () => {
+    expect(previewToolValue({ query: "hello" })).toBe('{"query":"hello"}');
+    expect(previewToolValue("line\none")).toBe("line one");
+    expect(previewToolValue("x".repeat(200))).toHaveLength(160);
+  });
+
+  test("detects failed tool results", () => {
+    expect(toolResultFailed({ isError: true })).toBe(true);
+    expect(toolResultFailed({ error: "failed" })).toBe(true);
+    expect(toolResultFailed({ content: "ok" })).toBe(false);
+  });
+});
+
 describe("formatStatusLines", () => {
   const health: HealthResponse = {
     apiVersion: 1,
@@ -98,7 +137,7 @@ describe("formatStatusLines", () => {
     ok: true,
     providerConfigured: true,
     userConfigured: true,
-    version: "0.4.8",
+    version: "0.4.10",
   };
   const models: ModelsResponse = {
     currentProviderId: "provider-a",

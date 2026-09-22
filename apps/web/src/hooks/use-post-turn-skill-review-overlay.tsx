@@ -12,9 +12,31 @@ import {
   useSkillSuggestions,
 } from "@/hooks/use-skill-suggestions";
 import { formatError } from "@/lib/client";
+import { canAccessSystemPage } from "@/lib/navigation";
 
 const POST_TURN_POLL_WINDOW_MS = 45_000;
 const POST_TURN_POLL_INTERVAL_MS = 3000;
+
+/**
+ * Which channels the post-turn skill-review overlay polls. Total over
+ * `AgentChannel` so a new channel fails the typecheck here rather than
+ * silently skipping (#474 / #798).
+ *
+ * `web` and `cli`: poll — a cli session opens in the web chat route with
+ * `sessionChannel === "cli"` (history listing is separate; see #910).
+ * telegram/whatsapp/discord: false — read-only in web, so apply is blocked
+ * anyway. automation/task/subagent: false — server does not review them.
+ */
+const POST_TURN_OVERLAY_POLL_CHANNEL = {
+  automation: false,
+  cli: true,
+  discord: false,
+  subagent: false,
+  task: false,
+  telegram: false,
+  web: true,
+  whatsapp: false,
+} as const satisfies Record<AgentChannel, boolean>;
 
 interface UsePostTurnSkillReviewOverlayArgs {
   lastSuccessfulTurnAt: number | null;
@@ -26,14 +48,12 @@ interface UsePostTurnSkillReviewOverlayArgs {
 
 function canPollPostTurnReview({
   activeOrgId,
-  activeOrgRole,
   readOnlySession,
   reviewEnabled,
   sessionChannel,
   sessionId,
 }: {
   activeOrgId?: string;
-  activeOrgRole?: string;
   readOnlySession: boolean;
   reviewEnabled: boolean;
   sessionChannel: AgentChannel;
@@ -43,9 +63,8 @@ function canPollPostTurnReview({
     reviewEnabled &&
     Boolean(activeOrgId) &&
     Boolean(sessionId) &&
-    sessionChannel === "web" &&
-    !readOnlySession &&
-    activeOrgRole !== "viewer"
+    POST_TURN_OVERLAY_POLL_CHANNEL[sessionChannel] &&
+    !readOnlySession
   );
 }
 
@@ -118,19 +137,24 @@ export function usePostTurnSkillReviewOverlay({
   lastSuccessfulTurnAt,
   readOnlySession,
 }: UsePostTurnSkillReviewOverlayArgs) {
-  const { activeOrg } = useAuth();
+  const { activeOrg, user } = useAuth();
   const reviewEnabled = resolveProfileOrgBooleanOverride(
     profile?.skillsPostTurnReview ?? null,
     activeOrg?.skillsPostTurnReview ?? false
   );
-  const canPoll = canPollPostTurnReview({
-    activeOrgId: activeOrg?.id,
-    activeOrgRole: activeOrg?.role,
-    readOnlySession,
-    reviewEnabled,
-    sessionChannel,
-    sessionId,
-  });
+  const canReview = canAccessSystemPage(
+    user?.isPlatformAdmin === true,
+    activeOrg?.role
+  );
+  const canPoll =
+    canReview &&
+    canPollPostTurnReview({
+      activeOrgId: activeOrg?.id,
+      readOnlySession,
+      reviewEnabled,
+      sessionChannel,
+      sessionId,
+    });
   const polling = usePostTurnPolling(canPoll, lastSuccessfulTurnAt);
   const pollQuery = {
     enabled: canPoll,
@@ -154,23 +178,39 @@ export function usePostTurnSkillReviewOverlay({
       ),
     [proposalsQuery.data?.proposals, sessionId]
   );
+  const [dismissedIds, setDismissedIds] = useState<readonly string[]>([]);
+  const dismissed = new Set(dismissedIds);
+  const visibleSuggestions = suggestions.filter(
+    (suggestion) => !dismissed.has(`${sessionId}:suggestion:${suggestion.id}`)
+  );
+  const visibleProposals = pendingProposals.filter(
+    (proposal) => !dismissed.has(`${sessionId}:proposal:${proposal.id}`)
+  );
   const showBanner =
-    canPoll && (suggestions.length > 0 || pendingProposals.length > 0);
+    canPoll && (visibleSuggestions.length > 0 || visibleProposals.length > 0);
 
   const banner = showBanner ? (
     <SkillPostTurnReviewBanner
       applyErrorById={applyErrorById}
       applyStateById={applyStateById}
-      canApply={activeOrg?.role !== "viewer"}
-      isOrgAdmin={activeOrg?.role === "admin"}
       onApply={(id) =>
         void handleApply(id, () => {
           void suggestionsQuery.refetch();
           void proposalsQuery.refetch();
         })
       }
-      pendingProposals={pendingProposals}
-      suggestions={suggestions}
+      onDismiss={(id) => {
+        if (!sessionId) {
+          return;
+        }
+        setDismissedIds((current) =>
+          current.includes(`${sessionId}:${id}`)
+            ? current
+            : [...current, `${sessionId}:${id}`]
+        );
+      }}
+      pendingProposals={visibleProposals}
+      suggestions={visibleSuggestions}
     />
   ) : null;
 

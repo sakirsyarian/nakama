@@ -1,6 +1,4 @@
-import { CodeIcon, Delete02Icon } from "hugeicons-react";
-import { useState } from "react";
-import { Button } from "@/components/ui/button";
+import { Button } from "@nakama/ui/button";
 import {
   Dialog,
   DialogContent,
@@ -8,14 +6,16 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
-} from "@/components/ui/dialog";
+} from "@nakama/ui/dialog";
 import {
   InputGroup,
   InputGroupAddon,
   InputGroupButton,
   InputGroupInput,
-} from "@/components/ui/input-group";
-import { Textarea } from "@/components/ui/textarea";
+} from "@nakama/ui/input-group";
+import { Textarea } from "@nakama/ui/textarea";
+import { CodeIcon, Delete02Icon } from "hugeicons-react";
+import { useState } from "react";
 import { useSaveTelegramSettings } from "@/hooks/use-app-queries";
 import { formatError } from "@/lib/client";
 import {
@@ -49,11 +49,18 @@ export function TelegramAllowedUsersDialog({
   const [importDraft, setImportDraft] = useState("");
   const [importError, setImportError] = useState<string | null>(null);
   const [formError, setFormError] = useState<string | null>(null);
+  const [removeTarget, setRemoveTarget] = useState<AllowedTelegramUser | null>(
+    null
+  );
 
   function saveAllowedUsers(
     nextUsers: AllowedTelegramUser[],
     afterSuccess?: () => void
   ) {
+    // Optimistic, so a failed save has to put the old list back. Otherwise the
+    // dialog shows a user as removed while the bot still answers them, which is
+    // the wrong direction to be wrong in for an access list.
+    const previousUsers = allowedUsers;
     onAllowedUsersChange(nextUsers);
     setFormError(null);
 
@@ -64,6 +71,7 @@ export function TelegramAllowedUsersDialog({
       },
       {
         onError: (err) => {
+          onAllowedUsersChange(previousUsers);
           const message = formatError(err);
           setFormError(message);
           onError?.(message);
@@ -134,7 +142,16 @@ export function TelegramAllowedUsersDialog({
     });
   }
 
-  function removeAllowedUserId(id: string) {
+  function confirmRemoveAllowedUser() {
+    if (!removeTarget) {
+      return;
+    }
+
+    const id = removeTarget.id;
+    // Closed before the save resolves on purpose: a failed save rolls the list
+    // back and renders its error in the dialog underneath, which nobody can
+    // read through an open confirm.
+    setRemoveTarget(null);
     saveAllowedUsers(allowedUsers.filter((entry) => entry.id !== id));
   }
 
@@ -223,7 +240,7 @@ export function TelegramAllowedUsersDialog({
                     <Button
                       aria-label={`Remove Telegram user ID ${user.id}`}
                       disabled={saveMutation.isPending}
-                      onClick={() => removeAllowedUserId(user.id)}
+                      onClick={() => setRemoveTarget(user)}
                       size="icon-sm"
                       type="button"
                       variant="ghost"
@@ -252,27 +269,93 @@ export function TelegramAllowedUsersDialog({
         </DialogContent>
       </Dialog>
 
-      <Dialog onOpenChange={setImportOpen} open={importOpen}>
+      <TelegramUserImportDialog
+        draft={importDraft}
+        error={importError}
+        onApply={handleImportApply}
+        onDraftChange={(value) => {
+          setImportDraft(value);
+          setImportError(null);
+        }}
+        onOpenChange={setImportOpen}
+        open={importOpen}
+        pending={saveMutation.isPending}
+      />
+
+      <Dialog
+        onOpenChange={(next) => !next && setRemoveTarget(null)}
+        open={removeTarget !== null}
+      >
         <DialogContent className="gap-5 p-6 sm:max-w-lg">
           <DialogHeader className="gap-2">
-            <DialogTitle>Import Telegram user</DialogTitle>
+            <DialogTitle>Remove Telegram user</DialogTitle>
             <DialogDescription>
-              Paste raw Telegram update JSON. The sender ID and username will be
-              added.
+              {removeTarget?.username
+                ? `@${removeTarget.username} (${removeTarget.id})`
+                : removeTarget?.id}{" "}
+              loses access to this profile as soon as this is saved.
             </DialogDescription>
           </DialogHeader>
 
-          <Textarea
-            autoFocus
-            className="max-h-48 font-mono text-sm"
-            disabled={saveMutation.isPending}
-            onChange={(event) => {
-              setImportDraft(event.target.value);
-              if (importError) {
-                setImportError(null);
-              }
-            }}
-            placeholder={`{
+          <DialogFooter className="gap-3 border-t-0 bg-transparent p-0 sm:justify-end">
+            <Button
+              onClick={() => setRemoveTarget(null)}
+              type="button"
+              variant="outline"
+            >
+              Cancel
+            </Button>
+            <Button
+              disabled={saveMutation.isPending}
+              onClick={confirmRemoveAllowedUser}
+              type="button"
+              variant="destructive"
+            >
+              Remove
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </>
+  );
+}
+
+function TelegramUserImportDialog({
+  draft,
+  error,
+  onApply,
+  onDraftChange,
+  onOpenChange,
+  open,
+  pending,
+}: {
+  draft: string;
+  error: string | null;
+  onApply: () => void;
+  onDraftChange: (value: string) => void;
+  onOpenChange: (open: boolean) => void;
+  open: boolean;
+  pending: boolean;
+}) {
+  return (
+    <Dialog onOpenChange={onOpenChange} open={open}>
+      <DialogContent className="gap-5 p-6 sm:max-w-lg">
+        <DialogHeader className="gap-2">
+          <DialogTitle>Import Telegram user</DialogTitle>
+          <DialogDescription>
+            Paste raw Telegram update JSON. The sender ID and username will be
+            added.
+          </DialogDescription>
+        </DialogHeader>
+
+        <Textarea
+          autoFocus
+          className="max-h-48 font-mono text-sm"
+          disabled={pending}
+          onChange={(event) => {
+            onDraftChange(event.target.value);
+          }}
+          placeholder={`{
   "message": {
     "from": {
       "id": 213193924,
@@ -280,37 +363,36 @@ export function TelegramAllowedUsersDialog({
     }
   }
 }`}
-            rows={10}
-            value={importDraft}
-          />
+          rows={10}
+          value={draft}
+        />
 
-          {importError ? (
-            <p
-              className="rounded-md bg-destructive/10 px-3 py-2.5 text-destructive text-sm"
-              role="alert"
-            >
-              {importError}
-            </p>
-          ) : null}
+        {error ? (
+          <p
+            className="rounded-md bg-destructive/10 px-3 py-2.5 text-destructive text-sm"
+            role="alert"
+          >
+            {error}
+          </p>
+        ) : null}
 
-          <DialogFooter className="gap-3 border-t-0 bg-transparent p-0 sm:justify-end">
-            <Button
-              onClick={() => setImportOpen(false)}
-              type="button"
-              variant="outline"
-            >
-              Cancel
-            </Button>
-            <Button
-              disabled={saveMutation.isPending || !importDraft.trim()}
-              onClick={handleImportApply}
-              type="button"
-            >
-              Add user
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-    </>
+        <DialogFooter className="gap-3 border-t-0 bg-transparent p-0 sm:justify-end">
+          <Button
+            onClick={() => onOpenChange(false)}
+            type="button"
+            variant="outline"
+          >
+            Cancel
+          </Button>
+          <Button
+            disabled={pending || !draft.trim()}
+            onClick={onApply}
+            type="button"
+          >
+            Add user
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }

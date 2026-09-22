@@ -6,9 +6,11 @@ import {
   type AgentQuestionnaire,
   type AgentTodo,
   type ApiErrorResponse,
+  type ChatUsage,
   formatServerError,
   LOCAL_CLIENT_EMAIL,
   NakamaApiError,
+  reportError,
   resolveChatFirstTokenTimeoutMs,
   resolveChatStreamTimeoutMs,
   type SendMessageInput,
@@ -22,6 +24,7 @@ import type {
 } from "@nakama/db";
 import { ensureLocalClientAccess } from "@nakama/db";
 import type { Context } from "hono";
+import type { ZodType } from "zod";
 import type { AuthService } from "../services/auth-service";
 import { sessionTurnRegistry } from "../services/session-turn-registry";
 import type { AppEnv } from "./types";
@@ -164,7 +167,7 @@ export async function authenticateRequest(
       await ensureLocalClientAccess(databaseAdapter);
       user = await databaseAdapter.getUserByEmail(payload.email);
     }
-    if (!user) {
+    if (!user || user.disabledAt) {
       return null;
     }
 
@@ -190,7 +193,7 @@ export async function authenticateRequest(
           user = await databaseAdapter.getUserByEmail(payload.email);
         }
 
-        if (user) {
+        if (user && !user.disabledAt) {
           return {
             isPlatformAdmin: Boolean(user.isPlatformAdmin),
             mode: "local-token",
@@ -215,7 +218,7 @@ export async function authenticateRequest(
   }
 
   const user = await databaseAdapter.getUserById(session.userId);
-  if (!user) {
+  if (!user || user.disabledAt) {
     return null;
   }
 
@@ -370,15 +373,40 @@ export function assertJsonRequest(request: Request): void {
   }
 }
 
-export async function readJson<T>(request: Request): Promise<T> {
+export async function readJson<T>(
+  request: Request,
+  schema?: ZodType<T>
+): Promise<T> {
   try {
-    return (await request.json()) as T;
+    const body = (await request.json()) as unknown;
+    if (!schema) {
+      return body as T;
+    }
+
+    const parsed = schema.safeParse(body);
+    if (!parsed.success) {
+      throw new NakamaApiError("Invalid request body.", 400);
+    }
+    return parsed.data;
   } catch (err) {
     if (err instanceof SyntaxError) {
       throw new NakamaApiError("Invalid JSON in request body.", 400);
     }
     throw err;
   }
+}
+
+export function parseOptionalQueryEnum<const T extends string>(
+  value: string | undefined,
+  allowed: readonly T[]
+): T | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (allowed.includes(value as T)) {
+    return value as T;
+  }
+  throw new NakamaApiError("Invalid query parameter.", 400);
 }
 
 export async function readOptionalJson<T>(
@@ -411,6 +439,43 @@ export function errorResponse(
   return Response.json(
     { error: message, ...extra } satisfies ApiErrorResponse,
     { status }
+  );
+}
+
+/**
+ * The page an OAuth provider's redirect lands on. A browser gets it, not a
+ * client, so it answers HTML on success and on failure alike.
+ */
+export function oauthResultPage(
+  title: string,
+  detail: string,
+  link: { href: string; label: string },
+  status = 200
+): Response {
+  return new Response(
+    `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>${Bun.escapeHTML(title)} - Nakama</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 32rem; margin: 4rem auto; padding: 0 1.25rem; line-height: 1.5; color: #111; }
+    h1 { font-size: 1.35rem; margin-bottom: 0.5rem; }
+    p { color: #444; }
+    a { color: #0b57d0; }
+  </style>
+</head>
+<body>
+  <h1>${Bun.escapeHTML(title)}</h1>
+  <p>${Bun.escapeHTML(detail)}</p>
+  <p><a href="${Bun.escapeHTML(link.href)}">${Bun.escapeHTML(link.label)}</a></p>
+</body>
+</html>`,
+    {
+      headers: { "Content-Type": "text/html; charset=utf-8" },
+      status,
+    }
   );
 }
 
@@ -469,6 +534,7 @@ function buildAgentStreamHandlers(send: (event: StreamEvent) => void) {
       }),
     onThinking: (delta: string) => send({ delta, type: "thinking" }),
     onToolEnd: (event: {
+      toolGroupId?: string;
       toolCallId: string;
       tool: string;
       result: unknown;
@@ -477,6 +543,7 @@ function buildAgentStreamHandlers(send: (event: StreamEvent) => void) {
         result: event.result,
         tool: event.tool,
         toolCallId: event.toolCallId,
+        toolGroupId: event.toolGroupId,
         type: "tool_end",
       });
 
@@ -497,6 +564,7 @@ function buildAgentStreamHandlers(send: (event: StreamEvent) => void) {
       }
     },
     onToolInputDelta: (event: {
+      toolGroupId?: string;
       toolCallId: string;
       tool: string;
       delta: string;
@@ -507,9 +575,11 @@ function buildAgentStreamHandlers(send: (event: StreamEvent) => void) {
         delta: event.delta,
         tool: event.tool,
         toolCallId: event.toolCallId,
+        toolGroupId: event.toolGroupId,
         type: "tool_input_delta",
       }),
     onToolStart: (event: {
+      toolGroupId?: string;
       toolCallId: string;
       tool: string;
       input: Record<string, unknown>;
@@ -518,8 +588,10 @@ function buildAgentStreamHandlers(send: (event: StreamEvent) => void) {
         input: event.input,
         tool: event.tool,
         toolCallId: event.toolCallId,
+        toolGroupId: event.toolGroupId,
         type: "tool_start",
       }),
+    onUsage: (usage: ChatUsage) => send({ type: "usage", usage }),
   };
 }
 
@@ -679,11 +751,20 @@ export function streamMessage(
           ...(contextUsage ? { contextUsage } : {}),
         });
       } catch (error) {
+        const cancelled = turnSignal.aborted && !timedOut;
+        // The first-token timeout is a NakamaApiError 504, and it is exactly the
+        // failure an operator needs, so only a 4xx refusal is skipped.
+        if (
+          !(
+            cancelled ||
+            (error instanceof NakamaApiError && error.status < 500)
+          )
+        ) {
+          // The stream already told the user; without this the operator never hears.
+          void reportError(error, { kind: "turn", source: "server" });
+        }
         send({
-          error:
-            turnSignal.aborted && !timedOut
-              ? "Turn cancelled."
-              : formatServerError(error),
+          error: cancelled ? "Turn cancelled." : formatServerError(error),
           type: "error",
         });
       } finally {

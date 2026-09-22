@@ -1,11 +1,8 @@
+import { Button } from "@nakama/ui/button";
+import { Spinner } from "@nakama/ui/spinner";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@nakama/ui/tooltip";
 import { GridViewIcon, ListViewIcon, Refresh01Icon } from "hugeicons-react";
-import { Button } from "@/components/ui/button";
-import { Spinner } from "@/components/ui/spinner";
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipTrigger,
-} from "@/components/ui/tooltip";
+import type { ReactNode } from "react";
 import type { FilesViewMode } from "@/lib/files-page.shared";
 
 function FilesViewModeToggle({
@@ -64,12 +61,14 @@ function FilesViewModeToggle({
 }
 
 export function FilesToolbar({
+  children,
   showViewModeToggle,
   viewMode,
   onViewModeChange,
   isFetching,
   onRefresh,
 }: {
+  children?: ReactNode;
   showViewModeToggle: boolean;
   viewMode: FilesViewMode;
   onViewModeChange: (mode: FilesViewMode) => void;
@@ -77,8 +76,10 @@ export function FilesToolbar({
   onRefresh: () => void;
 }) {
   return (
-    <div className="flex items-center justify-between gap-3">
-      <h2 className="type-section-title text-balance">Artifacts</h2>
+    <div className="flex flex-wrap items-center gap-2">
+      <div className="min-w-0 basis-full sm:flex-1 sm:basis-auto">
+        {children}
+      </div>
       <div className="flex shrink-0 items-center gap-2">
         {showViewModeToggle ? (
           <FilesViewModeToggle

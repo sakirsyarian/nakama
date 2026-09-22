@@ -2,7 +2,7 @@
  * Adapted from AIcss File Diff (https://www.aicss.dev/components/file-diff).
  * Production use requires a valid AIcss license per https://www.aicss.dev/pricing
  */
-import { cn } from "@/lib/utils";
+import { cn } from "@nakama/ui/utils";
 import styles from "./file-diff.module.css";
 import type { FileDiffRow } from "./file-diff.shared";
 
@@ -11,12 +11,14 @@ export { buildFileDiffRows } from "./file-diff.shared";
 export function FileDiff({
   className,
   rows,
+  wrap = false,
 }: {
   className?: string;
   rows: FileDiffRow[];
+  wrap?: boolean;
 }) {
   return (
-    <div className={cn(styles.diff, className)}>
+    <div className={cn(styles.diff, wrap && styles.wrap, className)}>
       {rows.length === 0 ? (
         <p className={styles.diffEmpty}>No line changes.</p>
       ) : (

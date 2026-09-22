@@ -3,21 +3,22 @@ import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { orgIdFromSkillSourcePath } from "@nakama/core";
+
+const BOOTSTRAP_SCHEMA_VERSION = 1;
+
 export function migrateDatabase(db: Database): void {
-  const schemaPath = resolveSchemaPath();
-  const sql = readFileSync(schemaPath, "utf8");
+  applyBootstrapSchema(db);
 
   // Each step runs in its own transaction so a failure cannot leave one half
   // applied. They deliberately do not share a single outer transaction: the
-  // schema sets `PRAGMA foreign_keys`, and migrateLegacyProfileIds toggles it
-  // and opens its own BEGIN, both of which SQLite ignores or rejects inside a
-  // transaction. Stopping between steps is safe because every step is
-  // idempotent and this runs on every open.
+  // bootstrap schema has its own versioned transaction, while
+  // migrateLegacyProfileIds toggles `PRAGMA foreign_keys` and opens its own
+  // BEGIN. Stopping between steps is safe because every compatibility step is
+  // idempotent and runs on every open.
   const atomic = (step: (database: Database) => void): void => {
     db.transaction(() => step(db))();
   };
 
-  db.exec(sql);
   atomic(migrateProfilesTable);
   atomic(migrateAutomationsTable);
   atomic(migrateDropTasksTables);
@@ -33,6 +34,8 @@ export function migrateDatabase(db: Database): void {
   atomic(migrateSkillsWriteApprovalColumns);
   atomic(migrateSkillsPostTurnReviewColumns);
   atomic(migrateSkillsCuratorColumns);
+  atomic(migrateLlmUsageQuotaColumns);
+  atomic(migrateOrgLlmMonthlyQuotaTable);
   atomic(migrateSkillsCuratorConsolidateColumns);
   atomic(migrateOrganizationArchivedAt);
   atomic(migrateSkillUsageTables);
@@ -40,6 +43,7 @@ export function migrateDatabase(db: Database): void {
   atomic(migrateSkillOrgIds);
   atomic(migrateProfileOrgColumns);
   atomic(migrateBrowserSessionsTable);
+  atomic(migratePasswordResetTokensTable);
   migrateLegacyProfileIds(db);
   atomic(migrateCodingDelegationSkillName);
   atomic(migrateWorkspaceSettingsTable);
@@ -52,7 +56,71 @@ export function migrateDatabase(db: Database): void {
   atomic(migrateWorkflowsTables);
   atomic(migrateComposioTables);
   atomic(migrateComposioUserConnections);
+  atomic(migrateAuditEventsTable);
   atomic(migrateProfileChangeEventsTable);
+  atomic(migratePluginTables);
+  atomic(migrateFilePinsTable);
+}
+
+function migrateAuditEventsTable(db: Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS audit_events (
+      id TEXT PRIMARY KEY NOT NULL,
+      actor_user_id TEXT,
+      org_id TEXT,
+      action TEXT NOT NULL,
+      resource_type TEXT NOT NULL,
+      resource_id TEXT,
+      metadata TEXT NOT NULL DEFAULT '{}',
+      request_id TEXT,
+      created_at TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS audit_events_created
+      ON audit_events (created_at DESC, id DESC);
+
+    CREATE INDEX IF NOT EXISTS audit_events_org_created
+      ON audit_events (org_id, created_at DESC, id DESC);
+
+    CREATE TRIGGER IF NOT EXISTS audit_events_no_update
+    BEFORE UPDATE ON audit_events
+    BEGIN
+      SELECT RAISE(ABORT, 'audit_events are append-only');
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS audit_events_no_delete
+    BEFORE DELETE ON audit_events
+    BEGIN
+      SELECT RAISE(ABORT, 'audit_events are append-only');
+    END;
+  `);
+}
+
+function applyBootstrapSchema(db: Database): void {
+  // Foreign-key enforcement is connection-scoped, so it must run even after
+  // the bootstrap schema has already been applied.
+  db.exec("PRAGMA foreign_keys = ON");
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS schema_version (
+      version INTEGER PRIMARY KEY NOT NULL
+    );
+  `);
+
+  const current = db
+    .prepare("SELECT MAX(version) AS version FROM schema_version")
+    .get() as { version: number | null };
+  if ((current.version ?? 0) >= BOOTSTRAP_SCHEMA_VERSION) {
+    return;
+  }
+
+  const schemaPath = resolveSchemaPath();
+  const sql = readFileSync(schemaPath, "utf8");
+  db.transaction(() => {
+    db.exec(sql);
+    db.prepare("INSERT INTO schema_version (version) VALUES (?)").run(
+      BOOTSTRAP_SCHEMA_VERSION
+    );
+  })();
 }
 
 export function resolveSchemaPath(
@@ -251,6 +319,7 @@ function migrateUsersTable(db: Database): void {
       name TEXT,
       phone TEXT,
       is_platform_admin INTEGER DEFAULT 0 NOT NULL,
+      disabled_at TEXT,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
@@ -278,6 +347,10 @@ function migrateUsersTable(db: Database): void {
 
   if (!columnNames.has("user_context")) {
     db.exec("ALTER TABLE users ADD COLUMN user_context TEXT;");
+  }
+
+  if (!columnNames.has("disabled_at")) {
+    db.exec("ALTER TABLE users ADD COLUMN disabled_at TEXT;");
   }
 }
 
@@ -333,6 +406,8 @@ function migrateLlmTurnUsageTable(db: Database): void {
       updated_at TEXT NOT NULL,
       PRIMARY KEY (org_id, bucket, arm)
     );
+    CREATE INDEX IF NOT EXISTS llm_turn_usage_org_bucket
+      ON llm_turn_usage (org_id, bucket);
   `);
 }
 
@@ -459,6 +534,7 @@ function migrateOrgMemoryProposalsTable(db: Database): void {
       session_id TEXT,
       proposed_by_user_id TEXT,
       bullet TEXT NOT NULL,
+      source_document_ids TEXT,
       status TEXT NOT NULL,
       pinned INTEGER NOT NULL DEFAULT 0,
       reviewer_user_id TEXT,
@@ -468,6 +544,16 @@ function migrateOrgMemoryProposalsTable(db: Database): void {
     );
     CREATE INDEX IF NOT EXISTS org_memory_proposals_org_status ON org_memory_proposals (org_id, status);
   `);
+
+  const columns = db
+    .prepare("PRAGMA table_info(org_memory_proposals)")
+    .all() as Array<{ name: string }>;
+  const names = new Set(columns.map((column) => column.name));
+  if (!names.has("source_document_ids")) {
+    db.exec(
+      "ALTER TABLE org_memory_proposals ADD COLUMN source_document_ids TEXT;"
+    );
+  }
 }
 
 function migrateSkillProposalsTable(db: Database): void {
@@ -500,6 +586,9 @@ function migrateSkillProposalsTable(db: Database): void {
   const names = new Set(columns.map((column) => column.name));
   if (!names.has("relative_path")) {
     db.exec("ALTER TABLE skill_proposals ADD COLUMN relative_path TEXT;");
+  }
+  if (!names.has("supporting_files")) {
+    db.exec("ALTER TABLE skill_proposals ADD COLUMN supporting_files TEXT;");
   }
   if (!names.has("consolidate_loser_skill_names")) {
     db.exec(
@@ -643,6 +732,42 @@ function migrateSkillsCuratorConsolidateColumns(db: Database): void {
       "ALTER TABLE profiles ADD COLUMN skills_curator_consolidate_enabled INTEGER;"
     );
   }
+}
+
+function migrateLlmUsageQuotaColumns(db: Database): void {
+  const columns = db
+    .prepare("PRAGMA table_info(organizations)")
+    .all() as Array<{ name: string }>;
+  const names = new Set(columns.map((column) => column.name));
+  if (!names.has("monthly_llm_turn_limit")) {
+    db.exec(
+      "ALTER TABLE organizations ADD COLUMN monthly_llm_turn_limit INTEGER NOT NULL DEFAULT 0;"
+    );
+  }
+  if (!names.has("monthly_llm_token_limit")) {
+    db.exec(
+      "ALTER TABLE organizations ADD COLUMN monthly_llm_token_limit INTEGER;"
+    );
+  }
+  if (!names.has("monthly_llm_warning_percent")) {
+    db.exec(
+      "ALTER TABLE organizations ADD COLUMN monthly_llm_warning_percent INTEGER NOT NULL DEFAULT 80;"
+    );
+  }
+}
+
+function migrateOrgLlmMonthlyQuotaTable(db: Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS org_llm_monthly_quota (
+      org_id TEXT NOT NULL,
+      month TEXT NOT NULL,
+      reserved_turns INTEGER NOT NULL DEFAULT 0,
+      reserved_tokens INTEGER NOT NULL DEFAULT 0,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (org_id, month),
+      FOREIGN KEY (org_id) REFERENCES organizations(id) ON DELETE CASCADE
+    );
+  `);
 }
 
 function migrateOrganizationArchivedAt(db: Database): void {
@@ -940,6 +1065,22 @@ function migrateBrowserSessionsTable(db: Database): void {
   }
 }
 
+function migratePasswordResetTokensTable(db: Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS password_reset_tokens (
+      id TEXT PRIMARY KEY NOT NULL,
+      user_id TEXT NOT NULL,
+      token_hash TEXT NOT NULL,
+      expires_at TEXT NOT NULL,
+      consumed_at TEXT,
+      created_at TEXT NOT NULL,
+      FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS password_reset_tokens_token_hash_unique
+      ON password_reset_tokens (token_hash);
+  `);
+}
+
 const LEGACY_PROFILE_ID_MAP = [
   ["profile_default", "default"],
   ["profile_super_bot", "super_bot"],
@@ -1187,6 +1328,11 @@ function migrateSessionsTable(db: Database): void {
       WHERE updated_at IS NULL;
     `);
   }
+  if (!columnNames.has("pinned")) {
+    db.exec(`
+      ALTER TABLE sessions ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0;
+    `);
+  }
 }
 
 function migrateWorkspaceSettingsTable(db: Database): void {
@@ -1352,11 +1498,25 @@ function migrateAttachmentsTable(db: Database): void {
       size_bytes INTEGER NOT NULL,
       storage_path TEXT NOT NULL,
       created_at TEXT NOT NULL,
+      ephemeral INTEGER DEFAULT 0 NOT NULL,
       FOREIGN KEY (org_id) REFERENCES organizations (id) ON DELETE CASCADE,
       FOREIGN KEY (profile_id) REFERENCES profiles (id) ON DELETE CASCADE,
       FOREIGN KEY (session_id) REFERENCES sessions (id) ON DELETE SET NULL
     );
   `);
+
+  const columns = db.prepare("PRAGMA table_info(attachments)").all() as Array<{
+    name: string;
+  }>;
+
+  // A cognito session has no `sessions` row to hang the foreign key on, so its
+  // attachments carry a null session_id. This column is what a restart sweep
+  // has left to tell them apart from ordinary orphans.
+  if (!columns.some((column) => column.name === "ephemeral")) {
+    db.exec(`
+      ALTER TABLE attachments ADD COLUMN ephemeral INTEGER DEFAULT 0 NOT NULL;
+    `);
+  }
 
   db.exec(`
     CREATE INDEX IF NOT EXISTS attachments_session_id ON attachments (session_id);
@@ -1519,6 +1679,70 @@ function migrateProfileChangeEventsTable(db: Database): void {
   `);
 }
 
+function migratePluginTables(db: Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS plugin_releases (
+      plugin_id TEXT NOT NULL,
+      version TEXT NOT NULL,
+      manifest TEXT NOT NULL,
+      digest TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL,
+      PRIMARY KEY (plugin_id, version)
+    );
+
+    CREATE TABLE IF NOT EXISTS org_plugins (
+      org_id TEXT NOT NULL,
+      plugin_id TEXT NOT NULL,
+      selected_version TEXT,
+      database_generation TEXT,
+      lifecycle_state TEXT NOT NULL,
+      revision INTEGER NOT NULL,
+      pending_operation TEXT,
+      last_lifecycle_error TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (org_id, plugin_id),
+      FOREIGN KEY (org_id) REFERENCES organizations (id) ON DELETE CASCADE
+    );
+  `);
+
+  addNullableTextColumnIfMissing(db, "tools", "plugin_id");
+  addNullableTextColumnIfMissing(db, "tools", "plugin_key");
+  addNullableTextColumnIfMissing(db, "skills", "plugin_id");
+  addNullableTextColumnIfMissing(db, "skills", "plugin_key");
+
+  db.exec(`
+    CREATE UNIQUE INDEX IF NOT EXISTS skills_org_plugin_key_unique
+      ON skills (org_id, plugin_id, plugin_key)
+      WHERE plugin_id IS NOT NULL;
+    CREATE UNIQUE INDEX IF NOT EXISTS tools_org_plugin_key_unique
+      ON tools (org_id, plugin_id, plugin_key)
+      WHERE plugin_id IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS org_plugins_org_id
+      ON org_plugins (org_id);
+  `);
+}
+
+function addNullableTextColumnIfMissing(
+  db: Database,
+  tableName: string,
+  columnName: string
+): void {
+  const columns = db
+    .prepare(`PRAGMA table_info(${quoteSqliteIdentifier(tableName)})`)
+    .all() as Array<{ name: string }>;
+
+  if (columns.length === 0) {
+    return;
+  }
+
+  if (!columns.some((column) => column.name === columnName)) {
+    db.exec(
+      `ALTER TABLE ${quoteSqliteIdentifier(tableName)} ADD COLUMN ${quoteSqliteIdentifier(columnName)} TEXT;`
+    );
+  }
+}
+
 function migrateComposioTables(db: Database): void {
   db.exec(`
     CREATE TABLE IF NOT EXISTS composio_toolkits (
@@ -1551,5 +1775,17 @@ function migrateComposioTables(db: Database): void {
       FOREIGN KEY (profile_id) REFERENCES profiles (id) ON DELETE CASCADE,
       FOREIGN KEY (toolkit_id) REFERENCES composio_toolkits (id) ON DELETE CASCADE
     );
+  `);
+}
+
+function migrateFilePinsTable(db: Database): void {
+  db.exec(`
+CREATE TABLE IF NOT EXISTS file_pins (
+  org_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  profile_id TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+  path TEXT NOT NULL,
+  PRIMARY KEY (org_id, user_id, profile_id, path)
+);
   `);
 }

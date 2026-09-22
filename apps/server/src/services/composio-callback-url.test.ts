@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -10,6 +10,43 @@ import {
 } from "./composio-callback-url";
 
 describe("composio-callback-url", () => {
+  const previous = {
+    configDir: process.env.NAKAMA_CONFIG_DIR,
+    publicUrl: process.env.NAKAMA_PUBLIC_URL,
+    webPublicUrl: process.env.NAKAMA_WEB_PUBLIC_URL,
+  };
+  let isolatedConfigDir = "";
+
+  beforeEach(() => {
+    isolatedConfigDir = join(
+      tmpdir(),
+      `nakama-callback-url-${crypto.randomUUID()}`
+    );
+    mkdirSync(isolatedConfigDir, { recursive: true });
+    process.env.NAKAMA_CONFIG_DIR = isolatedConfigDir;
+    delete process.env.NAKAMA_PUBLIC_URL;
+    delete process.env.NAKAMA_WEB_PUBLIC_URL;
+  });
+
+  afterEach(() => {
+    rmSync(isolatedConfigDir, { force: true, recursive: true });
+    if (previous.configDir === undefined) {
+      delete process.env.NAKAMA_CONFIG_DIR;
+    } else {
+      process.env.NAKAMA_CONFIG_DIR = previous.configDir;
+    }
+    if (previous.publicUrl === undefined) {
+      delete process.env.NAKAMA_PUBLIC_URL;
+    } else {
+      process.env.NAKAMA_PUBLIC_URL = previous.publicUrl;
+    }
+    if (previous.webPublicUrl === undefined) {
+      delete process.env.NAKAMA_WEB_PUBLIC_URL;
+    } else {
+      process.env.NAKAMA_WEB_PUBLIC_URL = previous.webPublicUrl;
+    }
+  });
+
   test("resolveRequestClientOrigin prefers explicit origin", () => {
     const request = new Request(
       "http://app.example.com/v1/composio/toolkits/gmail/connect",
@@ -112,6 +149,22 @@ describe("composio-callback-url", () => {
         process.env.NAKAMA_WEB_PUBLIC_URL = previous;
       }
     }
+  });
+
+  test("a saved loopback URL accepts the loopback origin on a new port", () => {
+    process.env.NAKAMA_WEB_PUBLIC_URL = "http://127.0.0.1:4391";
+    const request = new Request(
+      "http://127.0.0.1:4392/v1/sessions/s1/messages",
+      { headers: { Origin: "http://127.0.0.1:4392" }, method: "POST" }
+    );
+
+    expect(resolveRequestClientOrigin(request)).toBe("http://127.0.0.1:4392");
+    expect(resolveComposioCallbackBaseUrl({ request })).toBe(
+      "http://127.0.0.1:4392"
+    );
+    expect(() =>
+      resolveRequestClientOrigin(request, "https://evil.example.com")
+    ).toThrow("Origin is not allowed.");
   });
 
   test("an unparseable clientOrigin is refused, not silently dropped", () => {

@@ -3,14 +3,7 @@ import {
   BUNDLED_SKILL_NAMES,
   RUNTIME_ONLY_BUNDLED_SKILL_NAMES,
 } from "@nakama/core/skills/bundled-names";
-import {
-  Add01Icon,
-  CheckmarkCircle01Icon,
-  Delete02Icon,
-  Download04Icon,
-} from "hugeicons-react";
-import { type SyntheticEvent, useState } from "react";
-import { Button } from "@/components/ui/button";
+import { Button } from "@nakama/ui/button";
 import {
   Command,
   CommandEmpty,
@@ -19,21 +12,30 @@ import {
   CommandItem,
   CommandList,
   CommandSeparator,
-} from "@/components/ui/command";
+} from "@nakama/ui/command";
 import {
   Dialog,
   DialogContent,
   DialogDescription,
   DialogHeader,
   DialogTitle,
-} from "@/components/ui/dialog";
-import { Spinner } from "@/components/ui/spinner";
+} from "@nakama/ui/dialog";
+import { Spinner } from "@nakama/ui/spinner";
+import { cn } from "@nakama/ui/utils";
+import {
+  Add01Icon,
+  CheckmarkCircle01Icon,
+  Delete02Icon,
+  Download04Icon,
+} from "hugeicons-react";
+import { type SyntheticEvent, useState } from "react";
+import { useAuth } from "@/context/use-auth";
 import {
   useAgentBrowserSettings,
   useInstallAgentBrowser,
 } from "@/hooks/use-agent-browser-settings";
+import { isPluginOwned } from "@/hooks/use-plugins";
 import { formatError } from "@/lib/client";
-import { cn } from "@/lib/utils";
 
 const bundledSkillNames = new Set<string>(BUNDLED_SKILL_NAMES);
 const runtimeOnlySkillNames = new Set<string>(RUNTIME_ONLY_BUNDLED_SKILL_NAMES);
@@ -57,6 +59,10 @@ interface SkillAssignPickerProps {
 
 function formatSkillMeta(skill: SkillSummary): string {
   const parts: string[] = [];
+
+  if (isPluginOwned(skill) && skill.pluginId) {
+    parts.push(skill.pluginId);
+  }
 
   if (skill.hasTool) {
     parts.push("includes tool");
@@ -292,7 +298,13 @@ function SkillLibraryDeleteButton({
       onClick={(event) => onRequestDelete(skill, event)}
       onPointerDown={stopCommandItemSelect}
       size="icon-sm"
-      title={canDelete ? undefined : "Bundled system skills cannot be deleted"}
+      title={
+        canDelete
+          ? undefined
+          : isPluginOwned(skill)
+            ? "Edit this skill in the plugin"
+            : "Bundled system skills cannot be deleted"
+      }
       type="button"
       variant="ghost"
     >
@@ -651,7 +663,9 @@ function SkillAssignManageList({
                   assigningBash={assigningBash}
                   bashAssigned={bashAssigned}
                   canDelete={
-                    canDeleteLibrarySkills && isUserLibrarySkill(skill)
+                    canDeleteLibrarySkills &&
+                    isUserLibrarySkill(skill) &&
+                    !isPluginOwned(skill)
                   }
                   commandItemDisabled={disabled}
                   disabled={disabled}
@@ -811,7 +825,9 @@ function SkillAssignDialogBody({
             event,
             onDelete,
             disabled,
-            canDeleteLibrarySkills && isUserLibrarySkill(skill),
+            canDeleteLibrarySkills &&
+              isUserLibrarySkill(skill) &&
+              !isPluginOwned(skill),
             setPendingDelete
           )
         }
@@ -832,6 +848,8 @@ export function SkillAssignPicker({
   onAssignBash,
   className,
 }: SkillAssignPickerProps) {
+  const { user } = useAuth();
+  const canInstallAgentBrowser = user?.isPlatformAdmin === true;
   const [open, setOpen] = useState(false);
   const [pendingDelete, setPendingDelete] = useState<{
     id: string;
@@ -872,7 +890,12 @@ export function SkillAssignPicker({
 
   function handleInstallAgentBrowser(event: SyntheticEvent) {
     stopCommandItemSelect(event);
-    if (disabled || installingAgentBrowser || !bashAssigned) {
+    if (
+      disabled ||
+      !canInstallAgentBrowser ||
+      installingAgentBrowser ||
+      !bashAssigned
+    ) {
       return;
     }
 
@@ -947,7 +970,9 @@ export function SkillAssignPicker({
           <SkillAssignDialogBody
             agentBrowserInstallError={agentBrowserInstallError}
             agentBrowserInstallProgress={agentBrowserInstallProgress}
-            agentBrowserNeedsInstall={agentBrowserNeedsInstall}
+            agentBrowserNeedsInstall={
+              agentBrowserNeedsInstall && canInstallAgentBrowser
+            }
             agentBrowserReady={agentBrowserSettings?.ready}
             assigningBash={assigningBash}
             availableSkills={availableSkills}
@@ -976,7 +1001,10 @@ export function SkillAssignPicker({
             setDeleting={setDeleting}
             setOpen={setOpen}
             setPendingDelete={setPendingDelete}
-            showAgentBrowserPrereqs={showAgentBrowserPrereqs}
+            showAgentBrowserPrereqs={
+              showAgentBrowserPrereqs &&
+              (bashNeedsAssign || canInstallAgentBrowser)
+            }
           />
         </DialogContent>
       </Dialog>
