@@ -391,7 +391,11 @@ async function runStickyChat(
         completed += 1;
         failedCount += Number(failed);
         endedAt = performance.now();
-        showRunningTool();
+        if (activeTools.size === 0) {
+          thinkingIndicator.start();
+        } else {
+          showRunningTool();
+        }
         if (failed) {
           renderer.appendToolLine(
             styledLine(
@@ -1155,6 +1159,7 @@ async function runBlockingChat(context: ChatContext): Promise<void> {
       },
       onToolEnd: (event) => {
         process.stdout.write(`\x1b[2m [tool: ${event.tool} done] \x1b[0m\n`);
+        thinkingIndicator.start();
       },
       onToolStart: (event) => {
         thinkingIndicator.stop();

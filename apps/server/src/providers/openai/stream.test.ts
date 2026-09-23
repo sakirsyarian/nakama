@@ -60,6 +60,10 @@ describe("OpenAI provider streaming", () => {
       | (RequestInit & { idleTimeout?: number })
       | undefined;
     expect(streamInit?.idleTimeout).toBe(0);
+    const body = JSON.parse(String(streamInit?.body));
+    expect(body.model).toBe("gpt-5.4");
+    expect(body.max_tokens).toBeUndefined();
+    expect(body.max_completion_tokens).toBeUndefined();
   });
 
   test("appends Perplexity citations from the final stream chunk", async () => {
@@ -230,7 +234,7 @@ describe("OpenAI provider streaming", () => {
     createOpenAIProvider({
       apiKey: "sk-test",
       baseUrl: "https://api.deepseek.com",
-      model: "deepseek-chat",
+      model: "deepseek-flash",
       providerName: "deepseek",
     });
 
@@ -345,6 +349,7 @@ describe("OpenAI provider streaming", () => {
 
   test("deepseek omits thinking body when thinking is disabled", async () => {
     mockFetchBodies((_call, body) => {
+      expect(body.model).toBe("deepseek-flash");
       expect(body.thinking).toEqual({ type: "disabled" });
       expect(body.reasoning_effort).toBeUndefined();
       return sseResponse({ content: "Hi" });

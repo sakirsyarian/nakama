@@ -194,7 +194,18 @@ export async function continueAnthropicUntilDone(
   let totalInputTokens = 0;
   let totalOutputTokens = 0;
   const tools = buildAnthropicTools(options.tools, options.webSearch);
-  const thinkingRequest = buildAnthropicThinkingRequest(options.thinking);
+  const thinkingRequest = buildAnthropicThinkingRequest(
+    options.thinking,
+    options.model
+  );
+  const requestOptions = {
+    signal: options.signal,
+    ...(options.model === "claude-opus-5-5"
+      ? {
+          headers: { "anthropic-beta": "thinking-binding-controls-2026-08-01" },
+        }
+      : {}),
+  };
   const requestBase = {
     max_tokens: 4096,
     messages: apiMessages,
@@ -212,7 +223,7 @@ export async function continueAnthropicUntilDone(
           messages: apiMessages,
           stream: true,
         },
-        { signal: options.signal }
+        requestOptions
       );
 
       const streamed = await readAnthropicStream(stream, options.handlers);
@@ -246,7 +257,7 @@ export async function continueAnthropicUntilDone(
         ...requestBase,
         messages: apiMessages,
       },
-      { signal: options.signal }
+      requestOptions
     );
     totalInputTokens +=
       (payload.usage?.input_tokens ?? 0) +
@@ -459,18 +470,44 @@ async function readAnthropicStream(
   };
 }
 
-function buildAnthropicThinkingRequest(
-  providerOptions: GenerateChatInput["providerOptions"]
+export function buildAnthropicThinkingRequest(
+  providerOptions: GenerateChatInput["providerOptions"],
+  model: string
 ): Pick<MessageCreateParams, "thinking" | "output_config"> {
+  if (model === "claude-opus-5-5") {
+    const thinking = {
+      block_binding: { prefix_mismatch_behavior: "drop_block" },
+      type: "adaptive",
+    } as MessageCreateParams["thinking"];
+    return providerOptions?.thinking?.enabled
+      ? {
+          output_config: {
+            effort: normalizeThinkingEffort(providerOptions.thinking.effort),
+          },
+          thinking,
+        }
+      : { thinking };
+  }
+
+  const thinkingByDefault =
+    model === "claude-sonnet-5" || model === "claude-opus-5";
   if (!providerOptions?.thinking?.enabled) {
-    return {};
+    return thinkingByDefault ? { thinking: { type: "disabled" } } : {};
+  }
+
+  if (model === "claude-haiku-4-5" || model === "claude-haiku-4-5-20251001") {
+    // Haiku has no effort/adaptive support. Keep the minimum thinking budget
+    // below the 4096-token response limit, leaving room for the answer.
+    return { thinking: { budget_tokens: 1024, type: "enabled" } };
   }
 
   const effort = normalizeThinkingEffort(providerOptions.thinking.effort);
 
   return {
     output_config: { effort },
-    thinking: { type: "adaptive" },
+    thinking: thinkingByDefault
+      ? { display: "summarized", type: "adaptive" }
+      : { type: "adaptive" },
   };
 }
 

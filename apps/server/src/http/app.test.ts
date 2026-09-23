@@ -378,6 +378,52 @@ describe("createHonoApp", () => {
     }
   });
 
+  test("resolves org context from a backend API key and rejects conflicts", async () => {
+    const options = createServerOptions();
+    await options.databaseAdapter.createUser({
+      createdAt: new Date().toISOString(),
+      email: "owner@example.com",
+      id: "user_owner",
+      passwordHash: "unused",
+      updatedAt: new Date().toISOString(),
+    });
+    await seedOrgForUser(options.databaseAdapter, "owner@example.com");
+    const user =
+      await options.databaseAdapter.getUserByEmail("owner@example.com");
+    const token = `nk_live_${"a".repeat(64)}`;
+    await options.databaseAdapter.createApiKey({
+      createdAt: new Date().toISOString(),
+      createdByUserId: user!.id,
+      environment: "live",
+      expiresAt: null,
+      id: "key_test",
+      keyPrefix: token.slice(0, 20),
+      lastUsedAt: null,
+      name: "Test app",
+      orgId: TEST_ORG_ID,
+      revokedAt: null,
+      secretHash: options.authService.hashToken(token),
+    });
+    const app = createHonoApp(options);
+
+    const response = await app.fetch(
+      new Request("http://localhost:4310/v1/profiles", {
+        headers: { Authorization: `Bearer ${token}` },
+      })
+    );
+    expect(response.status).toBe(200);
+
+    const conflict = await app.fetch(
+      new Request("http://localhost:4310/v1/profiles", {
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "X-Org-Id": "org_other",
+        },
+      })
+    );
+    expect(conflict.status).toBe(400);
+  });
+
   test("rejects invalid bearer auth with 401 instead of 500", async () => {
     const options = createServerOptions();
     const app = createHonoApp(options);
@@ -407,6 +453,23 @@ describe("createHonoApp", () => {
     expect(csp).toContain("media-src 'self' blob:");
     expect(response.headers.get("X-Frame-Options")).toBe("DENY");
     expect(csp).not.toContain("frame-ancestors");
+  });
+
+  test("serves the artifact frame with its own CSP so artifact scripts run", async () => {
+    // With a web dist the SPA fallback must not swallow the frame path.
+    const app = createHonoApp({
+      ...createServerOptions(),
+      webDistDir: resolve(import.meta.dir, "../../../web"),
+    });
+    const response = await app.fetch(
+      new Request("http://localhost:4310/artifact-frame")
+    );
+    expect(response.status).toBe(200);
+    expect(await response.text()).toContain("nakama-artifact-frame-ready");
+    const csp = response.headers.get("Content-Security-Policy") ?? "";
+    expect(csp).toContain("'unsafe-inline'");
+    expect(csp).toContain("frame-ancestors 'self'");
+    expect(response.headers.get("X-Frame-Options")).toBeNull();
   });
 
   test.each(["/docs", "/docs/"])(
@@ -1165,6 +1228,135 @@ describe("createHonoApp", () => {
     await expect(listResponse.json()).resolves.toEqual({
       sessions: [{ id: "default-web" }],
     });
+  });
+
+  test("auth/me reports what the credential may do, not what its owner may do", async () => {
+    const options = createServerOptions();
+    const app = createHonoApp(options);
+    const adminSession = await setupFreshInstallSession(
+      app,
+      options.databaseAdapter
+    );
+    const admin =
+      await options.databaseAdapter.getUserByEmail("admin@example.com");
+    if (!(admin && adminSession.orgId)) {
+      throw new Error("Expected setup admin");
+    }
+    expect(admin.isPlatformAdmin).toBe(true);
+
+    const secret = `nk_live_${"c".repeat(64)}`;
+    await options.databaseAdapter.createApiKey({
+      createdAt: new Date().toISOString(),
+      createdByUserId: admin.id,
+      environment: "live",
+      expiresAt: null,
+      id: "key_auth_me_test",
+      keyPrefix: secret.slice(0, 20),
+      lastUsedAt: null,
+      name: "auth/me test",
+      orgId: adminSession.orgId,
+      revokedAt: null,
+      secretHash: options.authService.hashToken(secret),
+    });
+
+    const response = await app.fetch(
+      new Request("http://localhost:4310/v1/auth/me", {
+        headers: {
+          Authorization: `Bearer ${secret}`,
+          "X-Org-Id": adminSession.orgId,
+        },
+      })
+    );
+    const body = (await response.json()) as {
+      isPlatformAdmin?: boolean;
+      mode?: string;
+    };
+
+    // The key was minted by a platform admin and is de-privileged anyway, which
+    // is what every admin guard already enforces. Reporting the owner's flag
+    // told an operator the opposite.
+    expect(response.status).toBe(200);
+    expect(body.isPlatformAdmin).toBe(false);
+    expect(body.mode).toBe("api-key");
+
+    // A browser session for the same admin still reports the admin it is.
+    const sessionResponse = await app.fetch(
+      new Request("http://localhost:4310/v1/auth/me", {
+        headers: adminSession.headers({}, adminSession.orgId),
+      })
+    );
+    const sessionBody = (await sessionResponse.json()) as {
+      isPlatformAdmin?: boolean;
+      mode?: string;
+    };
+    expect(sessionBody.isPlatformAdmin).toBe(true);
+    expect(sessionBody.mode).toBe("browser-session");
+  });
+
+  test("API-key sessions require an app user id", async () => {
+    const options = createServerOptions();
+    const app = createHonoApp(options);
+    const adminSession = await setupFreshInstallSession(
+      app,
+      options.databaseAdapter
+    );
+    const admin =
+      await options.databaseAdapter.getUserByEmail("admin@example.com");
+    if (!(admin && adminSession.orgId)) {
+      throw new Error("Expected setup admin");
+    }
+
+    const secret = `nk_live_${"b".repeat(64)}`;
+    await options.databaseAdapter.createApiKey({
+      createdAt: new Date().toISOString(),
+      createdByUserId: admin.id,
+      environment: "live",
+      expiresAt: null,
+      id: "key_session_test",
+      keyPrefix: secret.slice(0, 20),
+      lastUsedAt: null,
+      name: "Session test",
+      orgId: adminSession.orgId,
+      revokedAt: null,
+      secretHash: options.authService.hashToken(secret),
+    });
+
+    const apiKeyHeaders = {
+      Authorization: `Bearer ${secret}`,
+      "Content-Type": "application/json",
+    };
+    const headers = {
+      ...apiKeyHeaders,
+      "X-Org-Id": adminSession.orgId,
+    };
+    const missingAppUser = await app.fetch(
+      new Request("http://localhost:4310/v1/sessions", {
+        body: JSON.stringify({ channel: "web", profileId: "default" }),
+        headers,
+        method: "POST",
+      })
+    );
+    expect(missingAppUser.status).toBe(400);
+
+    const created = await app.fetch(
+      new Request("http://localhost:4310/v1/sessions", {
+        body: JSON.stringify({
+          appUserId: "alice-123",
+          channel: "web",
+        }),
+        headers: apiKeyHeaders,
+        method: "POST",
+      })
+    );
+    expect(created.status).toBe(201);
+
+    const missingHeader = await app.fetch(
+      new Request(
+        "http://localhost:4310/v1/sessions?profileId=default&channel=web",
+        { headers }
+      )
+    );
+    expect(missingHeader.status).toBe(400);
   });
 
   test("GET /v1/sessions rejects missing or invalid channel", async () => {

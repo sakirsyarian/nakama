@@ -12,6 +12,7 @@ export const queryKeys = {
     runs: (automationId: string) =>
       ["automations", automationId, "runs"] as const,
   },
+  browserSessions: ["browserSessions"] as const,
   cerebrasModels: ["cerebrasModels"] as const,
   composio: {
     profileToolkits: (profileId: string) =>
@@ -45,6 +46,7 @@ export const queryKeys = {
     all: ["notificationDestinations"] as const,
   },
   openRouterModels: ["openRouterModels"] as const,
+  orgApiKeys: (orgId: string) => ["orgApiKeys", orgId] as const,
   orgMembers: (orgId: string) => ["orgMembers", orgId] as const,
   orgMemory: (orgId: string) => ["orgMemory", orgId] as const,
   orgMemoryHistory: (orgId: string) => ["orgMemoryHistory", orgId] as const,

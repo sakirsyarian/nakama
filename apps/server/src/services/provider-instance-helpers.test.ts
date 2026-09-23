@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { ProviderInstance } from "@nakama/core";
 import { NakamaApiError } from "@nakama/core";
+import { getModelsForProviderInstance } from "../providers/compatible-models";
 import {
   applyProviderInstanceUpdate,
   buildProviderInstanceFromCreateRequest,
@@ -20,6 +21,31 @@ function createProviderInstance(
 }
 
 describe("resolveProfileProviderSelection", () => {
+  test("preserves saved DeepSeek aliases instead of falling back to the active provider", () => {
+    const deepseek = createProviderInstance({
+      id: "deepseek-1",
+      label: "DeepSeek",
+      type: "deepseek",
+    });
+    const active = createProviderInstance({
+      id: "openai-1",
+      label: "OpenAI",
+      type: "openai",
+    });
+    for (const profileModel of [
+      "deepseek-v4-flash",
+      "deepseek-1::deepseek-v4-flash",
+    ]) {
+      expect(
+        resolveProfileProviderSelection({
+          defaultProviderId: active.id,
+          profileModel,
+          providers: [active, deepseek],
+        })
+      ).toEqual({ instance: deepseek, model: "deepseek-v4-flash" });
+    }
+  });
+
   test("preserves a bare retired ChatGPT selection without making it the default", () => {
     const instance = createProviderInstance({
       id: "chatgpt-1",
@@ -35,6 +61,34 @@ describe("resolveProfileProviderSelection", () => {
       resolveProfileProviderSelection({ ...options, profileModel: null })?.model
     ).toBe("gpt-5.6-terra");
     expect(modelExistsOnInstance(instance, "unknown-model")).toBe(false);
+  });
+
+  test("keeps a bare shared GPT-6 model on the active ChatGPT subscription", () => {
+    const chatgpt = createProviderInstance({
+      id: "chatgpt-1",
+      label: "ChatGPT",
+      type: "chatgpt",
+    });
+    const openai = createProviderInstance({
+      id: "openai-1",
+      label: "OpenAI",
+      type: "openai",
+    });
+
+    expect(
+      resolveProfileProviderSelection({
+        defaultProviderId: chatgpt.id,
+        profileModel: "gpt-6-astra",
+        providers: [chatgpt, openai],
+      })?.instance.id
+    ).toBe(chatgpt.id);
+    expect(
+      resolveProfileProviderSelection({
+        defaultProviderId: openai.id,
+        profileModel: "gpt-6-astra",
+        providers: [chatgpt, openai],
+      })?.instance.id
+    ).toBe(openai.id);
   });
 
   test("uses the explicitly selected provider instance for provider-qualified profile models", () => {
@@ -453,5 +507,39 @@ describe("buildProviderInstanceFromCreateRequest", () => {
     expect(instance.type).toBe("chatgpt");
     expect(instance.chatgptRefreshToken).toBe("refresh");
     expect(instance.chatgptAccountId).toBe("acct_1");
+    expect(
+      getModelsForProviderInstance(instance).some(
+        (model) => model.id === "gpt-6-astra"
+      )
+    ).toBe(true);
+  });
+
+  test("keeps the signed-in account's discovered models in the ChatGPT picker", () => {
+    const instance = buildProviderInstanceFromCreateRequest(
+      {
+        apiKey: "",
+        chatgptOAuth: {
+          accessToken: "access",
+          accountId: "acct_1",
+          expiresAt: "2026-01-01T01:00:00.000Z",
+          refreshToken: "refresh",
+        },
+        customModels: [
+          { default: true, id: "gpt-6-sol", name: "GPT-6 Sol" },
+          { id: "gpt-6-luna", name: "GPT-6 Luna" },
+        ],
+        type: "chatgpt",
+      },
+      []
+    );
+
+    expect(instance.customModels?.map((model) => model.id)).toEqual([
+      "gpt-6-sol",
+      "gpt-6-luna",
+    ]);
+    expect(
+      getModelsForProviderInstance(instance).map((model) => model.id)
+    ).toEqual(["gpt-6-sol", "gpt-6-luna"]);
+    expect(modelExistsOnInstance(instance, "gpt-6-astra")).toBe(false);
   });
 });

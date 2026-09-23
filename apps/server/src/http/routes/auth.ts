@@ -5,11 +5,13 @@ import {
   type ChangePasswordRequest,
   type CreateOrganizationRequest,
   type CreateOrganizationResponse,
+  type ListBrowserSessionsResponse,
   type ListUserOrgsResponse,
   LocalAuthTokenManagedExternallyError,
   type RequestPasswordResetRequest,
   type RequestPasswordResetResponse,
   type ResetPasswordRequest,
+  type RevokeBrowserSessionsResponse,
   type RotateLocalAuthTokenResponse,
   rotateLocalAuthToken,
   type SetActiveOrgRequest,
@@ -60,6 +62,7 @@ export function registerAuthRoutes(app: HonoApp, options: ServerOptions): void {
       email: z.string(),
       id: z.string(),
       isPlatformAdmin: z.boolean().optional(),
+      mode: z.enum(["api-key", "browser-session", "local-token"]).optional(),
       name: z.string().nullable().optional(),
       orgId: z.string().nullable().optional(),
       phone: z.string().nullable().optional(),
@@ -616,7 +619,18 @@ export function registerAuthRoutes(app: HonoApp, options: ServerOptions): void {
       auth.session?.id,
       auth.session?.activeOrgId
     );
-    return c.json(authBody, 200);
+    // The builder answers from the user record, which describes whoever created
+    // the credential. An API key is de-privileged whatever its owner is, and the
+    // guards already read that, so reporting the owner's flag here told an
+    // operator the opposite of what every admin route would do.
+    return c.json(
+      {
+        ...authBody,
+        isPlatformAdmin: auth.isPlatformAdmin,
+        mode: auth.mode,
+      },
+      200
+    );
   });
 
   app.openAPIRegistry.registerPath(updateMeRoute);
@@ -848,5 +862,85 @@ export function registerAuthRoutes(app: HonoApp, options: ServerOptions): void {
       body.orgId
     );
     return json<AuthUserResponse>(authBody);
+  });
+  app.get("/v1/auth/sessions", async (c) => {
+    if (!databaseAdapter) {
+      return errorResponse("Authentication not configured", 500);
+    }
+
+    const auth = getRequestAuth(c);
+    const records = await databaseAdapter.listBrowserSessionsForUser(
+      auth.user.id,
+      new Date().toISOString()
+    );
+
+    return json<ListBrowserSessionsResponse>({
+      sessions: records.map((record) => ({
+        createdAt: record.createdAt,
+        current: record.id === auth.session?.id,
+        expiresAt: record.expiresAt,
+        id: record.id,
+        lastUsedAt: record.lastUsedAt,
+      })),
+    });
+  });
+
+  app.delete("/v1/auth/sessions/:sessionId", async (c) => {
+    if (!(authService && databaseAdapter)) {
+      return errorResponse("Authentication not configured", 500);
+    }
+
+    const auth = getRequestAuth(c);
+    assertBrowserCsrf(c.req.raw, auth, authService);
+
+    const sessionId = c.req.param("sessionId");
+    const revoked = await databaseAdapter.revokeBrowserSessionForUser(
+      sessionId,
+      auth.user.id,
+      new Date().toISOString()
+    );
+
+    // A session that is not yours and a session that is not there answer the
+    // same, so an id cannot be tested against another account.
+    if (!revoked) {
+      return errorResponse("Session not found", 404);
+    }
+
+    const response = json<RevokeBrowserSessionsResponse>({ revoked: 1 });
+    // Revoking the session you are on leaves the browser holding a cookie that
+    // no longer authenticates, which reads as a broken app until a reload.
+    if (sessionId === auth.session?.id) {
+      clearBrowserSessionCookies(response.headers);
+    }
+    return response;
+  });
+
+  app.delete("/v1/auth/users/:userId/sessions", async (c) => {
+    if (!(authService && databaseAdapter)) {
+      return errorResponse("Authentication not configured", 500);
+    }
+
+    const auth = getRequestAuth(c);
+    assertBrowserCsrf(c.req.raw, auth, authService);
+    requirePlatformAdmin(auth);
+
+    const userId = c.req.param("userId");
+    const user = await databaseAdapter.getUserById(userId);
+    if (!user) {
+      return errorResponse("User not found", 404);
+    }
+
+    const revoked = await databaseAdapter.revokeBrowserSessionsForUser(
+      userId,
+      new Date().toISOString()
+    );
+
+    const response = json<RevokeBrowserSessionsResponse>({ revoked });
+    // A platform admin revoking their own sessions is the breach-containment
+    // case, and it has to log them out here too.
+    if (userId === auth.user.id) {
+      clearBrowserSessionCookies(response.headers);
+    }
+    return response;
   });
 }

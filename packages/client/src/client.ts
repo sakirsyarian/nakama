@@ -40,6 +40,8 @@ import type {
   ComposioToolkitSummary,
   ConfigureProviderRequest,
   ConfigureProviderResponse,
+  CreateApiKeyRequest,
+  CreateApiKeyResponse,
   CreateAutomationRequest,
   CreateMcpServerRequest,
   CreateNotificationDestinationRequest,
@@ -81,9 +83,11 @@ import type {
   InvokePluginActionRequest,
   InvokePluginActionResponse,
   KnowledgeBaseDuplicateAction,
+  ListApiKeysResponse,
   ListArtifactsResponse,
   ListAutomationRunsResponse,
   ListAutomationsResponse,
+  ListBrowserSessionsResponse,
   ListComposioToolkitsResponse,
   ListKnowledgeBaseResponse,
   ListMcpServersResponse,
@@ -148,6 +152,8 @@ import type {
   RestoreDataImportResponse,
   RestoreOrgMemoryHistoryResponse,
   RevokeArtifactShareResponse,
+  RevokeBrowserSessionsResponse,
+  RotateApiKeyResponse,
   RotateLocalAuthTokenResponse,
   RunAutomationResponse,
   RunSkillCuratorInternalRequest,
@@ -1312,9 +1318,13 @@ export class NakamaClient {
 
   async readProfileWorkspaceFile(
     profileId: string,
-    filename: string
+    filename: string,
+    options: { render?: "markdown" } = {}
   ): Promise<Blob> {
     const query = new URLSearchParams({ path: filename });
+    if (options.render) {
+      query.set("render", options.render);
+    }
     const response = await this.fetchRaw(
       `/v1/profiles/${encodeURIComponent(profileId)}/workspace/content?${query}`
     );
@@ -2815,6 +2825,62 @@ export class NakamaClient {
   async listOrgMembers(orgId: string): Promise<ListOrgMembersResponse> {
     return this.request<ListOrgMembersResponse>(
       `/v1/orgs/${encodeURIComponent(orgId)}/members`
+    );
+  }
+
+  async listBrowserSessions(): Promise<ListBrowserSessionsResponse> {
+    return this.request<ListBrowserSessionsResponse>("/v1/auth/sessions");
+  }
+
+  async revokeBrowserSession(
+    sessionId: string
+  ): Promise<RevokeBrowserSessionsResponse> {
+    return this.request<RevokeBrowserSessionsResponse>(
+      `/v1/auth/sessions/${encodeURIComponent(sessionId)}`,
+      { method: "DELETE" }
+    );
+  }
+
+  /** Platform admin only: ends every login session a user holds. */
+  async revokeAllBrowserSessionsForUser(
+    userId: string
+  ): Promise<RevokeBrowserSessionsResponse> {
+    return this.request<RevokeBrowserSessionsResponse>(
+      `/v1/auth/users/${encodeURIComponent(userId)}/sessions`,
+      { method: "DELETE" }
+    );
+  }
+
+  async createApiKey(
+    orgId: string,
+    request: CreateApiKeyRequest
+  ): Promise<CreateApiKeyResponse> {
+    return this.request<CreateApiKeyResponse>(
+      `/v1/orgs/${encodeURIComponent(orgId)}/api-keys`,
+      { body: JSON.stringify(request), method: "POST" }
+    );
+  }
+
+  async listApiKeys(orgId: string): Promise<ListApiKeysResponse> {
+    return this.request<ListApiKeysResponse>(
+      `/v1/orgs/${encodeURIComponent(orgId)}/api-keys`
+    );
+  }
+
+  async rotateApiKey(
+    orgId: string,
+    keyId: string
+  ): Promise<RotateApiKeyResponse> {
+    return this.request<RotateApiKeyResponse>(
+      `/v1/orgs/${encodeURIComponent(orgId)}/api-keys/${encodeURIComponent(keyId)}/rotate`,
+      { method: "POST" }
+    );
+  }
+
+  async deleteApiKey(orgId: string, keyId: string): Promise<void> {
+    await this.request(
+      `/v1/orgs/${encodeURIComponent(orgId)}/api-keys/${encodeURIComponent(keyId)}`,
+      { method: "DELETE" }
     );
   }
 

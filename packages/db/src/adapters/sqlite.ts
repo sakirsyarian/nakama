@@ -17,6 +17,7 @@ import type {
   OrgMemoryProposalStatus,
   PluginPublishResult,
   PublishOrgPluginReleaseInput,
+  StoredApiKeyRecord,
   StoredArtifactShareRecord,
   StoredAttachmentRecord,
   StoredAuditEvent,
@@ -138,6 +139,7 @@ interface WorkflowRunStepRow {
 }
 
 interface ProfileRow {
+  automations_enabled: number;
   created_at: string;
   id: string;
   is_default: number;
@@ -170,6 +172,7 @@ interface ToolRow {
 interface SessionRow {
   agent_questionnaire: string | null;
   agent_todos: string;
+  app_user_id?: string | null;
   channel: string;
   created_at: string;
   id: string;
@@ -205,6 +208,7 @@ interface AttachmentRow {
 }
 
 interface SessionSummaryRow {
+  app_user_id?: string | null;
   channel: string;
   created_at: string;
   first_user_payload: string | null;
@@ -361,6 +365,20 @@ interface BrowserSessionRow {
   revoked_at: string | null;
   session_token_hash: string;
   user_id: string;
+}
+
+interface ApiKeyRow {
+  created_at: string;
+  created_by_user_id: string;
+  environment: string;
+  expires_at: string | null;
+  id: string;
+  key_prefix: string;
+  last_used_at: string | null;
+  name: string;
+  org_id: string;
+  revoked_at: string | null;
+  secret_hash: string;
 }
 
 interface OrganizationRow {
@@ -711,13 +729,14 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
       is_super,
       org_id,
       is_default,
+      automations_enabled,
       skills_write_approval,
       skills_post_turn_review,
       skills_curator_consolidate_enabled,
       created_at,
       updated_at
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(id) DO UPDATE SET
       name = excluded.name,
       system_prompt = excluded.system_prompt,
@@ -727,6 +746,7 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
       is_super = excluded.is_super,
       org_id = excluded.org_id,
       is_default = excluded.is_default,
+      automations_enabled = excluded.automations_enabled,
       skills_write_approval = excluded.skills_write_approval,
       skills_post_turn_review = excluded.skills_post_turn_review,
       skills_curator_consolidate_enabled = excluded.skills_curator_consolidate_enabled,
@@ -743,6 +763,7 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
       record.isSuper ? 1 : 0,
       record.orgId ?? null,
       record.isDefault ? 1 : 0,
+      record.automationsEnabled === false ? 0 : 1,
       record.skillsWriteApproval == null
         ? null
         : record.skillsWriteApproval
@@ -960,11 +981,12 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
   );
   const getSessionStmt = db.prepare("SELECT * FROM sessions WHERE id = ?");
   const upsertSessionStmt = db.prepare(`
-    INSERT INTO sessions (id, profile_id, channel, created_at, updated_at, user_id, model, pinned)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO sessions (id, profile_id, channel, created_at, updated_at, app_user_id, user_id, model, pinned)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(id) DO UPDATE SET
       profile_id = excluded.profile_id,
       channel = excluded.channel,
+      app_user_id = COALESCE(excluded.app_user_id, sessions.app_user_id),
       user_id = COALESCE(excluded.user_id, sessions.user_id),
       model = excluded.model
   `);
@@ -1059,6 +1081,7 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
   const listSessionSummariesStmt = db.prepare(`
     SELECT
       s.id,
+      s.app_user_id,
       s.profile_id,
       s.channel,
       s.created_at,
@@ -1080,6 +1103,7 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
     FROM sessions s
     LEFT JOIN session_messages m ON m.session_id = s.id
     WHERE s.profile_id = ? AND s.channel = ?
+      AND (? IS NULL OR s.app_user_id = ?)
     GROUP BY s.id
     HAVING COUNT(m.id) > 0
     ORDER BY s.pinned DESC, updated_at DESC, s.created_at DESC
@@ -1793,6 +1817,16 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
     SET revoked_at = ?
     WHERE session_token_hash = ? AND revoked_at IS NULL
   `);
+  const listBrowserSessionsForUserStmt = db.prepare(`
+    SELECT * FROM browser_sessions
+    WHERE user_id = ? AND revoked_at IS NULL AND expires_at > ?
+    ORDER BY COALESCE(last_used_at, created_at) DESC, id DESC
+  `);
+  const revokeBrowserSessionForUserStmt = db.prepare(`
+    UPDATE browser_sessions
+    SET revoked_at = ?
+    WHERE id = ? AND user_id = ? AND revoked_at IS NULL
+  `);
   const revokeBrowserSessionsForUserStmt = db.prepare(`
     UPDATE browser_sessions
     SET revoked_at = ?
@@ -1807,6 +1841,25 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
     UPDATE browser_sessions
     SET active_org_id = ?
     WHERE id = ?
+  `);
+  const createApiKeyStmt = db.prepare(`
+    INSERT INTO api_keys (
+      id, org_id, name, environment, key_prefix, secret_hash,
+      created_by_user_id, created_at, expires_at, last_used_at, revoked_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+  const getApiKeyByPrefixStmt = db.prepare(`
+    SELECT * FROM api_keys WHERE key_prefix = ? LIMIT 1
+  `);
+  const listApiKeysForOrgStmt = db.prepare(`
+    SELECT * FROM api_keys WHERE org_id = ? ORDER BY created_at DESC, id DESC
+  `);
+  const revokeApiKeyStmt = db.prepare(`
+    UPDATE api_keys SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL
+  `);
+  const deleteApiKeyStmt = db.prepare("DELETE FROM api_keys WHERE id = ?");
+  const updateApiKeyLastUsedAtStmt = db.prepare(`
+    UPDATE api_keys SET last_used_at = ? WHERE id = ?
   `);
   const createPasswordResetTokenStmt = db.prepare(`
     INSERT INTO password_reset_tokens (
@@ -2660,6 +2713,21 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
       const row = countUsersStmt.get() as { count: number };
       return row.count;
     },
+    async createApiKey(record) {
+      createApiKeyStmt.run(
+        record.id,
+        record.orgId,
+        record.name,
+        record.environment,
+        record.keyPrefix,
+        record.secretHash,
+        record.createdByUserId,
+        record.createdAt,
+        record.expiresAt,
+        record.lastUsedAt,
+        record.revokedAt
+      );
+    },
 
     async createArtifactShare(record) {
       createArtifactShareStmt.run(
@@ -2812,6 +2880,11 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
       runCreateUserStmt(record);
     },
 
+    async deleteApiKey(id) {
+      const result = deleteApiKeyStmt.run(id);
+      return result.changes > 0;
+    },
+
     async deleteAttachment(id) {
       const result = deleteAttachmentStmt.run(id);
       return result.changes > 0;
@@ -2960,6 +3033,11 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
         automationId
       ) as AutomationRunRow | null;
       return row ? toAutomationRunRecord(row) : null;
+    },
+
+    async getApiKeyByPrefix(keyPrefix) {
+      const row = getApiKeyByPrefixStmt.get(keyPrefix) as ApiKeyRow | null;
+      return row ? toApiKeyRecord(row) : null;
     },
 
     async getArtifactShareById(orgId, profileId, shareId) {
@@ -3419,6 +3497,12 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
       );
     },
 
+    async listApiKeysForOrg(orgId) {
+      return listApiKeysForOrgStmt
+        .all(orgId)
+        .map((row) => toApiKeyRecord(row as ApiKeyRow));
+    },
+
     async listArtifactSharesForProfile(orgId, profileId) {
       return listArtifactSharesForProfileStmt
         .all(orgId, profileId)
@@ -3461,6 +3545,14 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
       return listAutomationsForOrgStmt
         .all(orgId)
         .map((row) => toAutomationRecord(row as AutomationRow));
+    },
+
+    async listBrowserSessionsForUser(userId, now) {
+      const rows = listBrowserSessionsForUserStmt.all(
+        userId,
+        now
+      ) as BrowserSessionRow[];
+      return rows.map(toBrowserSessionRecord);
     },
 
     async listComposioToolkitsForOrg(orgId) {
@@ -3653,9 +3745,9 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
         .map((row) => toProfileRecord(row as ProfileRow));
     },
 
-    async listSessionSummaries(profileId, channel) {
+    async listSessionSummaries(profileId, channel, appUserId) {
       return listSessionSummariesStmt
-        .all(profileId, channel)
+        .all(profileId, channel, appUserId ?? null, appUserId ?? null)
         .map((row) => toSessionSummaryRecord(row as SessionSummaryRow));
     },
 
@@ -3871,6 +3963,11 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
       replaceProfileComposioToolkitsTransaction(profileId, assignments);
     },
 
+    async revokeApiKey(id, revokedAt) {
+      const result = revokeApiKeyStmt.run(revokedAt, id);
+      return result.changes > 0;
+    },
+
     async revokeArtifactShare(id, revokedAt) {
       const result = revokeArtifactShareStmt.run(revokedAt, id);
       return result.changes > 0;
@@ -3881,6 +3978,11 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
         revokedAt,
         sessionTokenHash
       );
+      return result.changes > 0;
+    },
+
+    async revokeBrowserSessionForUser(id, userId, revokedAt) {
+      const result = revokeBrowserSessionForUserStmt.run(revokedAt, id, userId);
       return result.changes > 0;
     },
 
@@ -3942,6 +4044,10 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
     async unassignToolFromProfile(profileId, toolId) {
       const result = unassignToolStmt.run(profileId, toolId);
       return result.changes > 0;
+    },
+
+    async updateApiKeyLastUsedAt(id, lastUsedAt) {
+      updateApiKeyLastUsedAtStmt.run(lastUsedAt, id);
     },
 
     async updateArtifactShareSnapshot(id, snapshot) {
@@ -4187,6 +4293,7 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
         record.channel,
         record.createdAt,
         record.createdAt,
+        record.appUserId ?? null,
         record.userId ?? null,
         record.model,
         record.pinned ? 1 : 0
@@ -4338,6 +4445,7 @@ function toWorkflowRunStepRecord(
 
 function toProfileRecord(row: ProfileRow): StoredProfileRecord {
   return {
+    automationsEnabled: row.automations_enabled !== 0,
     createdAt: row.created_at,
     id: row.id,
     isDefault: row.is_default !== 0,
@@ -4581,6 +4689,7 @@ function toSessionRecord(row: SessionRow): StoredSessionRecord {
   return {
     agentQuestionnaire: parseAgentQuestionnaire(row.agent_questionnaire),
     agentTodos: parseAgentTodos(row.agent_todos),
+    appUserId: row.app_user_id ?? null,
     channel: row.channel,
     createdAt: row.created_at,
     id: row.id,
@@ -4646,6 +4755,7 @@ function toSessionSummaryRecord(
   row: SessionSummaryRow
 ): StoredSessionSummaryRecord {
   return {
+    appUserId: row.app_user_id ?? null,
     channel: row.channel,
     createdAt: row.created_at,
     id: row.id,
@@ -5107,6 +5217,22 @@ function toBrowserSessionRecord(
     revokedAt: row.revoked_at,
     sessionTokenHash: row.session_token_hash,
     userId: row.user_id,
+  };
+}
+
+function toApiKeyRecord(row: ApiKeyRow): StoredApiKeyRecord {
+  return {
+    createdAt: row.created_at,
+    createdByUserId: row.created_by_user_id,
+    environment: row.environment,
+    expiresAt: row.expires_at,
+    id: row.id,
+    keyPrefix: row.key_prefix,
+    lastUsedAt: row.last_used_at,
+    name: row.name,
+    orgId: row.org_id,
+    revokedAt: row.revoked_at,
+    secretHash: row.secret_hash,
   };
 }
 

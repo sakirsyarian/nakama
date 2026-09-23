@@ -53,15 +53,15 @@ describe("usage tracking", () => {
       tracker,
       "gpt-4o"
     ).generateChat(input);
-    expect(offCatalog.usage).toEqual(usage);
+    expect(offCatalog.usage).toEqual({ ...usage, modelId: "gpt-4o" });
 
-    tracker.setPricingContext({ provider: "openai_compatible" });
     const unpriced = await wrapProviderWithUsageTracking(
       providerReporting(usage),
       tracker,
-      "my-local-model"
+      "my-local-model",
+      { provider: "openai_compatible" }
     ).generateChat(input);
-    expect(unpriced.usage).toEqual(usage);
+    expect(unpriced.usage).toEqual({ ...usage, modelId: "my-local-model" });
   });
 
   test("prefers provider-reported usage for chat calls", async () => {
@@ -105,7 +105,7 @@ describe("usage tracking", () => {
     });
   });
 
-  test("prefers provider-reported usage for text calls", async () => {
+  test("uses reported text usage and the wrapper's custom pricing", async () => {
     const tracker = await LlmUsageTracker.create(
       createInMemoryDatabaseAdapter()
     );
@@ -125,7 +125,23 @@ describe("usage tracking", () => {
       },
     };
 
-    const wrapped = wrapProviderWithUsageTracking(provider, tracker, "gpt-4o");
+    const wrapped = wrapProviderWithUsageTracking(
+      provider,
+      tracker,
+      "gpt-5.5",
+      {
+        providerInstance: {
+          apiKey: "test",
+          createdAt: "2026-01-01T00:00:00.000Z",
+          customModels: [
+            { id: "gpt-5.5", inputPerMillionUsd: 2, outputPerMillionUsd: 4 },
+          ],
+          id: "custom",
+          label: "Custom",
+          type: "openai_compatible",
+        },
+      }
+    );
     const result = await wrapped.generateText({
       format: "text",
       prompt: "hi",
@@ -142,6 +158,7 @@ describe("usage tracking", () => {
       requestCount: 1,
       totalTokens: 50,
     });
+    expect(tracker.getStats().estimatedCostUsd).toBeCloseTo(0.000_12, 8);
   });
 
   test("stamps estimated usage onto chat results when the provider omits it", async () => {
@@ -206,6 +223,7 @@ describe("usage tracking", () => {
 
     expect(result.usage).toEqual({
       inputTokens: 123,
+      modelId: "gpt-4o",
       outputTokens: 45,
       totalTokens: 168,
     });

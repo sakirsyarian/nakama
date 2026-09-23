@@ -48,6 +48,39 @@ const moonshotInstance = {
   type: "moonshot" as const,
 };
 describe("estimateUsageCostUsd", () => {
+  test("prices shared model ids by provider, including subscription zero rates", () => {
+    expect(
+      estimateUsageCostUsd("gpt-5.5", 100_000, 20_000, {
+        provider: "openai",
+        providerInstance: { ...openRouterInstance, type: "chatgpt" },
+      })
+    ).toBeCloseTo(1.1);
+    expect(
+      estimateUsageCostUsd("gpt-5.5", 100_000, 20_000, {
+        provider: "chatgpt",
+      })
+    ).toBe(0);
+    expect(
+      estimateUsageCostUsd("gpt-5.5", 100_000, 20_000, {
+        providerInstance: { ...openRouterInstance, type: "chatgpt" },
+      })
+    ).toBe(0);
+    // Legacy callers without provider context still use the global catalog.
+    expect(estimateUsageCostUsd("gpt-5.5", 100_000, 20_000)).toBeCloseTo(1.1);
+    expect(
+      getExplicitModelPricing("gpt-5.5", { provider: "anthropic" })
+    ).toBeNull();
+  });
+
+  test("estimates direct DeepSeek usage at peak uncached rates", () => {
+    expect(
+      estimateUsageCostUsd("deepseek-flash", 2_000_000, 500_000)
+    ).toBeCloseTo(1.2);
+    expect(
+      estimateUsageCostUsd("deepseek-v4-pro", 2_000_000, 500_000)
+    ).toBeCloseTo(4.62);
+  });
+
   test("computes cost from catalog pricing", () => {
     const cost = estimateUsageCostUsd(
       "claude-sonnet-4-6",
@@ -55,6 +88,23 @@ describe("estimateUsageCostUsd", () => {
       1_000_000
     );
     expect(cost).toBe(18);
+  });
+
+  test("uses Cloudflare's published input and output rates for exact model ids", () => {
+    // https://developers.cloudflare.com/workers-ai/platform/pricing/
+    // Checked 2026-09-22. Each row guards a separately maintained catalog entry.
+    for (const [id, input, output] of [
+      ["@cf/meta/llama-3.3-70b-instruct-fp8-fast", 0.293, 2.253],
+      ["@cf/meta/llama-3.1-8b-instruct", 0.282, 0.827],
+      ["@cf/meta/llama-4-scout-17b-16e-instruct", 0.27, 0.85],
+      ["@cf/qwen/qwen2.5-coder-32b-instruct", 0.66, 1],
+      ["@cf/deepseek-ai/deepseek-r1-distill-qwen-32b", 0.497, 4.881],
+    ] as const) {
+      expect(getExplicitModelPricing(id, { provider: "cloudflare" })).toEqual({
+        inputPerMillionUsd: input,
+        outputPerMillionUsd: output,
+      });
+    }
   });
 
   test("uses fallback pricing for unknown models", () => {
@@ -249,14 +299,14 @@ describe("getExplicitModelPricing", () => {
     });
   });
 
-  test("returns what the user typed for a custom model", () => {
+  test("uses custom endpoint pricing even when the id exists in another catalog", () => {
     expect(
-      getExplicitModelPricing("llama3.2", {
+      getExplicitModelPricing("gpt-5.5", {
         provider: "openai_compatible",
         providerInstance: {
           ...compatibleInstance,
           customModels: [
-            { id: "llama3.2", inputPerMillionUsd: 2, outputPerMillionUsd: 4 },
+            { id: "gpt-5.5", inputPerMillionUsd: 2, outputPerMillionUsd: 4 },
           ],
         },
       })

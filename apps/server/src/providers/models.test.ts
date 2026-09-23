@@ -8,10 +8,15 @@ import {
   resolveModel,
   resolveModelLimits,
 } from "./models";
+import { estimateUsageCostUsd } from "./pricing";
 
 describe("isOpenRouterModelSlug", () => {
   test("accepts vendor/model slugs", () => {
     expect(isOpenRouterModelSlug("anthropic/claude-sonnet-4-6")).toBe(true);
+  });
+
+  test("accepts latest-model aliases", () => {
+    expect(isOpenRouterModelSlug("~google/gemini-flash-latest")).toBe(true);
   });
 
   test("rejects bare model ids", () => {
@@ -82,6 +87,36 @@ describe("resolveModel", () => {
     expect(getModelById("gpt-5.6-luna")?.provider).toBe("openai");
   });
 
+  test("exposes OpenAI API limits and base text prices without changing selections", () => {
+    // Official model pages: https://developers.openai.com/api/docs/models/<id>
+    // Cost expectations use 100k input + 20k output, below long-context tiers.
+    for (const [id, context, output, inputPrice, outputPrice, cost] of [
+      ["gpt-6-sol", 1_050_000, 128_000, 2, 10, 0.4],
+      ["gpt-6-luna", 1_050_000, 128_000, 0.1, 0.5, 0.02],
+      ["gpt-6-astra", 1_050_000, 128_000, 10, 50, 2],
+      ["gpt-5.6-luna", 1_050_000, 128_000, 0.2, 1.2, 0.044],
+      ["gpt-5.5", 1_050_000, 128_000, 5, 30, 1.1],
+      ["gpt-5.4", 1_050_000, 128_000, 2.5, 15, 0.55],
+      ["gpt-5.3-codex", 400_000, 128_000, 1.75, 14, 0.455],
+      ["gpt-4o-mini", 128_000, 16_384, 0.15, 0.6, 0.027],
+    ] as const) {
+      expect(
+        getModelsForProvider("openai").find((m) => m.id === id)
+      ).toMatchObject({
+        inputPerMillionUsd: inputPrice,
+        outputPerMillionUsd: outputPrice,
+        supportsVision: true,
+      });
+      expect(resolveModelLimits("openai", id)).toEqual({
+        contextWindow: context,
+        maxOutputTokens: output,
+      });
+      expect(estimateUsageCostUsd(id, 100_000, 20_000)).toBeCloseTo(cost);
+      expect(resolveModel("openai", id)).toBe(id);
+    }
+    expect(getDefaultModel("openai")).toBe("gpt-5.4");
+  });
+
   test("resolves catalog models for Gemini", () => {
     expect(resolveModel("gemini", "gemini-2.5-pro")).toBe("gemini-2.5-pro");
     expect(getDefaultModel("gemini")).toBe("gemini-2.5-flash");
@@ -112,6 +147,34 @@ describe("resolveModel", () => {
     );
     expect(resolveModel("openai", "gpt-5.4", customModels)).toBe("gpt-4o-mini");
     expect(resolveModel("openai", undefined, customModels)).toBe("gpt-4o-mini");
+  });
+
+  test("exposes current Anthropic limits and prices while preserving selections", () => {
+    for (const [id, contextWindow, maxOutputTokens, input, output] of [
+      ["claude-sonnet-5", 1_000_000, 128_000, 2, 10],
+      ["claude-opus-5", 1_000_000, 128_000, 5, 25],
+      ["claude-opus-5-5", 1_000_000, 128_000, 4, 20],
+      ["claude-haiku-4-5-20251001", 200_000, 64_000, 1, 5],
+      ["claude-sonnet-4-6", 1_000_000, 128_000, 3, 15],
+      ["claude-opus-4-6", 1_000_000, 128_000, 5, 25],
+    ] as const) {
+      expect(getModelById(id)).toMatchObject({
+        contextWindow,
+        inputPerMillionUsd: input,
+        maxOutputTokens,
+        outputPerMillionUsd: output,
+        provider: "anthropic",
+        supportsThinking: true,
+        supportsVision: true,
+      });
+      expect(resolveModel("anthropic", id)).toBe(id);
+    }
+    expect(getDefaultModel("anthropic")).toBe("claude-sonnet-4-6");
+    expect(
+      resolveModel("anthropic", undefined, [
+        { default: true, id: "claude-opus-4-6" },
+      ])
+    ).toBe("claude-opus-4-6");
   });
 
   test("passes through non-catalog models for native providers", () => {
@@ -147,7 +210,45 @@ describe("resolveModel", () => {
 
   test("resolves catalog models for DeepSeek", () => {
     expect(resolveModel("deepseek", "deepseek-v4-pro")).toBe("deepseek-v4-pro");
-    expect(getDefaultModel("deepseek")).toBe("deepseek-v4-flash");
+    expect(getDefaultModel("deepseek")).toBe("deepseek-flash");
+    for (const id of [
+      "deepseek-flash",
+      "deepseek-v4-flash",
+      "deepseek-v4-flash-vision-exp",
+    ]) {
+      expect(resolveModel("deepseek", id)).toBe(id);
+      expect(getModelById(id)).toMatchObject({
+        contextWindow: 1_000_000,
+        default: id === "deepseek-flash",
+        inputPerMillionUsd: 0.3,
+        maxOutputTokens: 384_000,
+        outputPerMillionUsd: 1.2,
+        provider: "deepseek",
+        supportsThinking: true,
+        supportsVision: false,
+      });
+    }
+  });
+
+  test("keeps DeepSeek custom shortlist defaults and selections", () => {
+    const customModels = [
+      { default: true, id: "private-model" },
+      { id: "deepseek-v4-flash-vision-exp", supportsVision: true },
+    ];
+    expect(getDefaultModel("deepseek", customModels)).toBe("private-model");
+    expect(resolveModel("deepseek", "deepseek-flash", customModels)).toBe(
+      "private-model"
+    );
+    expect(
+      resolveModel("deepseek", "deepseek-v4-flash-vision-exp", customModels)
+    ).toBe("deepseek-v4-flash-vision-exp");
+    expect(
+      modelSupportsVision(
+        "deepseek-v4-flash-vision-exp",
+        "deepseek",
+        customModels
+      )
+    ).toBe(true);
   });
 
   test("resolves catalog models for Together AI", () => {
@@ -549,11 +650,11 @@ describe("modelSupportsVision", () => {
 
 describe("resolveModelLimits", () => {
   test("keeps ChatGPT limits separate from OpenAI for the same model id", () => {
-    expect(resolveModelLimits("chatgpt", "gpt-5.6-luna")).toEqual({
+    expect(resolveModelLimits("chatgpt", "gpt-5.5")).toEqual({
       contextWindow: 272_000,
       maxOutputTokens: 8192,
     });
-    expect(resolveModelLimits("openai", "gpt-5.6-luna")).toEqual({
+    expect(resolveModelLimits("openai", "gpt-5.5")).toEqual({
       contextWindow: 1_050_000,
       maxOutputTokens: 128_000,
     });
@@ -580,10 +681,10 @@ describe("resolveModelLimits", () => {
 
   test("prefers the instance entry over the catalog", () => {
     expect(
-      resolveModelLimits("chatgpt", "gpt-5.6-luna", [
+      resolveModelLimits("openai", "gpt-5.5", [
         {
           contextWindow: 32_000,
-          id: "gpt-5.6-luna",
+          id: "gpt-5.5",
           maxOutputTokens: 4096,
         },
       ])

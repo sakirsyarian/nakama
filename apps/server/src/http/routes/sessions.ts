@@ -3,6 +3,7 @@ import type { AgentChatSession } from "@nakama/agent";
 import type {
   BranchSessionRequest,
   BranchSessionResponse,
+  ChatTurnUsage,
   CompactionResponse,
   CompactSessionRequest,
   CreateSessionRequest,
@@ -50,9 +51,23 @@ export function registerSessionRoutes(
   const requireSessionAccess = async (
     c: Parameters<typeof requireActiveOrgIdFromContext>[0]
   ) => {
+    const auth = getRequestAuth(c);
+    const appUserId = c.req.header("X-Nakama-App-User-Id")?.trim();
+    if (auth.mode === "api-key" && !appUserId) {
+      throw new NakamaApiError(
+        "X-Nakama-App-User-Id is required for API-key session access.",
+        400
+      );
+    }
     const orgId = requireActiveOrgIdFromContext(c);
     const sessionId = decodeURIComponent(c.req.param("sessionId") ?? "");
-    await agent.assertSessionProfileAccess(sessionId, orgId, getRequestAuth(c));
+    await agent.assertSessionProfileAccess(
+      sessionId,
+      orgId,
+      auth,
+      appUserId,
+      auth.mode === "api-key"
+    );
     return { orgId, sessionId };
   };
   const errorSchema = z
@@ -61,6 +76,7 @@ export function registerSessionRoutes(
   const agentChannelSchema = z.enum(AGENT_CHANNELS).openapi("AgentChannel");
   const createSessionRequestSchema = z
     .object({
+      appUserId: z.string().trim().min(1).max(200).optional(),
       channel: agentChannelSchema,
       cognito: z.boolean().optional(),
       codingWorkspaceRoot: z.string().optional(),
@@ -177,9 +193,82 @@ export function registerSessionRoutes(
       stream: z.boolean().optional(),
     })
     .openapi("SendMessageRequest");
+  const contextUsageSchema = z
+    .object({
+      breakdown: z
+        .object({
+          conversation: z.number(),
+          systemPrompt: z.number(),
+          toolDefinitions: z.number(),
+        })
+        .optional(),
+      bytesKeptOut: z.number().optional(),
+      bytesProduced: z.number().optional(),
+      contextWindow: z.number(),
+      source: z.enum(["provider", "estimate"]),
+      usableContextTokens: z.number(),
+      usedTokens: z.number(),
+    })
+    .openapi("ChatContextUsage");
+  const chatUsageSchema = z
+    .object({
+      cachedInputTokens: z.number().optional(),
+      costUsd: z.number().optional(),
+      estimated: z.boolean().optional(),
+      inputTokens: z.number(),
+      modelId: z.string().optional(),
+      outputTokens: z.number(),
+      totalTokens: z.number(),
+    })
+    .openapi("ChatUsage");
+  const turnUsageSchema = z
+    .object({
+      cachedInputTokens: z.number(),
+      calls: z.array(chatUsageSchema),
+      costUsd: z.number().optional(),
+      estimated: z.boolean(),
+      inputTokens: z.number(),
+      outputTokens: z.number(),
+      totalTokens: z.number(),
+    })
+    .openapi("ChatTurnUsage");
   const sendMessageResponseSchema = z
-    .object({ reply: z.string() })
-    .openapi("SendMessageResponse");
+    .object({
+      contextUsage: contextUsageSchema.optional(),
+      reply: z.string(),
+      usage: turnUsageSchema.optional(),
+    })
+    .openapi("SendMessageResponse", {
+      example: {
+        contextUsage: {
+          breakdown: {
+            conversation: 420,
+            systemPrompt: 980,
+            toolDefinitions: 310,
+          },
+          contextWindow: 128_000,
+          source: "estimate",
+          usableContextTokens: 120_000,
+          usedTokens: 1710,
+        },
+        reply: "Hello! How can I help?",
+        usage: {
+          cachedInputTokens: 0,
+          calls: [
+            {
+              inputTokens: 1290,
+              modelId: "gemini-2.5-flash",
+              outputTokens: 64,
+              totalTokens: 1354,
+            },
+          ],
+          estimated: false,
+          inputTokens: 1290,
+          outputTokens: 64,
+          totalTokens: 1354,
+        },
+      },
+    });
   const sessionIdParamSchema = z.object({
     sessionId: z.string().openapi({ param: { in: "path", name: "sessionId" } }),
   });
@@ -434,6 +523,11 @@ export function registerSessionRoutes(
         200: {
           content: {
             "application/json": { schema: sendMessageResponseSchema },
+            "text/event-stream": {
+              example:
+                'data: {"type":"tool_start","toolCallId":"call_1","tool":"search_files","input":{"query":"pricing"}}\\n\\ndata: {"type":"tool_end","toolCallId":"call_1","tool":"search_files","result":{"matches":[]}}\\n\\ndata: {"type":"chunk","delta":"I could not find any pricing files."}\\n\\ndata: {"type":"done","reply":"I could not find any pricing files."}\\n\\n',
+              schema: z.string(),
+            },
           },
           description: "Assistant reply",
         },
@@ -498,6 +592,12 @@ export function registerSessionRoutes(
       return errorResponse("Invalid session request.", 400);
     }
     const body: CreateSessionRequest = parsedBody.data;
+    if (auth.mode === "api-key" && !body.appUserId) {
+      return errorResponse(
+        "appUserId is required when creating a session with an API key.",
+        400
+      );
+    }
     const channel = parseChannel(body.channel);
     if (
       body.codingWorkspaceRoot !== undefined &&
@@ -514,6 +614,7 @@ export function registerSessionRoutes(
       body.profileId,
       auth.user.id,
       {
+        appUserId: auth.mode === "api-key" ? body.appUserId : undefined,
         cognito: body.cognito,
         codingWorkspaceRoot: body.codingWorkspaceRoot,
         excludeSuperBot: auth.mode === "local-token" && channel !== "cli",
@@ -527,6 +628,14 @@ export function registerSessionRoutes(
 
   app.get("/v1/sessions", async (c) => {
     const orgId = requireActiveOrgIdFromContext(c);
+    const auth = getRequestAuth(c);
+    const appUserId = c.req.header("X-Nakama-App-User-Id")?.trim();
+    if (auth.mode === "api-key" && !appUserId) {
+      return errorResponse(
+        "X-Nakama-App-User-Id is required for API-key session access.",
+        400
+      );
+    }
     const profileId = c.req.query("profileId")?.trim();
     const channel = parseChannel(c.req.query("channel"));
 
@@ -535,7 +644,7 @@ export function registerSessionRoutes(
     }
 
     return json<ListSessionsResponse>(
-      await agent.listSessions(orgId, profileId, channel, getRequestAuth(c))
+      await agent.listSessions(orgId, profileId, channel, auth, appUserId)
     );
   });
 
@@ -747,26 +856,42 @@ export function registerSessionRoutes(
     try {
       const reply = await session.send(input);
       const contextUsage = session.getContextUsage() ?? undefined;
+      const usage = session.getTurnUsage() ?? undefined;
       sessionTurnRegistry.endTurn(sessionId, {
         reply,
         type: "done",
         ...(contextUsage ? { contextUsage } : {}),
+        ...(usage ? { usage } : {}),
       });
       agent.scheduleSessionTitleGeneration(sessionId);
       agent.schedulePostTurnSkillReview(sessionId);
       return json<SendMessageResponse>({
         reply,
         ...(contextUsage ? { contextUsage } : {}),
+        ...(usage ? { usage } : {}),
       });
     } catch (error) {
       if (!(error instanceof NakamaApiError && error.status < 500)) {
         void reportError(error, { kind: "turn", source: "server" });
       }
       const message = formatServerError(error);
-      sessionTurnRegistry.endTurn(sessionId, { error: message, type: "error" });
+      // Same guard as the stream error branch: this read sits inside the catch,
+      // so a throw would swallow the failure it is meant to report.
+      let spent: ChatTurnUsage | undefined;
+      try {
+        spent = session.getTurnUsage() ?? undefined;
+      } catch {
+        spent = undefined;
+      }
+      sessionTurnRegistry.endTurn(sessionId, {
+        error: message,
+        type: "error",
+        ...(spent ? { usage: spent } : {}),
+      });
       return errorResponse(
         message,
-        error instanceof NakamaApiError ? error.status : 500
+        error instanceof NakamaApiError ? error.status : 500,
+        spent ? { usage: spent } : undefined
       );
     }
   });

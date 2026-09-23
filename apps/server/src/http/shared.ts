@@ -6,6 +6,7 @@ import {
   type AgentQuestionnaire,
   type AgentTodo,
   type ApiErrorResponse,
+  type ChatTurnUsage,
   type ChatUsage,
   formatServerError,
   LOCAL_CLIENT_EMAIL,
@@ -19,6 +20,7 @@ import {
 } from "@nakama/core";
 import type {
   DatabaseAdapter,
+  StoredApiKeyRecord,
   StoredBrowserSessionRecord,
   StoredUserRecord,
 } from "@nakama/db";
@@ -131,7 +133,7 @@ export function isSecureRequest(request: Request): boolean {
 export interface RequestAuthContext {
   activeOrgId?: string;
   isPlatformAdmin: boolean;
-  mode: "browser-session" | "local-token";
+  mode: "api-key" | "browser-session" | "local-token";
   orgRole?: OrgRole;
   session?: StoredBrowserSessionRecord;
   user: Pick<StoredUserRecord, "id" | "email">;
@@ -157,7 +159,27 @@ export async function authenticateRequest(
 ): Promise<RequestAuthContext | null> {
   const authHeader = request.headers.get("Authorization");
   if (authHeader?.startsWith("Bearer ")) {
-    const payload = await verifyLocalAuthToken(authHeader.slice(7).trim());
+    const token = authHeader.slice(7).trim();
+    const apiKey = await resolveApiKey(token, authService, databaseAdapter);
+    if (apiKey) {
+      const user = await databaseAdapter.getUserById(apiKey.createdByUserId);
+      if (!user || user.disabledAt) {
+        return null;
+      }
+
+      await databaseAdapter.updateApiKeyLastUsedAt(
+        apiKey.id,
+        new Date().toISOString()
+      );
+      return {
+        activeOrgId: apiKey.orgId,
+        isPlatformAdmin: false,
+        mode: "api-key",
+        user: toAuthUser(user),
+      };
+    }
+
+    const payload = await verifyLocalAuthToken(token);
     if (!payload) {
       return null;
     }
@@ -233,6 +255,29 @@ export async function authenticateRequest(
     session,
     user: toAuthUser(user),
   };
+}
+
+async function resolveApiKey(
+  token: string,
+  authService: AuthService,
+  databaseAdapter: DatabaseAdapter
+): Promise<StoredApiKeyRecord | null> {
+  const match = /^nk_(test|live)_([a-f0-9]{64})$/.exec(token);
+  if (!match) {
+    return null;
+  }
+
+  const keyPrefix = `nk_${match[1]}_${match[2].slice(0, 12)}`;
+  const record = await databaseAdapter.getApiKeyByPrefix(keyPrefix);
+  if (
+    !record ||
+    record.revokedAt ||
+    (record.expiresAt && new Date(record.expiresAt).getTime() <= Date.now())
+  ) {
+    return null;
+  }
+
+  return authService.hashToken(token) === record.secretHash ? record : null;
 }
 
 export function assertBrowserCsrf(
@@ -745,10 +790,12 @@ export function streamMessage(
         const reply = await Promise.race(raced);
 
         const contextUsage = session.getContextUsage() ?? undefined;
+        const usage = session.getTurnUsage() ?? undefined;
         send({
           reply,
           type: "done",
           ...(contextUsage ? { contextUsage } : {}),
+          ...(usage ? { usage } : {}),
         });
       } catch (error) {
         const cancelled = turnSignal.aborted && !timedOut;
@@ -763,9 +810,19 @@ export function streamMessage(
           // The stream already told the user; without this the operator never hears.
           void reportError(error, { kind: "turn", source: "server" });
         }
+        // The provider charged for the calls that did land, so a failed turn
+        // still reports them rather than billing silently. Wrapped because a
+        // throw here would replace the real failure with a blank one.
+        let spent: ChatTurnUsage | undefined;
+        try {
+          spent = session.getTurnUsage() ?? undefined;
+        } catch {
+          spent = undefined;
+        }
         send({
           error: cancelled ? "Turn cancelled." : formatServerError(error),
           type: "error",
+          ...(spent ? { usage: spent } : {}),
         });
       } finally {
         // Every turn scheduled these. Left pending, a long-running server

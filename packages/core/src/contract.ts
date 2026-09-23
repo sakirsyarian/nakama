@@ -476,7 +476,13 @@ export interface AuthUserResponse {
   activeOrgId?: string | null;
   email: string;
   id: string;
+  /**
+   * What this credential may do, not what its owner may do. An API key minted
+   * by a platform admin is de-privileged, so it reports false here.
+   */
   isPlatformAdmin?: boolean;
+  /** Which credential answered, which is what explains the flag above. */
+  mode?: "api-key" | "browser-session" | "local-token";
   name?: string | null;
   orgId?: string | null;
   phone?: string | null;
@@ -665,6 +671,58 @@ export interface UpdateOrgMemberRequest {
   name?: string | null;
   phone?: string | null;
   role?: OrgRole;
+}
+
+/**
+ * One login session, as its owner sees it. The token hashes never leave the
+ * database: a caller revokes a session by id, and the id alone is useless
+ * without the row.
+ */
+export interface BrowserSessionSummary {
+  createdAt: string;
+  /** True for the session making the request, so the UI does not offer to log you out of the page you are on. */
+  current: boolean;
+  expiresAt: string;
+  id: string;
+  lastUsedAt: string | null;
+}
+
+export interface ListBrowserSessionsResponse {
+  sessions: BrowserSessionSummary[];
+}
+
+export interface RevokeBrowserSessionsResponse {
+  revoked: number;
+}
+
+export interface ApiKeySummary {
+  createdAt: string;
+  environment: "live" | "test";
+  expiresAt: string | null;
+  id: string;
+  keyPrefix: string;
+  lastUsedAt: string | null;
+  name: string;
+  revokedAt: string | null;
+}
+
+export interface CreateApiKeyRequest {
+  expiresAt?: string | null;
+  name: string;
+}
+
+export interface CreateApiKeyResponse {
+  key: ApiKeySummary;
+  secret: string;
+}
+
+export interface ListApiKeysResponse {
+  keys: ApiKeySummary[];
+}
+
+export interface RotateApiKeyResponse {
+  key: ApiKeySummary;
+  secret: string;
 }
 
 export interface OrgMemoryResponse {
@@ -921,6 +979,8 @@ export interface ListChannelOrgMappingsResponse {
 }
 
 export interface CreateSessionRequest {
+  /** Stable end-user identifier supplied by a trusted backend using an API key. */
+  appUserId?: string;
   channel: AgentChannel;
   codingWorkspaceRoot?: string;
   /**
@@ -1113,6 +1173,8 @@ export interface SendMessageRequest {
 export interface SendMessageResponse {
   contextUsage?: ChatContextUsage;
   reply: string;
+  /** Billable tokens for this turn. `contextUsage` is not a substitute. */
+  usage?: ChatTurnUsage;
 }
 
 export type StreamEvent =
@@ -1148,8 +1210,13 @@ export type StreamEvent =
       label: string;
     }
   | { type: "usage"; usage: ChatUsage }
-  | { type: "done"; reply: string; contextUsage?: ChatContextUsage }
-  | { type: "error"; error: string };
+  | {
+      type: "done";
+      reply: string;
+      contextUsage?: ChatContextUsage;
+      usage?: ChatTurnUsage;
+    }
+  | { type: "error"; error: string; usage?: ChatTurnUsage };
 
 export interface DraftAutomationRequest {
   channel: AgentChannel;
@@ -1719,6 +1786,8 @@ export interface ProfileRef {
 export interface ApiErrorResponse {
   error: string;
   profiles?: ProfileRef[];
+  /** Tokens a failed turn had already spent. They are billable regardless. */
+  usage?: ChatTurnUsage;
 }
 
 export interface CustomModelEntry {
@@ -1846,6 +1915,8 @@ export interface ConfigureProviderResponse {
 }
 
 export interface ProfileSummary {
+  /** Whether this profile may create and execute automations. */
+  automationsEnabled?: boolean;
   createdAt: string;
   hasAvatar: boolean;
   id: string;
@@ -1949,8 +2020,10 @@ export interface CreateSkillRequest {
 }
 
 export interface InstallSkillRequest {
+  command?: string;
   profileId: string;
-  url: string;
+  url?: string;
+  zipBase64?: string;
 }
 
 export interface PatchSkillRequest {
@@ -2105,6 +2178,7 @@ export interface CreateProfileRequest {
 }
 
 export interface UpdateProfileRequest {
+  automationsEnabled?: boolean;
   model?: string | null;
   name?: string;
   skillsCuratorConsolidateEnabled?: boolean | null;
@@ -2259,6 +2333,8 @@ export interface ListWorkspaceFilesResponse {
 }
 
 export interface ListArtifactsOptions {
+  /** Scopes the listing to one end user's artifacts, when the caller names one. */
+  appUserId?: string | null;
   folder?: string;
   limit?: number;
   offset?: number;
@@ -2534,6 +2610,27 @@ export interface ChatUsage {
   costUsd?: number;
   /** True when input/output tokens were estimated rather than reported by the provider. */
   estimated?: boolean;
+  inputTokens: number;
+  /** The model that served this call, so a turn spanning two can be split. */
+  modelId?: string;
+  outputTokens: number;
+  totalTokens: number;
+}
+
+/**
+ * What one turn actually cost, as the provider counted it. Separate from
+ * `ChatContextUsage`, which is context window occupancy: that re-counts the
+ * system prompt and the tool definitions on every message and folds input and
+ * output into one number, so it is the wrong basis for billing.
+ */
+export interface ChatTurnUsage {
+  cachedInputTokens: number;
+  /** One entry per provider call, in the order they ran. */
+  calls: ChatUsage[];
+  /** Absent when any call in the turn has no known pricing. */
+  costUsd?: number;
+  /** True when any call's tokens were estimated rather than reported. */
+  estimated: boolean;
   inputTokens: number;
   outputTokens: number;
   totalTokens: number;

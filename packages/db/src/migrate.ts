@@ -23,16 +23,19 @@ export function migrateDatabase(db: Database): void {
   atomic(migrateAutomationsTable);
   atomic(migrateDropTasksTables);
   atomic(migrateSessionsTable);
+  atomic(migrateSessionAppUserId);
   atomic(migrateMcpTables);
   atomic(migrateSkillsTables);
   atomic(migrateUsersTable);
   atomic(migrateOrgTables);
+  atomic(migrateApiKeysTable);
   atomic(migrateLegacyUserContextToOrgMembers);
   atomic(migrateOrgMemoryProposalsTable);
   atomic(migrateSkillProposalsTable);
   atomic(migrateSkillSuggestionsTable);
   atomic(migrateSkillsWriteApprovalColumns);
   atomic(migrateSkillsPostTurnReviewColumns);
+  atomic(migrateAutomationsEnabledColumn);
   atomic(migrateSkillsCuratorColumns);
   atomic(migrateLlmUsageQuotaColumns);
   atomic(migrateOrgLlmMonthlyQuotaTable);
@@ -60,6 +63,18 @@ export function migrateDatabase(db: Database): void {
   atomic(migrateProfileChangeEventsTable);
   atomic(migratePluginTables);
   atomic(migrateFilePinsTable);
+}
+
+function migrateSessionAppUserId(db: Database): void {
+  const columns = db.prepare("PRAGMA table_info(sessions)").all() as Array<{
+    name: string;
+  }>;
+  if (!columns.some((column) => column.name === "app_user_id")) {
+    db.exec("ALTER TABLE sessions ADD COLUMN app_user_id TEXT;");
+  }
+  db.exec(
+    "CREATE INDEX IF NOT EXISTS sessions_app_user_id ON sessions (profile_id, channel, app_user_id)"
+  );
 }
 
 function migrateAuditEventsTable(db: Database): void {
@@ -493,6 +508,28 @@ function migrateOrgTables(db: Database): void {
   }
 }
 
+function migrateApiKeysTable(db: Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS api_keys (
+      id TEXT PRIMARY KEY NOT NULL,
+      org_id TEXT NOT NULL,
+      name TEXT NOT NULL,
+      environment TEXT NOT NULL,
+      key_prefix TEXT NOT NULL,
+      secret_hash TEXT NOT NULL,
+      created_by_user_id TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      expires_at TEXT,
+      last_used_at TEXT,
+      revoked_at TEXT,
+      FOREIGN KEY (org_id) REFERENCES organizations (id) ON DELETE CASCADE,
+      FOREIGN KEY (created_by_user_id) REFERENCES users (id) ON DELETE CASCADE
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS api_keys_prefix_unique ON api_keys (key_prefix);
+    CREATE INDEX IF NOT EXISTS api_keys_org_id ON api_keys (org_id, created_at DESC);
+  `);
+}
+
 /**
  * Pre-org installs stored USER.md on users.user_context. Writes moved to
  * org_members (#550); copy any remaining legacy values into memberships that
@@ -646,6 +683,19 @@ function migrateSkillsWriteApprovalColumns(db: Database): void {
     )
   ) {
     db.exec("ALTER TABLE profiles ADD COLUMN skills_write_approval INTEGER;");
+  }
+}
+
+function migrateAutomationsEnabledColumn(db: Database): void {
+  const columns = db.prepare("PRAGMA table_info(profiles)").all() as Array<{
+    name: string;
+  }>;
+  if (
+    !new Set(columns.map((column) => column.name)).has("automations_enabled")
+  ) {
+    db.exec(
+      "ALTER TABLE profiles ADD COLUMN automations_enabled INTEGER NOT NULL DEFAULT 1;"
+    );
   }
 }
 
