@@ -1,22 +1,26 @@
 import { Button } from "@nakama/ui/button";
 import { Spinner } from "@nakama/ui/spinner";
 import { Textarea } from "@nakama/ui/textarea";
+import { useState } from "react";
 
 export function ArtifactMarkdownEditor({
   busy,
-  draft,
   error,
+  initialDraft,
   onCancel,
-  onChange,
   onSave,
 }: {
   busy: boolean;
-  draft: string;
   error: string | null;
+  initialDraft: string;
   onCancel: () => void;
-  onChange: (value: string) => void;
-  onSave: () => void;
+  onSave: (nextContent: string) => void;
 }) {
+  // The draft lives here, not in the panel hook: routing every keystroke
+  // through the panel context re-rendered the whole page and the panel's
+  // scroll restoration kept yanking the editor away mid-typing.
+  const [draft, setDraft] = useState(initialDraft);
+
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-3 p-4">
       {error ? (
@@ -28,7 +32,7 @@ export function ArtifactMarkdownEditor({
       <Textarea
         className="field-sizing-fixed min-h-[16rem] flex-1 resize-none overflow-y-auto font-mono text-xs leading-relaxed"
         disabled={busy}
-        onChange={(event) => onChange(event.target.value)}
+        onChange={(event) => setDraft(event.target.value)}
         value={draft}
       />
 
@@ -42,7 +46,12 @@ export function ArtifactMarkdownEditor({
         >
           Cancel
         </Button>
-        <Button disabled={busy} onClick={onSave} size="sm" type="button">
+        <Button
+          disabled={busy}
+          onClick={() => onSave(draft)}
+          size="sm"
+          type="button"
+        >
           {busy ? <Spinner className="size-4" /> : "Save"}
         </Button>
       </div>

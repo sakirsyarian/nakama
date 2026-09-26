@@ -180,7 +180,6 @@ export function useArtifactAttachmentPreviewPanel({
   const [previewMode, setPreviewMode] =
     useState<ArtifactPreviewMode>("preview");
   const [editMode, setEditMode] = useState<EditMode>(null);
-  const [draft, setDraft] = useState("");
   const [saveError, setSaveError] = useState<string | null>(null);
   const { activeOrg } = useAuth();
   const writeArtifact = useWriteArtifactMutation();
@@ -295,14 +294,13 @@ export function useArtifactAttachmentPreviewPanel({
       return (
         <ArtifactMarkdownEditor
           busy={writeArtifact.isPending}
-          draft={draft}
           error={saveError}
+          initialDraft={content ?? ""}
           onCancel={() => {
             setEditMode(null);
             setSaveError(null);
           }}
-          onChange={setDraft}
-          onSave={() => void saveDraft(draft)}
+          onSave={(nextContent) => void saveDraft(nextContent)}
         />
       );
     }
@@ -404,7 +402,10 @@ export function useArtifactAttachmentPreviewPanel({
               isVideo,
               previewMode: mode,
             })
-          : "flex flex-col overflow-hidden p-0",
+          : // `!` beats the base `overflow-y-auto p-4`: stylesheet order makes the
+            // plain overrides lose, leaving the body scrollable so the panel's
+            // scroll restoration fights the editor.
+            "flex flex-col overflow-hidden! p-0!",
       content: buildPanelBody(undefined, mode),
       fullscreen,
       headerActions: (
@@ -433,12 +434,7 @@ export function useArtifactAttachmentPreviewPanel({
           }
           onEdit={() => {
             setSaveError(null);
-            if (isSpreadsheet) {
-              setEditMode("spreadsheet");
-              return;
-            }
-            setDraft(content ?? "");
-            setEditMode("markdown");
+            setEditMode(isSpreadsheet ? "spreadsheet" : "markdown");
           }}
           onToggleFullscreen={() => setFullscreen((current) => !current)}
           share={share}
@@ -491,7 +487,6 @@ export function useArtifactAttachmentPreviewPanel({
     previewMode,
     canEdit,
     editMode,
-    draft,
     saveError,
     writeArtifact.isPending,
     showPreviewToggle,
