@@ -167,6 +167,8 @@ export interface StoredSessionSummaryRecord {
   messageCount: number;
   orgId?: string | null;
   pinned: boolean;
+  /** 1-based place in the list the query returned the row from. */
+  position: number;
   preview: string | null;
   profileId: string;
   title: string | null;
@@ -407,10 +409,43 @@ export interface StoredUserRecord {
   email: string;
   id: string;
   isPlatformAdmin?: boolean;
+  mfaEnabled?: boolean;
+  mfaTotpLastStep?: number | null;
+  mfaTotpPendingSecretEnc?: string | null;
+  mfaTotpSecretEnc?: string | null;
   name?: string | null;
   passwordHash: string;
   phone?: string | null;
   updatedAt: string;
+}
+
+export interface StoredMfaBackupCode {
+  codeHash: string;
+  createdAt: string;
+  id: string;
+  usedAt: string | null;
+  userId: string;
+}
+
+export interface StoredPasskeyRecord {
+  counter: number;
+  createdAt: string;
+  credentialId: string;
+  id: string;
+  name: string;
+  publicKey: string;
+  transports: string[];
+  userId: string;
+}
+
+export type PasskeyChallengeType = "authentication" | "registration";
+
+export interface StoredPasskeyChallenge {
+  challenge: string;
+  createdAt: string;
+  expiresAt: string;
+  type: PasskeyChallengeType;
+  userId: string | null;
 }
 
 export type { OrgPluginLifecycleState } from "@nakama/core";
@@ -586,7 +621,8 @@ export type SkillProposalAction =
   | "delete"
   | "edit"
   | "write_file"
-  | "remove_file";
+  | "remove_file"
+  | "approve_code";
 
 export interface StoredSkillProposal {
   action: SkillProposalAction;
@@ -677,6 +713,12 @@ export interface StoredAuditEvent {
 }
 
 export interface DatabaseAdapter {
+  activateUserMfa(
+    id: string,
+    totpSecretEnc: string,
+    lastStep: number,
+    updatedAt: string
+  ): Promise<boolean>;
   appendMessagesForSession(
     sessionId: string,
     messages: StoredSessionMessageRecord[]
@@ -699,6 +741,18 @@ export interface DatabaseAdapter {
   compareAndSetOrgPluginState(
     input: CompareAndSetOrgPluginStateInput
   ): Promise<PluginPublishResult>;
+  consumeMfaBackupCode(
+    userId: string,
+    codeHash: string,
+    usedAt: string
+  ): Promise<boolean>;
+  consumeMfaTotpStep(userId: string, step: number): Promise<boolean>;
+  consumePasskeyChallenge(
+    challenge: string,
+    userId: string | null,
+    type: PasskeyChallengeType,
+    consumedAt: string
+  ): Promise<boolean>;
   consumePasswordResetToken(
     tokenHash: string,
     passwordHash: string,
@@ -719,6 +773,7 @@ export interface DatabaseAdapter {
     userId: string,
     orgId: string
   ): Promise<AutomationUnreadCountRecord[]>;
+  countUnusedMfaBackupCodes(userId: string): Promise<number>;
   countUsers(): Promise<number>;
   createApiKey(record: StoredApiKeyRecord): Promise<void>;
 
@@ -727,10 +782,13 @@ export interface DatabaseAdapter {
   createAuditEvent(record: StoredAuditEvent): Promise<void>;
 
   createBrowserSession(record: StoredBrowserSessionRecord): Promise<void>;
+  createMfaBackupCode(record: StoredMfaBackupCode): Promise<void>;
 
   createOrgInvite(record: StoredOrgInviteRecord): Promise<void>;
 
   createOrgMemoryProposal(record: StoredOrgMemoryProposal): Promise<void>;
+  createPasskey(record: StoredPasskeyRecord): Promise<void>;
+  createPasskeyChallenge(record: StoredPasskeyChallenge): Promise<void>;
 
   createPasswordResetToken(
     record: StoredPasswordResetTokenRecord
@@ -751,6 +809,7 @@ export interface DatabaseAdapter {
   deleteComposioUserConnection(id: string): Promise<boolean>;
   deleteMcpServer(id: string): Promise<boolean>;
   deleteMessagesForSession(sessionId: string): Promise<void>;
+  deleteMfaBackupCodes(userId: string): Promise<void>;
   deleteNotificationDestination(id: string): Promise<boolean>;
   deleteOrganization(id: string): Promise<boolean>;
   deleteOrgMember(orgId: string, userId: string): Promise<boolean>;
@@ -759,6 +818,7 @@ export interface DatabaseAdapter {
     pluginId: string,
     expectedRevision: number
   ): Promise<boolean>;
+  deletePasskeys(userId: string): Promise<void>;
   deletePluginRelease(pluginId: string, version: string): Promise<boolean>;
   deleteProfile(id: string): Promise<boolean>;
   deleteSession(id: string): Promise<boolean>;
@@ -801,6 +861,10 @@ export interface DatabaseAdapter {
   ): Promise<StoredArtifactShareRecord | null>;
   getAttachment(id: string): Promise<StoredAttachmentRecord | null>;
   getAutomation(id: string): Promise<StoredAutomationRecord | null>;
+  getAutomationRun(
+    automationId: string,
+    runId: string
+  ): Promise<StoredAutomationRunRecord | null>;
 
   getAutomationRunReadThrough(
     userId: string,
@@ -847,6 +911,13 @@ export interface DatabaseAdapter {
     orgId: string,
     pluginId: string
   ): Promise<StoredOrgPluginRecord | null>;
+  getPasskey(
+    userId: string,
+    credentialId: string
+  ): Promise<StoredPasskeyRecord | null>;
+  getPasskeyByCredentialId(
+    credentialId: string
+  ): Promise<StoredPasskeyRecord | null>;
   getPendingOrgInvite(
     orgId: string,
     email: string
@@ -1018,6 +1089,7 @@ export interface DatabaseAdapter {
     status?: OrgMemoryProposalStatus
   ): Promise<StoredOrgMemoryProposal[]>;
   listOrgPlugins(orgId?: string): Promise<StoredOrgPluginRecord[]>;
+  listPasskeys(userId: string): Promise<StoredPasskeyRecord[]>;
 
   listPlatformAdminUsers(): Promise<StoredUserRecord[]>;
 
@@ -1035,10 +1107,24 @@ export interface DatabaseAdapter {
   listProfiles(): Promise<StoredProfileRecord[]>;
   listProfilesForMcpServer(serverId: string): Promise<StoredProfileRecord[]>;
   listProfilesForOrg(orgId: string): Promise<StoredProfileRecord[]>;
+  /**
+   * Newest first, pinned ahead. `after` is the last row of the previous page;
+   * `sessionId` narrows the list to that one session.
+   */
   listSessionSummaries(
     profileId: string,
-    channel: string,
-    appUserId?: string
+    channels: readonly string[],
+    options?: {
+      after?: Pick<
+        StoredSessionSummaryRecord,
+        "createdAt" | "id" | "pinned" | "updatedAt"
+      >;
+      appUserId?: string;
+      limit?: number;
+      /** Keeps the sessions whose title or user/assistant text contains it. */
+      query?: string;
+      sessionId?: string;
+    }
   ): Promise<StoredSessionSummaryRecord[]>;
 
   listSessions(): Promise<StoredSessionRecord[]>;
@@ -1142,6 +1228,11 @@ export interface DatabaseAdapter {
     path: string,
     pinned: boolean
   ): Promise<void>;
+  setPendingMfaSecret(
+    id: string,
+    pendingTotpSecretEnc: string,
+    updatedAt: string
+  ): Promise<void>;
   setUserContext(
     orgId: string,
     userId: string,
@@ -1200,6 +1291,11 @@ export interface DatabaseAdapter {
       pinned?: boolean;
     }
   ): Promise<boolean>;
+  updatePasskeyCounter(
+    userId: string,
+    credentialId: string,
+    counter: number
+  ): Promise<void>;
   updateSessionModel(sessionId: string, model: string | null): Promise<boolean>;
   updateSessionPinned(sessionId: string, pinned: boolean): Promise<boolean>;
   updateSessionQuestionnaire(
@@ -1217,6 +1313,16 @@ export interface DatabaseAdapter {
       reviewedAt: string;
     }
   ): Promise<boolean>;
+  updateUserMfa(
+    id: string,
+    mfa: {
+      enabled: boolean;
+      mfaTotpLastStep: number | null;
+      pendingTotpSecretEnc: string | null;
+      totpSecretEnc: string | null;
+    },
+    updatedAt: string
+  ): Promise<void>;
   updateUserPassword(
     id: string,
     passwordHash: string,

@@ -56,6 +56,7 @@ import {
   seedOrgSuperBotProfile,
 } from "@nakama/db";
 import type { AuthService } from "./auth-service";
+import { loadMfaPolicy } from "./mfa-config";
 
 const LAST_MEMBERSHIP_MESSAGE =
   "Cannot archive your last remaining organization.";
@@ -162,7 +163,12 @@ export class OrgService {
       );
     }
 
-    for (const platform of ["telegram", "discord", "whatsapp"] as const) {
+    for (const platform of [
+      "telegram",
+      "discord",
+      "whatsapp",
+      "slack",
+    ] as const) {
       for (const owner of await listChannelOwners(platform)) {
         if (owner.orgId === orgId) {
           await removeChannelConnection(platform, owner);
@@ -329,11 +335,20 @@ export class OrgService {
     return { organization };
   }
 
-  async listUserOrgs(userId: string): Promise<ListUserOrgsResponse> {
+  async listUserOrgs(
+    userId: string,
+    orgId?: string | null
+  ): Promise<ListUserOrgsResponse> {
     const memberships =
       await this.databaseAdapter.listUserOrganizations(userId);
+    const scopedMemberships =
+      orgId === undefined
+        ? memberships
+        : memberships.filter(
+            (membership) => membership.organization.id === orgId
+          );
     return {
-      orgs: memberships.map((membership) => ({
+      orgs: scopedMemberships.map((membership) => ({
         ...toOrganizationSummary(membership.organization),
         role: membership.role,
       })),
@@ -413,14 +428,33 @@ export class OrgService {
       sessionId,
       requestedOrgId
     );
-
+    const activeMember = activeOrgId
+      ? await this.databaseAdapter.getOrgMember(activeOrgId, user.id)
+      : null;
+    const mfaPolicy = await loadMfaPolicy();
+    const passkeyEnabled =
+      (await this.databaseAdapter.listPasskeys(user.id)).length > 0;
+    const backupCodesEnabled =
+      (await this.databaseAdapter.countUnusedMfaBackupCodes(user.id)) > 0;
     return {
       activeOrgId,
+      backupCodesEnabled,
       email: user.email,
       id: user.id,
       isPlatformAdmin: Boolean(user.isPlatformAdmin),
+      mfaEnabled: Boolean(user.mfaEnabled),
+      mfaEnrolled: Boolean(
+        (user.mfaEnabled && user.mfaTotpSecretEnc) || passkeyEnabled
+      ),
+      mfaRequired:
+        mfaPolicy.enabled &&
+        mfaPolicy.required &&
+        (activeMember
+          ? mfaPolicy.enforcedRoles.includes(activeMember.role)
+          : false),
       name: user.name ?? null,
       orgId: activeOrgId,
+      passkeyEnabled,
       phone: user.phone ?? null,
     };
   }
