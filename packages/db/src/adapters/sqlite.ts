@@ -1,5 +1,6 @@
 import { Database } from "bun:sqlite";
 import { chmodSync } from "node:fs";
+import { sep } from "node:path";
 import type { AgentQuestionnaire, ChatMessage } from "@nakama/core";
 import {
   derivePluginToolName,
@@ -60,6 +61,12 @@ import type {
 export interface SqliteDatabase {
   adapter: DatabaseAdapter;
   close(): void;
+  /**
+   * Finalizes every prepared statement and releases the file now. `close()`
+   * keeps the file open until those statements are garbage collected, and
+   * Windows cannot rename or delete an open SQLite file.
+   */
+  release(): void;
   reopen(): Promise<void>;
 }
 
@@ -98,6 +105,7 @@ interface AutomationRunRow {
   error: string | null;
   id: string;
   output: string | null;
+  progress: string | null;
   started_at: string;
   status: string;
 }
@@ -568,7 +576,10 @@ export async function createSqliteDatabase(
   return {
     adapter: adapterProxy,
     close() {
-      db.close();
+      db.close(true);
+    },
+    release() {
+      db.close(true);
     },
     async reopen() {
       const nextDb = openPrivateDatabase(databasePath);
@@ -577,7 +588,7 @@ export async function createSqliteDatabase(
       const previousDb = db;
       db = nextDb;
       adapter = nextAdapter;
-      previousDb.close();
+      previousDb.close(true);
     },
   };
 }
@@ -627,12 +638,12 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
     LIMIT 1
   `);
   const insertAutomationRunStmt = db.prepare(`
-    INSERT INTO automation_runs (id, automation_id, status, started_at, completed_at, output, error, delivery_status, delivery_error)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO automation_runs (id, automation_id, status, started_at, completed_at, output, error, delivery_status, delivery_error, progress)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
   const updateAutomationRunStmt = db.prepare(`
     UPDATE automation_runs
-    SET status = ?, completed_at = ?, output = ?, error = ?, delivery_status = ?, delivery_error = ?
+    SET status = ?, completed_at = ?, output = ?, error = ?, delivery_status = ?, delivery_error = ?, progress = ?
     WHERE id = ?
   `);
   const deleteAutomationRunStmt = db.prepare(`
@@ -887,7 +898,7 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
           successor.id
         );
       }
-      const workspacePrefix = `${workspaceFrom}/`;
+      const workspacePrefix = `${workspaceFrom}${sep}`;
       if (
         db
           .query(
@@ -3764,7 +3775,8 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
         record.output,
         record.error,
         record.deliveryStatus ?? null,
-        record.deliveryError ?? null
+        record.deliveryError ?? null,
+        record.progress ? JSON.stringify(record.progress) : null
       );
     },
 
@@ -4389,6 +4401,7 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
         record.error,
         record.deliveryStatus ?? null,
         record.deliveryError ?? null,
+        record.progress ? JSON.stringify(record.progress) : null,
         record.id
       );
     },
@@ -4727,6 +4740,9 @@ function toAutomationRunRecord(
     error: row.error,
     id: row.id,
     output: row.output,
+    progress: row.progress
+      ? (parseJson(row.progress) as StoredAutomationRunRecord["progress"])
+      : undefined,
     startedAt: row.started_at,
     status: row.status as StoredAutomationRunRecord["status"],
   };

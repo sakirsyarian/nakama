@@ -71,6 +71,8 @@ export interface AutomationRunRecord {
   error: string | null;
   id: string;
   output: string | null;
+  /** Chat transcript, updated live and retained when the run completes. */
+  progress?: ChatMessage[];
   /** Present when the API resolves read state for the current user. */
   read?: boolean;
   startedAt: string;
@@ -1950,6 +1952,12 @@ export interface ProviderModelOption {
   supportsVision?: boolean;
 }
 
+export interface OpenRouterRoutingSettings {
+  dataCollection?: "allow" | "deny";
+  requireParameters?: boolean;
+  zdr?: boolean;
+}
+
 export interface ProviderInstanceSummary {
   baseUrl?: string | null;
   createdAt: string;
@@ -1959,6 +1967,7 @@ export interface ProviderInstanceSummary {
   id: string;
   label: string;
   modelCount: number;
+  openRouterRouting?: OpenRouterRoutingSettings;
   type: ProviderName;
   wireApi?: WireApi | null;
 }
@@ -1976,6 +1985,7 @@ export interface CreateProviderRequest {
   hostMode?: OllamaHostMode;
   label?: string;
   model?: string;
+  openRouterRouting?: OpenRouterRoutingSettings;
   type: ProviderName;
   wireApi?: WireApi;
   xaiOAuth?: XaiOAuthCredentials;
@@ -1994,6 +2004,8 @@ export interface UpdateProviderRequest {
   customModels?: CustomModelEntry[];
   hostMode?: OllamaHostMode;
   label?: string;
+  /** Replaces the routing settings; {} clears request-level overrides. */
+  openRouterRouting?: OpenRouterRoutingSettings;
   wireApi?: WireApi;
   xaiOAuth?: XaiOAuthCredentials;
 }

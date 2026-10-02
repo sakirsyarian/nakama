@@ -231,7 +231,6 @@ import {
   fetchChatgptCodexModels,
   refreshChatgptOAuthToken,
 } from "../providers/chatgpt/oauth";
-import { isAllowedImageGenerationSelection } from "../providers/models";
 import { wrapProviderForNonVision } from "../providers/non-vision-wrap";
 import { wrapProviderWithUsageTracking } from "../providers/usage-tracking";
 import {
@@ -244,7 +243,10 @@ import {
   createOrgMemoryTools,
   PROPOSE_ORG_MEMORY_TOOL_NAME,
 } from "../tools/org-memory-tools";
-import { createSendDiscordArtifactTools } from "../tools/send-discord-artifact-tool";
+import {
+  createSendDiscordArtifactTools,
+  sendWhatsAppArtifactTool,
+} from "../tools/send-discord-artifact-tool";
 import {
   createSkillManageTools,
   SKILL_MANAGE_CHANNELS,
@@ -965,11 +967,13 @@ export class AgentService {
     await this.ensureImageGenerationSettingsLoaded();
     const model = input.model?.trim() || null;
 
-    if (model && !isAllowedImageGenerationSelection(model)) {
-      throw new NakamaApiError(
-        "Only openai::gpt-image-2 is supported for image generation.",
-        400
-      );
+    if (model) {
+      // Same check a generate call runs, so a bad pick fails here, unsaved.
+      resolveImageGenerationSelection({
+        defaultProviderId: this.userConfig?.defaultProviderId ?? null,
+        imageModel: model,
+        providers: this.userConfig?.providers ?? [],
+      });
     }
 
     const imageGeneration: ImageGenerationSettings = { model };
@@ -1028,7 +1032,9 @@ export class AgentService {
     this.llmUsageTracker?.record(
       result.model,
       usage.inputTokens,
-      usage.outputTokens
+      usage.outputTokens,
+      0,
+      { providerInstance: selection.instance }
     );
 
     return {
@@ -1562,7 +1568,8 @@ export class AgentService {
     profileId: string,
     prompt: string,
     automationId?: string,
-    automationRunId?: string
+    automationRunId?: string,
+    handlers?: Parameters<AgentChatSession["sendStream"]>[1]
   ): Promise<string> {
     if (!this._providerConfigured) {
       throw new Error("Provider is not configured.");
@@ -1607,7 +1614,7 @@ export class AgentService {
       userTimezone,
     });
 
-    return session.send(prompt);
+    return session.sendStream(prompt, handlers ?? { onChunk() {} });
   }
 
   async resolvePluginExecutionTools(
@@ -4136,6 +4143,9 @@ export class AgentService {
     });
     if (channel === "discord" && tools.length > 0) {
       tools = [...tools, ...createSendDiscordArtifactTools()];
+    }
+    if (channel === "whatsapp" && !appUserId && tools.length > 0) {
+      tools = [...tools, sendWhatsAppArtifactTool];
     }
     // Same table as the tools above on purpose: a channel that can manage
     // skills is a channel that needs the catalog to track what it has seen.
