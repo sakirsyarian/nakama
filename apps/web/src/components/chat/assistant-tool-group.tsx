@@ -6,6 +6,7 @@ import {
   Audit02Icon,
   BookOpen01Icon,
   ComputerTerminal01Icon,
+  McpServerIcon,
   Rotate02Icon,
   TaskEdit01Icon,
   Wrench01Icon,
@@ -923,6 +924,13 @@ function ToolTimelineItem({ message }: { message: ChatListItem }) {
   );
 }
 
+const TOOL_ICONS: Record<string, typeof Wrench01Icon> = {
+  bash: ComputerTerminal01Icon,
+  edit_file: TaskEdit01Icon,
+  read_file: BookOpen01Icon,
+  search_files: Audit02Icon,
+};
+
 function CollapsibleTrigger({
   open,
   onToggle,
@@ -940,16 +948,13 @@ function CollapsibleTrigger({
   className?: string;
   tool?: string;
 }) {
+  const isMcpTool =
+    tool?.includes("__") &&
+    !tool.startsWith("plugin_") &&
+    !tool.startsWith("composio__");
   const ToolIcon =
-    tool === "bash"
-      ? ComputerTerminal01Icon
-      : tool === "read_file"
-        ? BookOpen01Icon
-        : tool === "edit_file"
-          ? TaskEdit01Icon
-          : tool === "search_files"
-            ? Audit02Icon
-            : Wrench01Icon;
+    (tool ? TOOL_ICONS[tool] : undefined) ??
+    (isMcpTool ? McpServerIcon : Wrench01Icon);
 
   return (
     <button
