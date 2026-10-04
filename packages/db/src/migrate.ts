@@ -29,7 +29,7 @@ export function migrateDatabase(db: Database): void {
   atomic(migrateUsersTable);
   atomic(migratePasskeyTables);
   atomic(migrateOrgTables);
-  atomic(migrateApiKeysTable);
+  atomic((database) => database.exec("DROP TABLE IF EXISTS api_keys"));
   atomic(migrateLegacyUserContextToOrgMembers);
   atomic(migrateOrgMemoryProposalsTable);
   atomic(migrateSkillProposalsTable);
@@ -64,6 +64,7 @@ export function migrateDatabase(db: Database): void {
   atomic(migrateAuditEventsTable);
   atomic(migrateProfileChangeEventsTable);
   atomic(migratePluginTables);
+  atomic(migrateRemoveGoogleMeetPlugin);
   atomic(migrateFilePinsTable);
   atomic(migrateNotificationWebhookDeliveriesTable);
 }
@@ -594,28 +595,6 @@ function migrateOrgTables(db: Database): void {
   if (!columnNames.has("user_context")) {
     db.exec("ALTER TABLE org_members ADD COLUMN user_context TEXT;");
   }
-}
-
-function migrateApiKeysTable(db: Database): void {
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS api_keys (
-      id TEXT PRIMARY KEY NOT NULL,
-      org_id TEXT NOT NULL,
-      name TEXT NOT NULL,
-      environment TEXT NOT NULL,
-      key_prefix TEXT NOT NULL,
-      secret_hash TEXT NOT NULL,
-      created_by_user_id TEXT NOT NULL,
-      created_at TEXT NOT NULL,
-      expires_at TEXT,
-      last_used_at TEXT,
-      revoked_at TEXT,
-      FOREIGN KEY (org_id) REFERENCES organizations (id) ON DELETE CASCADE,
-      FOREIGN KEY (created_by_user_id) REFERENCES users (id) ON DELETE CASCADE
-    );
-    CREATE UNIQUE INDEX IF NOT EXISTS api_keys_prefix_unique ON api_keys (key_prefix);
-    CREATE INDEX IF NOT EXISTS api_keys_org_id ON api_keys (org_id, created_at DESC);
-  `);
 }
 
 /**
@@ -1830,6 +1809,17 @@ function migrateProfileChangeEventsTable(db: Database): void {
     CREATE INDEX IF NOT EXISTS profile_change_events_profile_created
       ON profile_change_events (profile_id, created_at DESC);
   `);
+}
+
+function migrateRemoveGoogleMeetPlugin(db: Database): void {
+  // Meet is built in. Remove obsolete plugin contributions and their cascading
+  // profile assignments; meeting databases and transcripts live outside this DB.
+  db.prepare("DELETE FROM tools WHERE plugin_id = ?").run("google-meet");
+  db.prepare("DELETE FROM skills WHERE plugin_id = ?").run("google-meet");
+  db.prepare("DELETE FROM org_plugins WHERE plugin_id = ?").run("google-meet");
+  db.prepare("DELETE FROM plugin_releases WHERE plugin_id = ?").run(
+    "google-meet"
+  );
 }
 
 function migratePluginTables(db: Database): void {

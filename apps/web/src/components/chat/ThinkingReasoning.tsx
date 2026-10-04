@@ -11,6 +11,7 @@ const MAX_H = 100;
 const COLLAPSE_BEAT = 360;
 
 export interface ThinkingReasoningProps {
+  activityLabel?: string;
   children?: ReactNode;
   className?: string;
   isThinkingStreaming: boolean;
@@ -18,6 +19,7 @@ export interface ThinkingReasoningProps {
   startedAt?: string;
   text: string;
   thinkingDurationMs?: number;
+  toolCount?: number;
 }
 
 function useThinkingElapsed(
@@ -155,14 +157,23 @@ function ThinkingReasoningViewport({
   );
 }
 
-function useThinkingCollapse(isWorkActive: boolean, hasBody: boolean) {
+function useThinkingCollapse(
+  isWorkActive: boolean,
+  hasBody: boolean,
+  hasTools: boolean
+) {
   const [done, setDone] = useState(!isWorkActive && hasBody);
-  const [open, setOpen] = useState(isWorkActive);
+  const [open, setOpen] = useState(hasTools);
+
+  useEffect(() => {
+    if (hasTools) {
+      setOpen(true);
+    }
+  }, [hasTools]);
 
   useEffect(() => {
     if (isWorkActive) {
       setDone(false);
-      setOpen(true);
       return;
     }
 
@@ -176,20 +187,16 @@ function useThinkingCollapse(isWorkActive: boolean, hasBody: boolean) {
     const delay = reducedMotion ? 0 : COLLAPSE_BEAT;
     const timerId = window.setTimeout(() => {
       setDone(true);
-      setOpen(false);
     }, delay);
 
     return () => window.clearTimeout(timerId);
   }, [hasBody, isWorkActive]);
 
   const toggle = () => {
-    if (!done) {
-      return;
-    }
     setOpen((current) => !current);
   };
 
-  return { done, expanded: done ? open : true, toggle };
+  return { done, expanded: open, toggle };
 }
 
 function thinkingLiveLabel(
@@ -204,66 +211,76 @@ function thinkingLiveLabel(
 }
 
 function ThinkingReasoningHeader({
+  activityLabel,
   done,
   expanded,
   elapsedSeconds,
   hasChildren,
   isThinkingStreaming,
+  stepCount,
   onToggle,
 }: {
+  activityLabel?: string;
   done: boolean;
   expanded: boolean;
   elapsedSeconds: number | null;
   hasChildren: boolean;
   isThinkingStreaming: boolean;
+  stepCount: number;
   onToggle: () => void;
 }) {
   return (
     <button
       aria-expanded={expanded}
-      aria-label="Toggle thought"
+      aria-label="Toggle activity"
       className={cn(
         styles.header,
-        done && styles.headerClickable,
+        styles.headerClickable,
         expanded && styles.headerExpanded
       )}
-      onClick={() => done && onToggle()}
+      onClick={onToggle}
       type="button"
     >
       {done ? (
         <span className={styles.label}>
-          <span className={styles.verb}>Thought</span>
+          <span className={styles.verb}>
+            {stepCount > 0
+              ? `${stepCount} ${stepCount === 1 ? "step" : "steps"}`
+              : "Activity"}
+          </span>
           {elapsedSeconds === null
             ? null
             : ` for ${formatElapsedSeconds(elapsedSeconds)}`}
         </span>
       ) : (
         <span className={cn(styles.label, styles.shimmer)}>
-          {thinkingLiveLabel(
-            elapsedSeconds ?? 1,
-            hasChildren,
-            isThinkingStreaming
-          )}
+          {activityLabel ??
+            thinkingLiveLabel(
+              elapsedSeconds ?? 1,
+              hasChildren,
+              isThinkingStreaming
+            )}
+          {stepCount > 0
+            ? ` · ${stepCount} ${stepCount === 1 ? "step" : "steps"}`
+            : null}
         </span>
       )}
-      {done ? (
-        <svg
-          aria-hidden="true"
-          className={styles.chevron}
-          height="12"
-          viewBox="0 0 24 24"
-          width="12"
-        >
-          <path
-            d="m4.5 15.75 7.5-7.5 7.5 7.5"
-            fill="none"
-            stroke="currentColor"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            strokeWidth="1.8"
-          />
-        </svg>
-      ) : null}
+      <svg
+        aria-hidden="true"
+        className={styles.chevron}
+        height="12"
+        viewBox="0 0 24 24"
+        width="12"
+      >
+        <path
+          d="m4.5 15.75 7.5-7.5 7.5 7.5"
+          fill="none"
+          stroke="currentColor"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          strokeWidth="1.8"
+        />
+      </svg>
     </button>
   );
 }
@@ -271,18 +288,21 @@ function ThinkingReasoningHeader({
 function ThinkingReasoningBody({
   children,
   expanded,
+  hasTools,
   isWorkActive,
   sentences,
 }: {
   children?: ReactNode;
   expanded: boolean;
+  hasTools: boolean;
   isWorkActive: boolean;
   sentences: string[];
 }) {
-  const showTimeline = sentences.length > 0 || Boolean(children);
+  const showTimeline = sentences.length > 0 || hasTools;
 
   return (
     <div
+      aria-hidden={!expanded}
       className={cn(
         styles.collapsible,
         !expanded && styles.collapsibleCollapsed
@@ -290,14 +310,20 @@ function ThinkingReasoningBody({
     >
       <div className={styles.inner}>
         {showTimeline ? (
-          <div className={styles.timeline}>
+          <div
+            className={cn(
+              styles.timeline,
+              hasTools && styles.timelineWithTools,
+              sentences.length > 0 && styles.timelineWithReasoning
+            )}
+          >
             {sentences.length > 0 ? (
               <ThinkingReasoningViewport
                 isWorkActive={isWorkActive}
                 sentences={sentences}
               />
             ) : null}
-            {children ? (
+            {hasTools ? (
               <div
                 className={cn(
                   styles.tools,
@@ -315,6 +341,7 @@ function ThinkingReasoningBody({
 }
 
 export function ThinkingReasoning({
+  activityLabel,
   text,
   isThinkingStreaming,
   isWorkActive,
@@ -322,6 +349,7 @@ export function ThinkingReasoning({
   thinkingDurationMs,
   className,
   children,
+  toolCount = 0,
 }: ThinkingReasoningProps) {
   const displayText = useRafCoalescedValue(text, isThinkingStreaming);
   const trimmed = displayText.trim();
@@ -329,11 +357,16 @@ export function ThinkingReasoning({
     () => splitThinkingLines(displayText),
     [displayText]
   );
-  const hasBody = sentences.length > 0 || Boolean(children);
+  const hasBody = sentences.length > 0 || toolCount > 0;
+  const stepCount = toolCount + (sentences.length > 0 ? 1 : 0);
   const elapsedSeconds = useThinkingElapsed(isWorkActive, startedAt);
-  const { done, expanded, toggle } = useThinkingCollapse(isWorkActive, hasBody);
+  const { done, expanded, toggle } = useThinkingCollapse(
+    isWorkActive,
+    hasBody,
+    toolCount > 0
+  );
 
-  if (isWorkActive && isThinkingStreaming && !trimmed && !children) {
+  if (isWorkActive && isThinkingStreaming && !trimmed && toolCount === 0) {
     return <ThinkingState className={className} />;
   }
 
@@ -344,6 +377,7 @@ export function ThinkingReasoning({
   return (
     <div className={cn(styles.root, className)}>
       <ThinkingReasoningHeader
+        activityLabel={activityLabel}
         done={done}
         elapsedSeconds={
           thinkingDurationMs !== undefined &&
@@ -353,12 +387,14 @@ export function ThinkingReasoning({
             : elapsedSeconds
         }
         expanded={expanded}
-        hasChildren={Boolean(children)}
+        hasChildren={toolCount > 0}
         isThinkingStreaming={isThinkingStreaming}
         onToggle={toggle}
+        stepCount={stepCount}
       />
       <ThinkingReasoningBody
         expanded={expanded}
+        hasTools={toolCount > 0}
         isWorkActive={isWorkActive}
         sentences={sentences}
       >

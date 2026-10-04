@@ -19,7 +19,6 @@ import type {
   ListProfilesResponse,
   ListToolsResponse,
   MoveProfileRequest,
-  ProfileDetail,
   ProfileResponse,
   ProfileSummary,
   ToolDetail,
@@ -34,6 +33,7 @@ import {
   createId,
   DEFAULT_KNOWLEDGE_SOURCES,
   deleteProfileAvatar,
+  ensureKnowledgeBaseDirs,
   getKnowledgeBaseDir,
   getProfileSharedDocumentIds,
   getProfileSoulDir,
@@ -139,6 +139,9 @@ async function copyKnowledgeBaseTo(
   sourceId: string,
   profileId: string
 ): Promise<void> {
+  // A legacy `data/knowledge-base` is only moved by KB operations, so migrate
+  // it before looking for the current-layout directory.
+  await ensureKnowledgeBaseDirs(orgId, sourceId);
   const from = getKnowledgeBaseDir(orgId, sourceId);
 
   if (!(await pathExists(from))) {
@@ -1261,8 +1264,6 @@ function toToolDetail(record: StoredToolRecord): ToolDetail {
     updatedAt: record.updatedAt,
   };
 }
-
-export type { ProfileDetail };
 
 function readToolHandlerType(handlerType: string | undefined): CustomToolType {
   if (handlerType === undefined) {

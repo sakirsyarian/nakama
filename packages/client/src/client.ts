@@ -4,6 +4,10 @@ import {
   readApiErrorDetails,
   readApiErrorMessage,
 } from "@nakama/core/api-error";
+import {
+  HOST_BOUND_BROWSER_SESSION_COOKIE_NAMES,
+  PLAIN_BROWSER_SESSION_COOKIE_NAMES,
+} from "@nakama/core/browser-session-cookies";
 import type {
   AcceptOrgInviteRequest,
   AcceptOrgInviteResponse,
@@ -41,8 +45,6 @@ import type {
   ComposioToolkitSummary,
   ConfigureProviderRequest,
   ConfigureProviderResponse,
-  CreateApiKeyRequest,
-  CreateApiKeyResponse,
   CreateAutomationRequest,
   CreateMcpServerRequest,
   CreateNotificationDestinationRequest,
@@ -84,7 +86,6 @@ import type {
   InvokePluginActionRequest,
   InvokePluginActionResponse,
   KnowledgeBaseDuplicateAction,
-  ListApiKeysResponse,
   ListArtifactsResponse,
   ListAutomationRunsResponse,
   ListAutomationsResponse,
@@ -162,7 +163,6 @@ import type {
   RestoreOrgMemoryHistoryResponse,
   RevokeArtifactShareResponse,
   RevokeBrowserSessionsResponse,
-  RotateApiKeyResponse,
   RotateLocalAuthTokenResponse,
   RunAutomationResponse,
   RunSkillCuratorInternalRequest,
@@ -3107,39 +3107,6 @@ export class NakamaClient {
     );
   }
 
-  async createApiKey(
-    orgId: string,
-    request: CreateApiKeyRequest
-  ): Promise<CreateApiKeyResponse> {
-    return this.request<CreateApiKeyResponse>(
-      `/v1/orgs/${encodeURIComponent(orgId)}/api-keys`,
-      { body: JSON.stringify(request), method: "POST" }
-    );
-  }
-
-  async listApiKeys(orgId: string): Promise<ListApiKeysResponse> {
-    return this.request<ListApiKeysResponse>(
-      `/v1/orgs/${encodeURIComponent(orgId)}/api-keys`
-    );
-  }
-
-  async rotateApiKey(
-    orgId: string,
-    keyId: string
-  ): Promise<RotateApiKeyResponse> {
-    return this.request<RotateApiKeyResponse>(
-      `/v1/orgs/${encodeURIComponent(orgId)}/api-keys/${encodeURIComponent(keyId)}/rotate`,
-      { method: "POST" }
-    );
-  }
-
-  async deleteApiKey(orgId: string, keyId: string): Promise<void> {
-    await this.request(
-      `/v1/orgs/${encodeURIComponent(orgId)}/api-keys/${encodeURIComponent(keyId)}`,
-      { method: "DELETE" }
-    );
-  }
-
   async addOrgMember(
     orgId: string,
     request: AddOrgMemberRequest
@@ -3575,7 +3542,12 @@ export class NakamaClient {
     }
 
     if (isMutatingMethod(method)) {
-      const csrfToken = readCookie("nakama_csrf");
+      // HTTPS deployments issue the host-bound cookie; plain HTTP uses the
+      // unprefixed one. A cookie planted by a sibling host is never read on
+      // HTTPS because the server only trusts the prefixed name there.
+      const csrfToken =
+        readCookie(HOST_BOUND_BROWSER_SESSION_COOKIE_NAMES.csrf) ??
+        readCookie(PLAIN_BROWSER_SESSION_COOKIE_NAMES.csrf);
       if (csrfToken) {
         merged["X-CSRF-Token"] = csrfToken;
       }
