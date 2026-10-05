@@ -45,6 +45,7 @@ import type {
   ImageAttachment,
   ImageGenerationSettings,
   ImageGenerationSettingsResponse,
+  ImportKnowledgeBaseZipResponse,
   InitSoulResponse,
   InitUserContextResponse,
   InstallSkillRequest,
@@ -65,6 +66,7 @@ import type {
   ProfileResponse,
   ProviderChatOptions,
   ProviderClient,
+  ProviderInstance,
   RunToolResponse,
   SaveInlineAttachment,
   SendEmailTestResponse,
@@ -204,6 +206,10 @@ import {
   type ChannelConfigScope,
   isChannelOwner,
 } from "@nakama/core/channel-config-shared";
+import {
+  defaultDiscoveryBaseUrl,
+  NETRA_AGENT_MODEL_ID,
+} from "@nakama/core/discovery-providers";
 import { readTextIfExists } from "@nakama/core/fs";
 import { canAccessSuperBotProfile } from "@nakama/core/profiles";
 import {
@@ -220,6 +226,7 @@ import {
   createProviderForInstance,
   createProviderFromActiveConfig,
   fetchFireworksGatewayModels,
+  fetchNetraModels,
   fetchOllamaModels,
   fetchRemoteOpenAIModels,
   getModelsForProviderInstance,
@@ -387,7 +394,6 @@ type ChatProfileAccess = Pick<
 >;
 
 export class AgentService {
-  private harness: AgentDependencies;
   private userConfig: UserConfig | null;
   private readonly db: DatabaseAdapter;
   private readonly profileService: ProfileService;
@@ -484,15 +490,6 @@ export class AgentService {
     this.orgMemoryTools = createOrgMemoryTools(this.getOrgMemoryService());
     this._providerConfigured =
       isProviderConfigured(userConfig) && provider !== null;
-    const activeInstance = getActiveProviderInstance(userConfig);
-    this.harness = this.createHarness({
-      modelId: activeInstance
-        ? resolveDefaultModelForInstance(activeInstance)
-        : null,
-      provider,
-      providerInstance: activeInstance,
-      thinking: this.resolveWorkspaceThinkingDefaults(),
-    });
   }
 
   /**
@@ -743,15 +740,6 @@ export class AgentService {
       };
     }
 
-    this.harness = this.createHarness({
-      modelId: (() => {
-        const active = getActiveProviderInstance(this.userConfig);
-        return active ? resolveDefaultModelForInstance(active) : null;
-      })(),
-      provider: createProviderFromActiveConfig(this.userConfig, process.env),
-      providerInstance: getActiveProviderInstance(this.userConfig),
-      thinking: this.resolveWorkspaceThinkingDefaults(),
-    });
     this.sessions.clear();
 
     return { thinking };
@@ -1000,7 +988,8 @@ export class AgentService {
   }
 
   async generateImage(
-    input: GenerateImageRequest
+    input: GenerateImageRequest,
+    orgId: string | null
   ): Promise<GenerateImageResponse> {
     await this.ensureImageGenerationSettingsLoaded();
 
@@ -1027,13 +1016,14 @@ export class AgentService {
       inputTokens: 0,
       outputTokens: 0,
     };
-    this.llmUsageTracker?.record(
-      result.model,
-      usage.inputTokens,
-      usage.outputTokens,
-      0,
-      { providerInstance: selection.instance }
-    );
+    if (orgId) {
+      this.llmUsageTracker?.record(
+        result.model,
+        usage.inputTokens,
+        usage.outputTokens,
+        { orgId, pricingContext: { providerInstance: selection.instance } }
+      );
+    }
 
     return {
       data: Buffer.from(result.data).toString("base64"),
@@ -1534,6 +1524,9 @@ export class AgentService {
           ...(input.allowedPhones === undefined
             ? {}
             : { allowedPhones: input.allowedPhones }),
+          ...(input.allowUnpairedGroupMembers === undefined
+            ? {}
+            : { allowUnpairedGroupMembers: input.allowUnpairedGroupMembers }),
           ...(input.phoneNumber === undefined
             ? {}
             : { phoneNumber: input.phoneNumber.trim() }),
@@ -2542,12 +2535,19 @@ export class AgentService {
     return session.compact(options);
   }
 
-  async draftAutomation(prompt: string, channel: AgentChannel) {
+  async draftAutomation(
+    prompt: string,
+    channel: AgentChannel,
+    orgId: string | null
+  ) {
     if (!this._providerConfigured) {
       throw new Error("Provider is not configured.");
     }
 
-    return createAutomationFromPrompt(this.harness, { channel, prompt });
+    return createAutomationFromPrompt(this.createWorkspaceHarness(orgId), {
+      channel,
+      prompt,
+    });
   }
 
   async discoverModels(
@@ -2603,25 +2603,42 @@ export class AgentService {
       };
     }
 
-    const baseUrl = request.baseUrl?.trim();
+    const isNetra = request.provider === "netra";
+    const baseUrl = isNetra
+      ? defaultDiscoveryBaseUrl("netra")
+      : request.baseUrl?.trim();
+    const apiKey = request.apiKey?.trim() ?? "";
+    if (isNetra && !apiKey) {
+      throw new NakamaApiError(
+        "API key is required to discover Netra models.",
+        400
+      );
+    }
     if (!baseUrl) {
       throw new NakamaApiError("baseUrl or providerId is required.", 400);
     }
 
-    const entries =
-      request.provider === "ollama"
+    const entries = isNetra
+      ? await fetchNetraModels(apiKey)
+      : request.provider === "ollama"
         ? await fetchOllamaModels(baseUrl, request.apiKey ?? "")
         : await fetchRemoteOpenAIModels(baseUrl, request.apiKey ?? "");
 
-    const probeType =
-      request.provider === "ollama"
+    const probeType = isNetra
+      ? ("netra" as const)
+      : request.provider === "ollama"
         ? ("ollama" as const)
         : ("openai_compatible" as const);
     const probeInstance = {
       apiKey: request.apiKey ?? "",
       baseUrl,
       id: "discover",
-      label: probeType === "ollama" ? "Ollama" : "Discover",
+      label:
+        probeType === "netra"
+          ? "Netra Runtime"
+          : probeType === "ollama"
+            ? "Ollama"
+            : "Discover",
       type: probeType,
       ...(request.hostMode ? { hostMode: request.hostMode } : {}),
       createdAt: new Date(0).toISOString(),
@@ -2657,7 +2674,11 @@ export class AgentService {
       throw new NakamaApiError("Provider not found.", 404);
     }
 
-    if (instance.type === "ollama" || instance.type === "openai_compatible") {
+    if (
+      instance.type === "ollama" ||
+      instance.type === "openai_compatible" ||
+      instance.type === "netra"
+    ) {
       const hostMode =
         instance.type === "ollama"
           ? (overrides?.hostMode ?? resolveOllamaHostMode(instance))
@@ -2665,10 +2686,10 @@ export class AgentService {
       const apiKey =
         overrides?.apiKey?.trim() ||
         instance.apiKey.trim() ||
-        (instance.type === "ollama"
+        (instance.type === "ollama" || instance.type === "netra"
           ? readEnvValue(
               process.env,
-              apiKeyEnvVarForProvider("ollama") ?? ""
+              apiKeyEnvVarForProvider(instance.type) ?? ""
             ) || ""
           : "");
 
@@ -2687,7 +2708,11 @@ export class AgentService {
       const baseUrl =
         overrides?.baseUrl ||
         instance.baseUrl?.trim() ||
-        (instance.type === "ollama" ? defaultOllamaBaseUrl(hostMode!) : "");
+        (instance.type === "ollama"
+          ? defaultOllamaBaseUrl(hostMode!)
+          : instance.type === "netra"
+            ? defaultDiscoveryBaseUrl("netra")
+            : "");
 
       if (!baseUrl) {
         throw new NakamaApiError(
@@ -2699,7 +2724,15 @@ export class AgentService {
       const entries =
         instance.type === "ollama"
           ? await fetchOllamaModels(baseUrl, apiKey)
-          : await fetchRemoteOpenAIModels(baseUrl, apiKey);
+          : instance.type === "netra"
+            ? (await fetchNetraModels(apiKey)).map((entry) => ({
+                ...entry,
+                ...instance.customModels?.find(
+                  (saved) => saved.id === entry.id
+                ),
+                name: entry.name,
+              }))
+            : await fetchRemoteOpenAIModels(baseUrl, apiKey);
       const remoteInstance = { ...instance, baseUrl, customModels: entries };
       const models = getModelsForProviderInstance(remoteInstance);
 
@@ -2848,6 +2881,41 @@ export class AgentService {
     const existing = this.userConfig?.providers ?? [];
     const instance = buildProviderInstanceFromCreateRequest(request, existing);
     const model = resolveInitialModel(instance, request.model);
+    if (instance.type === "netra") {
+      if (model !== NETRA_AGENT_MODEL_ID) {
+        throw new NakamaApiError(
+          "This Netra model needs a verified tool-turn test.",
+          400
+        );
+      }
+      let discovered: Awaited<ReturnType<typeof fetchNetraModels>> | null =
+        null;
+      try {
+        discovered = await fetchNetraModels(instance.apiKey);
+      } catch (error) {
+        if (error instanceof NakamaApiError && error.status === 400) {
+          throw error;
+        }
+        // The exact ID can still work when model discovery is unavailable.
+        const provider = createProviderForInstance(instance, model);
+        if (!provider) {
+          throw new NakamaApiError(
+            "Netra provider could not be initialized.",
+            400
+          );
+        }
+        await provider.generateChat({
+          messages: [{ content: "Reply OK.", role: "user" }],
+          system: "Reply OK.",
+        });
+      }
+      if (discovered && !discovered.some((entry) => entry.id === model)) {
+        throw new NakamaApiError(
+          "The selected Netra model is not available to this API key.",
+          400
+        );
+      }
+    }
     if (instance.type === "gemini") {
       const provider = createProviderForInstance(instance, model);
       if (!provider) {
@@ -2879,7 +2947,7 @@ export class AgentService {
     };
 
     await saveUserConfig(this.userConfig);
-    this.refreshHarness();
+    this.refreshProviderConfig();
 
     if (isFirst) {
       await this.ensureSoulScaffolded();
@@ -2916,7 +2984,7 @@ export class AgentService {
 
     this.userConfig = { ...this.userConfig, providers };
     await saveUserConfig(this.userConfig);
-    this.refreshHarness();
+    this.refreshProviderConfig();
 
     return {
       provider: toProviderInstanceSummary(
@@ -2952,7 +3020,7 @@ export class AgentService {
     };
 
     await saveUserConfig(this.userConfig);
-    this.refreshHarness();
+    this.refreshProviderConfig();
 
     return { defaultProviderId };
   }
@@ -2979,7 +3047,7 @@ export class AgentService {
       ),
     };
     await saveUserConfig(this.userConfig);
-    this.refreshHarness();
+    this.refreshProviderConfig();
   }
   async persistChatgptOAuth(
     providerId: string,
@@ -3003,7 +3071,7 @@ export class AgentService {
       ),
     };
     await saveUserConfig(this.userConfig);
-    this.refreshHarness();
+    this.refreshProviderConfig();
   }
 
   async getModels(
@@ -3088,9 +3156,15 @@ export class AgentService {
     };
   }
 
-  getLlmUsageStats() {
+  /**
+   * The requester's own ledger only. Usage is tenant data, so a status
+   * response must never be able to answer with another org's totals (#1306).
+   */
+  async getLlmUsageStats(orgId: string | null) {
+    const stored = orgId ? await this.llmUsageTracker?.getStats(orgId) : null;
+
     return (
-      this.llmUsageTracker?.getStats() ?? {
+      stored ?? {
         estimatedCostUsd: 0,
         inputTokens: 0,
         outputTokens: 0,
@@ -3101,8 +3175,10 @@ export class AgentService {
     );
   }
 
-  getLlmUsageStatsByModel() {
-    return this.llmUsageTracker?.getStatsByModel() ?? [];
+  async getLlmUsageStatsByModel(orgId: string | null) {
+    return orgId
+      ? ((await this.llmUsageTracker?.getStatsByModel(orgId)) ?? [])
+      : [];
   }
 
   async configureProvider(
@@ -3133,27 +3209,19 @@ export class AgentService {
     };
   }
 
-  private refreshHarness(): void {
+  private refreshProviderConfig(): void {
     const provider = createProviderFromActiveConfig(this.userConfig);
-    const active = getActiveProviderInstance(this.userConfig);
     this._providerConfigured =
       isProviderConfigured(this.userConfig) && provider !== null;
-    this.harness = this.createHarness({
-      modelId: active ? resolveDefaultModelForInstance(active) : null,
-      provider,
-      providerInstance: active,
-      thinking: this.resolveWorkspaceThinkingDefaults(),
-    });
     this.sessions.clear();
   }
 
   /** After a data-root restore, reload provider config and clear in-memory session state. */
   async reloadAfterDataRestore(): Promise<void> {
     this.userConfig = await loadUserConfig();
-    this.refreshHarness();
+    this.refreshProviderConfig();
     this.ephemeralSessions.clear();
     this.composioService?.reloadConfiguration();
-    await this.llmUsageTracker?.reloadFromDatabase();
     this.visionSettingsPromise = null;
     this.transcriptionSettingsPromise = null;
     await this.ensureVisionSettingsLoaded();
@@ -3525,6 +3593,18 @@ export class AgentService {
     );
   }
 
+  async importKnowledgeBaseZip(
+    orgId: string,
+    profileId: string,
+    zipBase64: string
+  ): Promise<ImportKnowledgeBaseZipResponse> {
+    return this.profileService.importKnowledgeBaseZip(
+      orgId,
+      profileId,
+      zipBase64
+    );
+  }
+
   async deleteKnowledgeBaseDocument(
     orgId: string,
     profileId: string,
@@ -3800,20 +3880,28 @@ export class AgentService {
     );
   }
 
+  /**
+   * `orgId` is the tenant the calls made through this harness are billed to.
+   * Without one the provider is left unwrapped: the ledger has no unattributed
+   * bucket, so an org-less harness must not be allowed to add to any org's.
+   */
   private createHarness(options: {
     provider: ProviderClient | null;
-    providerInstance?: ReturnType<typeof getActiveProviderInstance>;
+    providerInstance?: ProviderInstance | null;
     modelId?: string | null;
+    orgId?: string | null;
     thinking: ThinkingSettings;
   }): AgentDependencies {
     const providerInstance = options.providerInstance ?? null;
+    const usageOrgId = options.orgId?.trim() ?? "";
 
     const trackedProvider =
-      options.provider && this.llmUsageTracker && options.modelId
+      options.provider && this.llmUsageTracker && options.modelId && usageOrgId
         ? wrapProviderWithUsageTracking(
             options.provider,
             this.llmUsageTracker,
             options.modelId,
+            usageOrgId,
             {
               provider: providerInstance?.type ?? options.provider.name,
               providerInstance,
@@ -3828,6 +3916,24 @@ export class AgentService {
       ),
       provider: trackedProvider ?? undefined,
     };
+  }
+
+  /**
+   * The workspace provider has no profile to inherit a tenant from, so the
+   * org-scoped callers (the automation drafter) pass their own.
+   */
+  private createWorkspaceHarness(orgId: string | null): AgentDependencies {
+    const activeInstance = getActiveProviderInstance(this.userConfig);
+
+    return this.createHarness({
+      modelId: activeInstance
+        ? resolveDefaultModelForInstance(activeInstance)
+        : null,
+      orgId,
+      provider: createProviderFromActiveConfig(this.userConfig, process.env),
+      providerInstance: activeInstance,
+      thinking: this.resolveWorkspaceThinkingDefaults(),
+    });
   }
 
   getUsageStatusFields(): {
@@ -4252,6 +4358,7 @@ export class AgentService {
             visionProvider,
             this.llmUsageTracker,
             visionSelection.model,
+            orgId,
             {
               provider: visionSelection.instance.type,
               providerInstance: visionSelection.instance,
@@ -4596,6 +4703,7 @@ export class AgentService {
     if (!resolved) {
       return this.createHarness({
         modelId: null,
+        orgId: profile.orgId,
         provider: null,
         providerInstance: null,
         thinking: this.resolveWorkspaceThinkingDefaults(),
@@ -4626,6 +4734,7 @@ export class AgentService {
 
     return this.createHarness({
       modelId: resolved.model,
+      orgId: profile.orgId,
       provider: resolvedProvider,
       providerInstance: resolved.instance,
       thinking: this.resolveWorkspaceThinkingDefaults(),

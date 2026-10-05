@@ -1818,6 +1818,7 @@ export type AgentBrowserInstallEvent =
 
 export interface WhatsAppSettingsResponse {
   allowedPhones: string[];
+  allowUnpairedGroupMembers: boolean;
   configured: boolean;
   pairedJid: string | null;
   pairingCode: string | null;
@@ -1828,6 +1829,7 @@ export interface WhatsAppSettingsResponse {
 
 export interface UpdateWhatsAppSettingsRequest {
   allowedPhones?: string;
+  allowUnpairedGroupMembers?: boolean;
   phoneNumber?: string;
   profileId?: string;
   requireGroupMention?: boolean;
@@ -1983,7 +1985,7 @@ export interface DiscoverModelsRequest {
   baseUrl?: string;
   hostMode?: OllamaHostMode;
   /** When set, discovery uses the matching remote fetch path (Ollama includes `/api/tags` fallback). */
-  provider?: "ollama" | "openai_compatible" | "fireworks";
+  provider?: "ollama" | "openai_compatible" | "fireworks" | "netra";
   providerId?: string;
 }
 
@@ -2540,6 +2542,31 @@ export interface UploadKnowledgeBaseResponse {
   profileId: string;
 }
 
+export interface ImportKnowledgeBaseZipRequest {
+  zipBase64: string;
+}
+
+export interface ImportKnowledgeBaseZipEntry {
+  documentId?: string;
+  filename: string;
+  match?: "content_hash" | "name_size";
+  outcome: "created" | "duplicate" | "unsupported" | "error";
+  reason?: string;
+  status?: KnowledgeBaseDocumentStatus;
+}
+
+export interface ImportKnowledgeBaseZipResponse {
+  entries: ImportKnowledgeBaseZipEntry[];
+  profileId: string;
+  totals: {
+    created: number;
+    duplicate: number;
+    unsupported: number;
+    error: number;
+    failedExtraction: number;
+  };
+}
+
 export interface DeleteKnowledgeBaseResponse {
   deleted: boolean;
   documentId: string;
@@ -2576,6 +2603,7 @@ export type ProviderName =
   | "openrouter"
   | "gemini"
   | "deepseek"
+  | "netra"
   | "doubao"
   | "mistral"
   | "perplexity"
