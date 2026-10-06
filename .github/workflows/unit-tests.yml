@@ -5,6 +5,8 @@ on:
     branches: [main]
     # Desktop version bumps are checked by Desktop Release; PR checks still run.
     paths-ignore: ['apps/desktop/package.json']
+  # Lets a merge queue test the merged result. Does nothing until one is on.
+  merge_group:
   pull_request:
     # Markdown-only PRs change no code.
     paths-ignore: ['**.md', '.agents/**', 'docs/**', 'scripts/**', 'assets/**']
@@ -27,6 +29,18 @@ jobs:
 
       - name: Install dependencies
         run: bun install --frozen-lockfile --ignore-scripts
+
+      # bun test does not type-check or bundle. Docker Publish does both, but
+      # only after the merge. Keep this list the same as the one in Dockerfile.
+      - name: Build what the image builds
+        run: |
+          bun run --filter @nakama/web build
+          bun run --filter @nakama/server build
+          bun run --filter @nakama/automation build
+          bun run --filter @nakama/telegram build
+          bun run --filter @nakama/whatsapp build
+          bun run --filter @nakama/discord build
+          bun run --filter @nakama/slack build
 
       - name: Run tests
         run: |
