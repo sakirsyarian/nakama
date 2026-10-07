@@ -1266,6 +1266,15 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
   const deleteMcpServerStmt = db.prepare(
     "DELETE FROM mcp_servers WHERE id = ?"
   );
+  const unassignMcpServerFromAllProfilesStmt = db.prepare(
+    "DELETE FROM profile_mcp_servers WHERE server_id = ?"
+  );
+  const deleteMcpServerEverywhereTransaction = db.transaction(
+    (serverId: string) => {
+      unassignMcpServerFromAllProfilesStmt.run(serverId);
+      return deleteMcpServerStmt.run(serverId);
+    }
+  );
   const listMcpServersForProfileStmt = db.prepare(`
     SELECT mcp_servers.*
     FROM mcp_servers
@@ -2060,6 +2069,11 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
     UPDATE browser_sessions
     SET revoked_at = ?
     WHERE id = ? AND user_id = ? AND revoked_at IS NULL
+  `);
+  const revokeBrowserSessionsForUserExceptStmt = db.prepare(`
+    UPDATE browser_sessions
+    SET revoked_at = ?
+    WHERE user_id = ? AND (? IS NULL OR id != ?) AND revoked_at IS NULL
   `);
   const revokeBrowserSessionsForUserStmt = db.prepare(`
     UPDATE browser_sessions
@@ -3197,7 +3211,7 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
     },
 
     async deleteMcpServer(id) {
-      const result = deleteMcpServerStmt.run(id);
+      const result = deleteMcpServerEverywhereTransaction(id);
       return result.changes > 0;
     },
 
@@ -4346,6 +4360,16 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
 
     async revokeBrowserSessionsForUser(userId, revokedAt) {
       const result = revokeBrowserSessionsForUserStmt.run(revokedAt, userId);
+      return result.changes;
+    },
+
+    async revokeBrowserSessionsForUserExcept(userId, sessionId, revokedAt) {
+      const result = revokeBrowserSessionsForUserExceptStmt.run(
+        revokedAt,
+        userId,
+        sessionId,
+        sessionId
+      );
       return result.changes;
     },
     async setFilePinned(orgId, userId, profileId, path, pinned) {

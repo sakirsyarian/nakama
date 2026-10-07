@@ -209,6 +209,7 @@ import type {
   TimezoneSettingsResponse,
   TokenOptimizationResponse,
   TokenOptimizationUpdateResponse,
+  ToolCredentialStatus,
   ToolResponse,
   ToolSetupPlan,
   ToolSourceResponse,
@@ -1006,9 +1007,7 @@ export class NakamaClient {
     );
   }
 
-  async getToolCredentialStatus(
-    toolId: string
-  ): Promise<{ configured: boolean }> {
+  async getToolCredentialStatus(toolId: string): Promise<ToolCredentialStatus> {
     return this.request(`/v1/tools/${encodeURIComponent(toolId)}/credentials`);
   }
 
@@ -1029,9 +1028,19 @@ export class NakamaClient {
   async saveToolCredential(
     toolId: string,
     apiKey: string
-  ): Promise<{ configured: boolean }> {
+  ): Promise<ToolCredentialStatus> {
     return this.request(`/v1/tools/${encodeURIComponent(toolId)}/credentials`, {
       body: JSON.stringify({ apiKey }),
+      method: "PUT",
+    });
+  }
+
+  async saveToolEnv(
+    toolId: string,
+    env: Record<string, string>
+  ): Promise<ToolCredentialStatus> {
+    return this.request(`/v1/tools/${encodeURIComponent(toolId)}/credentials`, {
+      body: JSON.stringify({ env }),
       method: "PUT",
     });
   }
@@ -1139,10 +1148,12 @@ export class NakamaClient {
     );
   }
 
-  async deleteMcpServer(serverId: string): Promise<void> {
-    await this.request(`/v1/mcp/servers/${encodeURIComponent(serverId)}`, {
-      method: "DELETE",
-    });
+  async deleteMcpServer(serverId: string, force = false): Promise<void> {
+    const query = force ? "?force=true" : "";
+    await this.request(
+      `/v1/mcp/servers/${encodeURIComponent(serverId)}${query}`,
+      { method: "DELETE" }
+    );
   }
 
   async connectMcpServer(serverId: string): Promise<McpServerResponse> {
