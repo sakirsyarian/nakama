@@ -217,13 +217,42 @@ export interface LlmUsageModelStats extends LlmUsageStats {
   modelId: string;
 }
 
+/** One agent's or one user's share of the org ledger. A null `id` is the unattributed group. */
+export interface LlmUsageGroupStats extends LlmUsageStats {
+  id: string | null;
+  name: string | null;
+}
+
+/** One provider's share of one day. A null provider means the call had no provider context. */
+export interface LlmUsageDayProviderStats {
+  estimatedCostUsd: number;
+  provider: string | null;
+  totalTokens: number;
+}
+
+/** One UTC day of the org ledger. Days without calls are present with zeros. */
+export interface LlmUsageDayStats {
+  /** `YYYY-MM-DD`, UTC. */
+  day: string;
+  estimatedCostUsd: number;
+  providers: LlmUsageDayProviderStats[];
+  requestCount: number;
+  totalTokens: number;
+}
+
 export interface LlmUsageStatus extends LlmUsageStats {
+  /** Org admins and platform admins only. */
+  agents?: LlmUsageGroupStats[];
   costEstimated: boolean;
   currentModel: string | null;
+  /** The last 30 UTC days, oldest first. */
+  daily: LlmUsageDayStats[];
   displayName: string | null;
   models: LlmUsageModelStats[];
   provider: ProviderName | null;
   providerConfigured: boolean;
+  /** Org admins and platform admins only. */
+  users?: LlmUsageGroupStats[];
 }
 
 export interface McpStatus {

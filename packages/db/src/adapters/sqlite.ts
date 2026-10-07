@@ -27,6 +27,8 @@ import type {
   StoredBrowserSessionRecord,
   StoredComposioToolkitRecord,
   StoredComposioUserConnectionRecord,
+  StoredLlmUsageActorStatsRecord,
+  StoredLlmUsageDailyStatsRecord,
   StoredLlmUsageModelStatsRecord,
   StoredLlmUsageStatsRecord,
   StoredMcpServerRecord,
@@ -248,6 +250,29 @@ interface LlmUsageModelStatsRow {
   request_count: number;
   tracked_since: string;
   updated_at: string;
+}
+
+interface LlmUsageActorStatsRow {
+  estimated_cost_usd: number;
+  input_tokens: number;
+  org_id: string;
+  output_tokens: number;
+  profile_id: string;
+  request_count: number;
+  tracked_since: string;
+  updated_at: string;
+  user_id: string;
+}
+
+interface LlmUsageDailyStatsRow {
+  day: string;
+  estimated_cost_usd: number;
+  input_tokens: number;
+  model_id: string;
+  org_id: string;
+  output_tokens: number;
+  provider: string;
+  request_count: number;
 }
 
 interface WorkspaceSettingsRow {
@@ -989,6 +1014,14 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
   const listToolsStmt = db.prepare("SELECT * FROM tools");
   const getToolStmt = db.prepare("SELECT * FROM tools WHERE id = ?");
   const getToolByNameStmt = db.prepare("SELECT * FROM tools WHERE name = ?");
+  // The org's own tool wins over a global tool of the same name; tools owned
+  // by another organization are never visible to name lookups.
+  const getToolByNameForOrgStmt = db.prepare(`
+    SELECT * FROM tools
+    WHERE name = ? AND (org_id IS NULL OR org_id = ?)
+    ORDER BY org_id IS NULL
+    LIMIT 1
+  `);
   const upsertToolStmt = db.prepare(`
     INSERT INTO tools (
       id, name, description, handler_type, handler_config, org_id, plugin_id, plugin_key, created_at, updated_at
@@ -1242,6 +1275,16 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
     SELECT * FROM llm_usage_model_stats
     WHERE org_id = ?
     ORDER BY request_count DESC, input_tokens + output_tokens DESC, model_id ASC
+  `);
+  const listLlmUsageStatsByActorStmt = db.prepare(`
+    SELECT * FROM llm_usage_actor_stats
+    WHERE org_id = ?
+    ORDER BY request_count DESC, input_tokens + output_tokens DESC
+  `);
+  const listLlmUsageDailyStatsStmt = db.prepare(`
+    SELECT * FROM llm_usage_daily_stats
+    WHERE org_id = ? AND day >= ?
+    ORDER BY day ASC, model_id ASC, provider ASC
   `);
   const listMcpServersStmt = db.prepare("SELECT * FROM mcp_servers");
   const getMcpServerStmt = db.prepare("SELECT * FROM mcp_servers WHERE id = ?");
@@ -1497,6 +1540,48 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
       input_tokens = llm_usage_model_stats.input_tokens + excluded.input_tokens,
       output_tokens = llm_usage_model_stats.output_tokens + excluded.output_tokens,
       estimated_cost_usd = llm_usage_model_stats.estimated_cost_usd + excluded.estimated_cost_usd,
+      updated_at = excluded.updated_at
+  `);
+  // An empty string stands for "no agent" or "no user": SQLite treats every
+  // NULL in a primary key as distinct, so NULL would split the unattributed group.
+  const incrementLlmUsageStatsByActorStmt = db.prepare(`
+    INSERT INTO llm_usage_actor_stats (
+      org_id,
+      profile_id,
+      user_id,
+      request_count,
+      input_tokens,
+      output_tokens,
+      estimated_cost_usd,
+      tracked_since,
+      updated_at
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(org_id, profile_id, user_id) DO UPDATE SET
+      request_count = llm_usage_actor_stats.request_count + excluded.request_count,
+      input_tokens = llm_usage_actor_stats.input_tokens + excluded.input_tokens,
+      output_tokens = llm_usage_actor_stats.output_tokens + excluded.output_tokens,
+      estimated_cost_usd = llm_usage_actor_stats.estimated_cost_usd + excluded.estimated_cost_usd,
+      updated_at = excluded.updated_at
+  `);
+  const incrementLlmUsageDailyStatsStmt = db.prepare(`
+    INSERT INTO llm_usage_daily_stats (
+      org_id,
+      day,
+      model_id,
+      provider,
+      request_count,
+      input_tokens,
+      output_tokens,
+      estimated_cost_usd,
+      updated_at
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(org_id, day, model_id, provider) DO UPDATE SET
+      request_count = llm_usage_daily_stats.request_count + excluded.request_count,
+      input_tokens = llm_usage_daily_stats.input_tokens + excluded.input_tokens,
+      output_tokens = llm_usage_daily_stats.output_tokens + excluded.output_tokens,
+      estimated_cost_usd = llm_usage_daily_stats.estimated_cost_usd + excluded.estimated_cost_usd,
       updated_at = excluded.updated_at
   `);
   const incrementToolOutputSavingsStmt = db.prepare(`
@@ -2148,6 +2233,8 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
     // schema definitions, so the organization cascade cannot remove them.
     for (const table of [
       "llm_turn_usage",
+      "llm_usage_actor_stats",
+      "llm_usage_daily_stats",
       "llm_usage_stats",
       "llm_usage_model_stats",
       "mcp_servers",
@@ -3647,6 +3734,11 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
       const row = getToolByNameStmt.get(name) as ToolRow | null;
       return row ? toToolRecord(row) : null;
     },
+
+    async getToolByNameForOrg(orgId, name) {
+      const row = getToolByNameForOrgStmt.get(name, orgId) as ToolRow | null;
+      return row ? toToolRecord(row) : null;
+    },
     async getUserByEmail(email) {
       const row = getUserByEmailStmt.get(email) as UserRow | null;
       return row ? toUserRecord(row) : null;
@@ -3697,11 +3789,40 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
       );
     },
 
+    async incrementLlmUsageDailyStats(orgId, key, delta) {
+      incrementLlmUsageDailyStatsStmt.run(
+        orgId,
+        key.day,
+        key.modelId,
+        key.provider,
+        delta.requestCount,
+        delta.inputTokens,
+        delta.outputTokens,
+        delta.estimatedCostUsd,
+        new Date().toISOString()
+      );
+    },
+
     async incrementLlmUsageStats(orgId, delta, trackedSince) {
       const updatedAt = new Date().toISOString();
       incrementLlmUsageStatsStmt.run(
         orgId,
         LLM_USAGE_STATS_ID,
+        delta.requestCount,
+        delta.inputTokens,
+        delta.outputTokens,
+        delta.estimatedCostUsd,
+        trackedSince,
+        updatedAt
+      );
+    },
+
+    async incrementLlmUsageStatsByActor(orgId, actor, delta, trackedSince) {
+      const updatedAt = new Date().toISOString();
+      incrementLlmUsageStatsByActorStmt.run(
+        orgId,
+        actor.profileId?.trim() ?? "",
+        actor.userId?.trim() ?? "",
         delta.requestCount,
         delta.inputTokens,
         delta.outputTokens,
@@ -3965,6 +4086,18 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
         outputTokens: row.output_tokens,
         turns: row.turns,
       }));
+    },
+
+    async listLlmUsageDailyStats(orgId, sinceDay) {
+      return listLlmUsageDailyStatsStmt
+        .all(orgId, sinceDay)
+        .map((row) => toLlmUsageDailyStatsRecord(row as LlmUsageDailyStatsRow));
+    },
+
+    async listLlmUsageStatsByActor(orgId) {
+      return listLlmUsageStatsByActorStmt
+        .all(orgId)
+        .map((row) => toLlmUsageActorStatsRecord(row as LlmUsageActorStatsRow));
     },
 
     async listLlmUsageStatsByModel(orgId) {
@@ -5182,6 +5315,37 @@ function toLlmUsageStatsRecord(
     requestCount: row.request_count,
     trackedSince: row.tracked_since,
     updatedAt: row.updated_at,
+  };
+}
+
+function toLlmUsageActorStatsRecord(
+  row: LlmUsageActorStatsRow
+): StoredLlmUsageActorStatsRecord {
+  return {
+    estimatedCostUsd: row.estimated_cost_usd,
+    inputTokens: row.input_tokens,
+    orgId: row.org_id,
+    outputTokens: row.output_tokens,
+    profileId: row.profile_id || null,
+    requestCount: row.request_count,
+    trackedSince: row.tracked_since,
+    updatedAt: row.updated_at,
+    userId: row.user_id || null,
+  };
+}
+
+function toLlmUsageDailyStatsRecord(
+  row: LlmUsageDailyStatsRow
+): StoredLlmUsageDailyStatsRecord {
+  return {
+    day: row.day,
+    estimatedCostUsd: row.estimated_cost_usd,
+    inputTokens: row.input_tokens,
+    modelId: row.model_id,
+    orgId: row.org_id,
+    outputTokens: row.output_tokens,
+    provider: row.provider,
+    requestCount: row.request_count,
   };
 }
 
