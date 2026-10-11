@@ -34,6 +34,7 @@ describe("visibleNavGroups", () => {
       "chat",
       "customize",
       "files",
+      "google-meet",
       "mcp",
       "organization",
       "plugin-management",
@@ -88,6 +89,7 @@ describe("visibleNavGroups", () => {
       isPlatformAdmin: false,
       orgRole: "viewer",
     });
+
     expect(groups.every((group) => group.items.length > 0)).toBe(true);
   });
 });
@@ -107,6 +109,7 @@ describe("workers navigation", () => {
 
 test("Customize is reachable for every organization role", () => {
   expect(pageIdFromPath("/customize")).toBe("customize");
+
   for (const role of ["admin", "member", "viewer"]) {
     expect(pageIdsFor(false, role)).toContain("customize");
   }
@@ -118,6 +121,7 @@ describe("plugin navigation", () => {
     expect(pluginIdFromPath("/plugins/notes")).toBe("notes");
     expect(pluginIdFromPath("/plugins")).toBeNull();
     expect(pageIdFromPath("/plugins/notes")).toBe("plugins");
+    expect(pageIdFromPath("/google-meet")).toBe("google-meet");
     expect(pluginManagementPath()).toBe("/customize/plugins");
     expect(pageIdFromPath("/customize/plugins")).toBe("plugin-management");
     expect(pageIdFromPath("/customize/plugins/notes")).toBe(

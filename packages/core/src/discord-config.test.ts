@@ -1,18 +1,19 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import {
   buildDiscordInviteUrl,
-  generateHandshakeCode,
+  generatePairingCode,
   isDiscordUserAuthorized,
   loadDiscordConfigFile,
   loadDiscordSettingsPublic,
   maskBotToken,
-  normalizeHandshakeInput,
   parseAllowedUserIds,
+  regenerateDiscordHandshake,
   resolveDiscordApplicationId,
   resolveDiscordConfigFromSources,
   saveDiscordConfig,
   verifyAndPairDiscordUser,
 } from "./discord-config";
+import { normalizePairingCode } from "./pairing-code";
 import {
   describeSharedChannelConfigTests,
   withTempHomedir,
@@ -42,11 +43,11 @@ describe("resolveDiscordApplicationId", () => {
   });
 
   test("returns the application id from Discord", async () => {
-    globalThis.fetch = (async () =>
+    globalThis.fetch = async () =>
       new Response(JSON.stringify({ id: "1525937133096013954" }), {
         headers: { "Content-Type": "application/json" },
         status: 200,
-      })) as typeof fetch;
+      });
 
     await expect(resolveDiscordApplicationId("test-token")).resolves.toBe(
       "1525937133096013954"
@@ -57,25 +58,24 @@ describe("resolveDiscordApplicationId", () => {
   });
 
   test("returns null when Discord rejects the token", async () => {
-    globalThis.fetch = (async () =>
-      new Response(null, { status: 401 })) as typeof fetch;
+    globalThis.fetch = async () => new Response(null, { status: 401 });
 
     await expect(resolveDiscordApplicationId("bad-token")).resolves.toBeNull();
   });
 
   test("returns null for invalid payloads and request failures", async () => {
-    globalThis.fetch = (async () =>
+    globalThis.fetch = async () =>
       new Response(JSON.stringify({ id: "not-a-snowflake" }), {
         status: 200,
-      })) as typeof fetch;
+      });
 
     await expect(
       resolveDiscordApplicationId("invalid-id-token")
     ).resolves.toBeNull();
 
-    globalThis.fetch = (async () => {
+    globalThis.fetch = async () => {
       throw new Error("network failure");
-    }) as typeof fetch;
+    };
 
     await expect(
       resolveDiscordApplicationId("network-failure-token")
@@ -84,34 +84,37 @@ describe("resolveDiscordApplicationId", () => {
 
   test("force refresh revalidates and evicts a cached application id", async () => {
     let requestCount = 0;
-    globalThis.fetch = (async () => {
+    globalThis.fetch = async () => {
       requestCount += 1;
+
       return new Response(JSON.stringify({ id: "1525937133096013954" }), {
         headers: { "Content-Type": "application/json" },
         status: 200,
       });
-    }) as typeof fetch;
+    };
 
     await expect(resolveDiscordApplicationId("cached-token")).resolves.toBe(
       "1525937133096013954"
     );
 
-    globalThis.fetch = (async () => {
+    globalThis.fetch = async () => {
       requestCount += 1;
+
       return new Response(null, { status: 401 });
-    }) as typeof fetch;
+    };
 
     await expect(
       resolveDiscordApplicationId("cached-token", { forceRefresh: true })
     ).resolves.toBeNull();
 
-    globalThis.fetch = (async () => {
+    globalThis.fetch = async () => {
       requestCount += 1;
+
       return new Response(JSON.stringify({ id: "1525937133096013955" }), {
         headers: { "Content-Type": "application/json" },
         status: 200,
       });
-    }) as typeof fetch;
+    };
 
     await expect(resolveDiscordApplicationId("cached-token")).resolves.toBe(
       "1525937133096013955"
@@ -133,11 +136,11 @@ describe("loadDiscordSettingsPublic", () => {
         botToken: "discord-bot-token",
       });
 
-      globalThis.fetch = (async () =>
+      globalThis.fetch = async () =>
         new Response(JSON.stringify({ id: "1525937133096013954" }), {
           headers: { "Content-Type": "application/json" },
           status: 200,
-        })) as typeof fetch;
+        });
 
       const settings = await loadDiscordSettingsPublic();
 
@@ -176,12 +179,13 @@ describeSharedChannelConfigTests({
     allowlistValue: "123456789012345678, 987654321098765432",
     botTokenKey: "DISCORD_BOT_TOKEN",
   },
-  generateHandshakeCode,
+  generatePairingCode,
   isUserAuthorized: isDiscordUserAuthorized,
   loadConfigFile: loadDiscordConfigFile,
   mask: maskBotToken,
   name: "discord",
-  normalize: normalizeHandshakeInput,
+  normalize: normalizePairingCode,
+  regenerate: () => regenerateDiscordHandshake(null),
   resolveConfigFromSources: resolveDiscordConfigFromSources,
   resolveFile: {
     allowedUserIds: ["999999999999999999"],
@@ -201,11 +205,11 @@ describe("per-owner Discord config", () => {
 
   test("claims one application ID across concurrent owners", async () => {
     await withTempHomedir("nakama-discord-claim-race-", async () => {
-      globalThis.fetch = (async () =>
+      globalThis.fetch = async () =>
         new Response(JSON.stringify({ id: "1525937133096013954" }), {
           headers: { "Content-Type": "application/json" },
           status: 200,
-        })) as typeof fetch;
+        });
 
       const results = await Promise.allSettled([
         saveDiscordConfig(

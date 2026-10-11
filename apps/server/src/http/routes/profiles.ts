@@ -1,24 +1,22 @@
 import { createRoute, z } from "@hono/zod-openapi";
 import type {
+  AcpAgentPresetsResponse,
+  AcpSessionSettingsResponse,
   CloneProfileRequest,
-  CreateProfileRequest,
   DeleteArtifactResponse,
   DeleteKnowledgeBaseResponse,
-  ImageAttachment,
+  ImportKnowledgeBaseZipRequest,
+  ImportKnowledgeBaseZipResponse,
   InitSoulResponse,
   ListArtifactsResponse,
   ListKnowledgeBaseResponse,
   ListProfileChangeHistoryResponse,
   ListProfilesResponse,
-  MoveProfileRequest,
   ProfileResponse,
   SoulStackResponse,
   SoulStatusResponse,
-  UpdateArtifactRequest,
   UpdateArtifactResponse,
   UpdateProfileRequest,
-  UpdateSoulFileRequest,
-  UploadKnowledgeBaseRequest,
   UploadKnowledgeBaseResponse,
 } from "@nakama/core";
 import {
@@ -34,6 +32,7 @@ import {
   renameWorkspaceEntry,
 } from "@nakama/core";
 import { filterProfilesForChatAccess } from "@nakama/core/profiles";
+import { listAcpAgentPresets } from "../../providers/acp/acp-agent-presets";
 import { ArtifactShareService } from "../../services/artifact-share-service";
 import type { ServerOptions } from "../context";
 import {
@@ -43,13 +42,7 @@ import {
   requireOrgAdminOrPlatformAdminFromContext,
   requirePlatformAdminFromContext,
 } from "../org-guards";
-import {
-  getRequestAppUserScope,
-  getRequestAuth,
-  json,
-  readJson,
-  readOptionalJson,
-} from "../shared";
+import { getRequestAuth, json, readJson, readOptionalJson } from "../shared";
 import type { HonoApp } from "../types";
 
 const ORG_ADMIN_PROFILE_SETTING_KEYS = new Set([
@@ -62,8 +55,10 @@ function isOrgAdminAllowedProfileSettingsUpdate(
   body: UpdateProfileRequest
 ): boolean {
   const keys = Object.keys(body).filter(
+    // SAFETY: The validated value satisfies the contract checked by this assertion.
     (key) => body[key as keyof UpdateProfileRequest] !== undefined
   );
+
   return (
     keys.length > 0 &&
     keys.every((key) => ORG_ADMIN_PROFILE_SETTING_KEYS.has(key))
@@ -75,28 +70,34 @@ export function registerProfileRoutes(
   options: ServerOptions
 ): void {
   const { agent } = options;
+
   const artifactShares =
     options.databaseAdapter && options.authService
       ? new ArtifactShareService(options.databaseAdapter, options.authService)
       : null;
+
   const errorSchema = z
     .object({ error: z.string() })
     .openapi("ApiErrorResponse");
+
   const renameWorkspaceSchema = z
     .object({
       path: z.string().min(1).max(4096),
       newName: z.string().min(1).max(255),
     })
     .strict();
+
   const profileIdParam = z.object({
     profileId: z.string().openapi({ param: { in: "path", name: "profileId" } }),
   });
+
   const documentIdParam = z.object({
     documentId: z
       .string()
       .openapi({ param: { in: "path", name: "documentId" } }),
     profileId: z.string().openapi({ param: { in: "path", name: "profileId" } }),
   });
+
   app.openAPIRegistry.registerPath(
     createRoute({
       method: "patch",
@@ -134,85 +135,135 @@ export function registerProfileRoutes(
       },
     })
   );
+
   const orgIdParam = z.object({
     orgId: z.string().openapi({ param: { in: "path", name: "orgId" } }),
   });
+
   const orgDocumentIdParam = orgIdParam.extend({
     documentId: z
       .string()
       .openapi({ param: { in: "path", name: "documentId" } }),
   });
+
   const soulFileParam = z.object({
     fileKey: z
       .enum(["soul", "style", "instructions", "memory"])
       .openapi({ param: { in: "path", name: "fileKey" } }),
     profileId: z.string().openapi({ param: { in: "path", name: "profileId" } }),
   });
+
   const contentsQuery = z.object({
     contents: z.enum(["true", "false"]).optional(),
   });
+
   const artifactPathQuery = z.object({
     inline: z.enum(["0", "1"]).optional(),
     path: z.string().min(1),
   });
+
   const listProfilesSchema = z
     .object({})
     .passthrough()
     .openapi("ListProfilesResponse");
+
   const profileSchema = z.object({}).passthrough().openapi("ProfileResponse");
+
   const createProfileSchema = z
     .object({})
     .passthrough()
     .openapi("CreateProfileRequest");
+
   const updateProfileSchema = z
     .object({})
     .passthrough()
     .openapi("UpdateProfileRequest");
+
   const soulStatusSchema = z
     .object({})
     .passthrough()
     .openapi("SoulStatusResponse");
+
   const soulStackSchema = z
     .object({})
     .passthrough()
     .openapi("SoulStackResponse");
+
   const initSoulSchema = z.object({}).passthrough().openapi("InitSoulResponse");
+
   const updateSoulFileSchema = z
     .object({})
     .passthrough()
     .openapi("UpdateSoulFileRequest");
+
   const listArtifactsSchema = z
     .object({})
     .passthrough()
     .openapi("ListArtifactsResponse");
+
   const updateArtifactSchema = z
     .object({})
     .passthrough()
     .openapi("UpdateArtifactRequest");
+
   const updateArtifactResultSchema = z
     .object({})
     .passthrough()
     .openapi("UpdateArtifactResponse");
+
   const deleteArtifactSchema = z
     .object({})
     .passthrough()
     .openapi("DeleteArtifactResponse");
+
   const listKnowledgeBaseSchema = z
     .object({})
     .passthrough()
     .openapi("ListKnowledgeBaseResponse");
+
   const uploadKnowledgeBaseSchema = z
     .object({})
     .passthrough()
     .openapi("UploadKnowledgeBaseRequest");
+
   const uploadKnowledgeBaseResponseSchema = z
     .object({})
     .passthrough()
     .openapi("UploadKnowledgeBaseResponse");
+
+  const importKnowledgeBaseZipRequestSchema = z
+    .object({ zipBase64: z.string().min(1) })
+    .strict()
+    .openapi("ImportKnowledgeBaseZipRequest");
+
+  const importKnowledgeBaseZipResponseSchema = z
+    .object({
+      profileId: z.string(),
+      entries: z.array(
+        z.object({
+          filename: z.string(),
+          outcome: z.enum(["created", "duplicate", "unsupported", "error"]),
+          documentId: z.string().optional(),
+          status: z.enum(["ready", "failed"]).optional(),
+          match: z.enum(["content_hash", "name_size"]).optional(),
+          reason: z.string().optional(),
+        })
+      ),
+      totals: z.object({
+        created: z.number(),
+        duplicate: z.number(),
+        unsupported: z.number(),
+        error: z.number(),
+        failedExtraction: z.number(),
+      }),
+    })
+    .openapi("ImportKnowledgeBaseZipResponse");
+
   const deleteKnowledgeBaseSchema = z
     .object({})
     .passthrough()
     .openapi("DeleteKnowledgeBaseResponse");
+
   const sharedKnowledgeBaseDocumentSchema = z
     .object({
       documentId: z.string(),
@@ -220,6 +271,7 @@ export function registerProfileRoutes(
     })
     .passthrough()
     .openapi("SharedKnowledgeBaseDocumentResponse");
+
   const knowledgeBaseDocumentInUseSchema = z
     .object({
       documentId: z.string(),
@@ -227,10 +279,16 @@ export function registerProfileRoutes(
       profileIds: z.array(z.string()),
     })
     .openapi("KnowledgeBaseDocumentInUseResponse");
+
   const imageAttachmentSchema = z
     .object({})
     .passthrough()
     .openapi("ImageAttachment");
+
+  const moveProfileSchema = z
+    .object({ organizationId: z.string().min(1) })
+    .strict()
+    .openapi("MoveProfileRequest");
 
   for (const method of ["get", "put"] as const) {
     app.openAPIRegistry.registerPath(
@@ -246,9 +304,9 @@ export function registerProfileRoutes(
             : "Pin or unpin a file for your account",
         request: {
           params: profileIdParam,
-          ...(method === "put"
-            ? {
-                body: {
+          body:
+            method === "put"
+              ? {
                   required: true,
                   content: {
                     "application/json": {
@@ -258,9 +316,8 @@ export function registerProfileRoutes(
                       }),
                     },
                   },
-                },
-              }
-            : {}),
+                }
+              : undefined,
         },
         responses:
           method === "get"
@@ -311,10 +368,12 @@ export function registerProfileRoutes(
       tags: ["Profiles"],
     })
   );
+
   const cloneProfileSchema = z
     .object({})
     .passthrough()
     .openapi("CloneProfileRequest");
+
   app.openAPIRegistry.registerPath(
     createRoute({
       method: "post",
@@ -778,6 +837,50 @@ export function registerProfileRoutes(
   );
   app.openAPIRegistry.registerPath(
     createRoute({
+      method: "post",
+      operationId: "importKnowledgeBaseZip",
+      path: "/v1/profiles/{profileId}/knowledge-base/import-zip",
+      request: {
+        body: {
+          content: {
+            "application/json": { schema: importKnowledgeBaseZipRequestSchema },
+          },
+          required: true,
+        },
+        params: profileIdParam,
+      },
+      responses: {
+        200: {
+          content: {
+            "application/json": {
+              schema: importKnowledgeBaseZipResponseSchema,
+            },
+          },
+          description: "Knowledge base ZIP import results",
+        },
+        400: {
+          content: { "application/json": { schema: errorSchema } },
+          description: "Invalid ZIP file",
+        },
+        403: {
+          content: { "application/json": { schema: errorSchema } },
+          description: "Platform administrator required",
+        },
+        404: {
+          content: { "application/json": { schema: errorSchema } },
+          description: "Profile not found",
+        },
+        413: {
+          content: { "application/json": { schema: errorSchema } },
+          description: "ZIP file exceeds an import limit",
+        },
+      },
+      summary: "Import a ZIP of profile knowledge base documents",
+      tags: ["Profiles"],
+    })
+  );
+  app.openAPIRegistry.registerPath(
+    createRoute({
       method: "delete",
       operationId: "deleteKnowledgeBaseDocument",
       path: "/v1/profiles/{profileId}/knowledge-base/{documentId}",
@@ -1117,7 +1220,8 @@ export function registerProfileRoutes(
   app.post("/v1/profiles", async (c) => {
     requirePlatformAdminFromContext(c);
     const orgId = requireActiveOrgIdFromContext(c);
-    const body = await readJson<CreateProfileRequest>(c.req.raw);
+    const body = await readJson(c.req.raw, createProfileSchema);
+
     return json<ProfileResponse>(await agent.createProfile(orgId, body), 201);
   });
 
@@ -1126,6 +1230,7 @@ export function registerProfileRoutes(
     const orgId = requireActiveOrgIdFromContext(c);
     const profileId = decodeURIComponent(c.req.param("profileId"));
     const includeContents = c.req.query("contents") === "true";
+
     return json<SoulStatusResponse>(
       await agent.getProfileSoulStatus(orgId, profileId, includeContents)
     );
@@ -1135,6 +1240,7 @@ export function registerProfileRoutes(
     requirePlatformAdminFromContext(c);
     const orgId = requireActiveOrgIdFromContext(c);
     const profileId = decodeURIComponent(c.req.param("profileId"));
+
     return json<SoulStackResponse>(
       await agent.getProfileSoulStack(orgId, profileId)
     );
@@ -1144,6 +1250,7 @@ export function registerProfileRoutes(
     requirePlatformAdminFromContext(c);
     const orgId = requireActiveOrgIdFromContext(c);
     const profileId = decodeURIComponent(c.req.param("profileId"));
+
     return json<InitSoulResponse>(
       await agent.initProfileSoul(orgId, profileId),
       201
@@ -1154,7 +1261,7 @@ export function registerProfileRoutes(
     const auth = requirePlatformAdminFromContext(c);
     const orgId = requireActiveOrgIdFromContext(c);
     const profileId = decodeURIComponent(c.req.param("profileId"));
-    const body = await readJson<UpdateSoulFileRequest>(c.req.raw);
+    const body = await readJson(c.req.raw, updateSoulFileSchema);
     await agent.writeProfileSoulFile(
       orgId,
       profileId,
@@ -1162,6 +1269,7 @@ export function registerProfileRoutes(
       body,
       { actorUserId: auth.user.id, source: "dashboard" }
     );
+
     return new Response(null, { status: 204 });
   });
 
@@ -1170,15 +1278,19 @@ export function registerProfileRoutes(
     const orgId = requireActiveOrgIdFromContext(c);
     const profileId = decodeURIComponent(c.req.param("profileId"));
     await agent.getProfile(orgId, profileId);
+
     if (!options.databaseAdapter) {
       throw new NakamaApiError("Database unavailable", 503);
     }
+
     const paths = await options.databaseAdapter.listFilePins(
       orgId,
       auth.user.id,
       profileId
     );
+
     const entries = [];
+
     for (const filename of paths) {
       try {
         entries.push(
@@ -1196,6 +1308,7 @@ export function registerProfileRoutes(
         }
       }
     }
+
     return json({ entries });
   });
 
@@ -1204,14 +1317,21 @@ export function registerProfileRoutes(
     const orgId = requireActiveOrgIdFromContext(c);
     const profileId = decodeURIComponent(c.req.param("profileId"));
     await agent.getProfile(orgId, profileId);
-    const parsed = renameWorkspaceSchema.safeParse(await readJson(c.req.raw));
+
+    const parsed = renameWorkspaceSchema.safeParse(
+      await readJson(c.req.raw, z.unknown())
+    );
+
     if (!parsed.success) {
       throw new NakamaApiError("Invalid rename request", 400);
     }
+
     const database = options.databaseAdapter;
+
     if (!database) {
       throw new NakamaApiError("Database unavailable", 503);
     }
+
     return json(
       await renameWorkspaceEntry({
         ...parsed.data,
@@ -1228,6 +1348,7 @@ export function registerProfileRoutes(
     const orgId = requireActiveOrgIdFromContext(c);
     const profileId = decodeURIComponent(c.req.param("profileId"));
     await agent.getProfile(orgId, profileId);
+
     const parsed = z
       .object({
         path: z
@@ -1244,16 +1365,20 @@ export function registerProfileRoutes(
         pinned: z.boolean(),
       })
       .strict()
-      .safeParse(await readJson(c.req.raw));
+      .safeParse(await readJson(c.req.raw, z.unknown()));
+
     if (!parsed.success) {
       throw new NakamaApiError("Invalid file pin", 400);
     }
+
     if (!options.databaseAdapter) {
       throw new NakamaApiError("Database unavailable", 503);
     }
+
     if (parsed.data.pinned) {
       await getWorkspaceEntry(orgId, profileId, parsed.data.path);
     }
+
     await options.databaseAdapter.setFilePinned(
       orgId,
       auth.user.id,
@@ -1261,6 +1386,7 @@ export function registerProfileRoutes(
       parsed.data.path,
       parsed.data.pinned
     );
+
     return new Response(null, { status: 204 });
   });
 
@@ -1269,6 +1395,7 @@ export function registerProfileRoutes(
     const orgId = requireActiveOrgIdFromContext(c);
     const profileId = decodeURIComponent(c.req.param("profileId"));
     await agent.getProfile(orgId, profileId);
+
     return json(
       await listWorkspaceFiles(orgId, profileId, c.req.query("folder") ?? "")
     );
@@ -1280,17 +1407,22 @@ export function registerProfileRoutes(
     const profileId = decodeURIComponent(c.req.param("profileId"));
     await agent.getProfile(orgId, profileId);
     const filename = c.req.query("path");
+
     if (!filename) {
       return json({ error: "path is required" }, 400);
     }
+
     const render =
       c.req.query("render") === "markdown" ? ("markdown" as const) : undefined;
+
     const file = await readWorkspaceFile(orgId, profileId, filename, {
       render,
     });
+
     // Default stays `attachment`, so every existing download link is untouched.
     const disposition = c.req.query("inline") === "1" ? "inline" : "attachment";
     const body = "markdown" in file ? file.markdown : Bun.file(file.filePath);
+
     return new Response(body, {
       headers: {
         "Content-Type": file.contentType,
@@ -1305,7 +1437,6 @@ export function registerProfileRoutes(
   app.get("/v1/profiles/:profileId/artifacts", async (c) => {
     requirePlatformAdminFromContext(c);
     const orgId = requireActiveOrgIdFromContext(c);
-    const { appUserId } = getRequestAppUserScope(c);
     const profileId = decodeURIComponent(c.req.param("profileId"));
     const limitRaw = c.req.query("limit");
     const offsetRaw = c.req.query("offset");
@@ -1316,6 +1447,7 @@ export function registerProfileRoutes(
 
     const limit =
       limitRaw === undefined ? undefined : Number.parseInt(limitRaw, 10);
+
     const offset =
       offsetRaw === undefined ? undefined : Number.parseInt(offsetRaw, 10);
 
@@ -1332,7 +1464,6 @@ export function registerProfileRoutes(
 
     return json<ListArtifactsResponse>(
       await agent.listProfileArtifacts(orgId, profileId, {
-        appUserId,
         folder: c.req.query("folder"),
         limit,
         offset,
@@ -1342,7 +1473,6 @@ export function registerProfileRoutes(
 
   app.get("/v1/profiles/:profileId/artifacts/content", async (c) => {
     const orgId = requireActiveOrgIdFromContext(c);
-    const { appUserId } = getRequestAppUserScope(c);
     const profileId = decodeURIComponent(c.req.param("profileId"));
     const artifactPath = c.req.query("path");
 
@@ -1352,17 +1482,20 @@ export function registerProfileRoutes(
 
     const render =
       c.req.query("render") === "markdown" ? ("markdown" as const) : undefined;
+
     const artifact = await agent.readProfileArtifact(
       orgId,
       profileId,
       artifactPath,
       {
-        appUserId,
+        headOnly: c.req.method === "HEAD" || undefined,
         render,
       }
     );
+
     const downloadName = artifactPath.split("/").pop() ?? "artifact";
     const disposition = c.req.query("inline") === "1" ? "inline" : "attachment";
+
     return new Response(artifact.bytes, {
       headers: {
         "Content-Disposition": `${disposition}; filename*=UTF-8''${encodeURIComponent(downloadName)}`,
@@ -1381,11 +1514,10 @@ export function registerProfileRoutes(
       return json({ error: "path is required" }, 400);
     }
 
-    const body = await readJson<UpdateArtifactRequest>(c.req.raw);
-
-    if (typeof body.content !== "string") {
-      return json({ error: "content is required" }, 400);
-    }
+    const body = await readJson(
+      c.req.raw,
+      z.object({ content: z.string() }).strict()
+    );
 
     const saved = await agent.writeProfileArtifact(
       orgId,
@@ -1422,6 +1554,7 @@ export function registerProfileRoutes(
     requirePlatformAdminFromContext(c);
     const orgId = requireActiveOrgIdFromContext(c);
     const profileId = decodeURIComponent(c.req.param("profileId"));
+
     return json<ListKnowledgeBaseResponse>(
       await agent.listKnowledgeBase(orgId, profileId)
     );
@@ -1431,16 +1564,33 @@ export function registerProfileRoutes(
     requirePlatformAdminFromContext(c);
     const orgId = requireActiveOrgIdFromContext(c);
     const profileId = decodeURIComponent(c.req.param("profileId"));
-    const body = await readJson<UploadKnowledgeBaseRequest>(c.req.raw);
+    const body = await readJson(c.req.raw, uploadKnowledgeBaseSchema);
+
     const result = await agent.uploadKnowledgeBaseDocument(
       orgId,
       profileId,
       body.document,
       body.onDuplicate
     );
+
     return json<UploadKnowledgeBaseResponse>(
       result,
       result.outcome === "created" ? 201 : 200
+    );
+  });
+
+  app.post("/v1/profiles/:profileId/knowledge-base/import-zip", async (c) => {
+    requirePlatformAdminFromContext(c);
+    const orgId = requireActiveOrgIdFromContext(c);
+    const profileId = decodeURIComponent(c.req.param("profileId"));
+
+    const body = await readJson<ImportKnowledgeBaseZipRequest>(
+      c.req.raw,
+      importKnowledgeBaseZipRequestSchema
+    );
+
+    return json<ImportKnowledgeBaseZipResponse>(
+      await agent.importKnowledgeBaseZip(orgId, profileId, body.zipBase64)
     );
   });
 
@@ -1450,6 +1600,7 @@ export function registerProfileRoutes(
       requirePlatformAdminFromContext(c);
       const orgId = requireActiveOrgIdFromContext(c);
       const profileId = decodeURIComponent(c.req.param("profileId"));
+
       return json<DeleteKnowledgeBaseResponse>(
         await agent.deleteKnowledgeBaseDocument(
           orgId,
@@ -1468,12 +1619,15 @@ export function registerProfileRoutes(
       const profileId = decodeURIComponent(c.req.param("profileId"));
       const documentId = decodeURIComponent(c.req.param("documentId"));
       await agent.getProfile(orgId, profileId);
+
       const render =
         c.req.query("render") === "text" ? ("text" as const) : undefined;
+
       const sharedDocumentIds = await getProfileSharedDocumentIds(
         orgId,
         profileId
       );
+
       const document = sharedDocumentIds.includes(documentId)
         ? await readOrganizationKnowledgeBaseDocumentContent(
             orgId,
@@ -1485,12 +1639,15 @@ export function registerProfileRoutes(
         : await agent.readKnowledgeBaseDocument(orgId, profileId, documentId, {
             render,
           });
-      const downloadName = document.filename.replace(/["\\]/g, "_");
+
+      const downloadName = document.filename.split("/").at(-1) ?? "document";
+
       const disposition =
         c.req.query("inline") === "1" ? "inline" : "attachment";
+
       return new Response(document.bytes, {
         headers: {
-          "Content-Disposition": `${disposition}; filename="${downloadName}"`,
+          "Content-Disposition": `${disposition}; filename*=UTF-8''${encodeURIComponent(downloadName)}`,
           "Content-Type": document.contentType,
         },
       });
@@ -1500,34 +1657,43 @@ export function registerProfileRoutes(
   app.get("/v1/orgs/:orgId/knowledge-base", async (c) => {
     requirePlatformAdminFromContext(c);
     const orgId = requireActiveOrgIdFromContext(c);
+
     if (orgId !== decodeURIComponent(c.req.param("orgId"))) {
       throw new NakamaApiError("Not found", 404);
     }
+
     return json(await agent.listOrganizationKnowledgeBase(orgId));
   });
 
   app.post("/v1/orgs/:orgId/knowledge-base", async (c) => {
     requirePlatformAdminFromContext(c);
     const orgId = requireActiveOrgIdFromContext(c);
+
     if (orgId !== decodeURIComponent(c.req.param("orgId"))) {
       throw new NakamaApiError("Not found", 404);
     }
-    const body = await readJson<UploadKnowledgeBaseRequest>(c.req.raw);
+
+    const body = await readJson(c.req.raw, uploadKnowledgeBaseSchema);
+
     const result = await agent.uploadOrganizationKnowledgeBaseDocument(
       orgId,
       body.document,
       body.onDuplicate
     );
+
     return json(result, result.outcome === "created" ? 201 : 200);
   });
 
   app.delete("/v1/orgs/:orgId/knowledge-base/:documentId", async (c) => {
     requirePlatformAdminFromContext(c);
     const orgId = requireActiveOrgIdFromContext(c);
+
     if (orgId !== decodeURIComponent(c.req.param("orgId"))) {
       throw new NakamaApiError("Not found", 404);
     }
+
     const documentId = decodeURIComponent(c.req.param("documentId"));
+
     try {
       return json(
         await agent.deleteOrganizationKnowledgeBaseDocument(orgId, documentId)
@@ -1543,6 +1709,7 @@ export function registerProfileRoutes(
           409
         );
       }
+
       throw error;
     }
   });
@@ -1550,14 +1717,17 @@ export function registerProfileRoutes(
   app.get("/v1/orgs/:orgId/knowledge-base/:documentId/content", async (c) => {
     requirePlatformAdminFromContext(c);
     const orgId = requireActiveOrgIdFromContext(c);
+
     if (orgId !== decodeURIComponent(c.req.param("orgId"))) {
       throw new NakamaApiError("Not found", 404);
     }
+
     const document = await agent.readOrganizationKnowledgeBaseDocument(
       orgId,
       decodeURIComponent(c.req.param("documentId")),
       { render: c.req.query("render") === "text" ? "text" : undefined }
     );
+
     return new Response(document.bytes, {
       headers: {
         "Content-Disposition": `${c.req.query("inline") === "1" ? "inline" : "attachment"}; filename="${document.filename.replace(/["\\]/g, "_")}"`,
@@ -1574,6 +1744,7 @@ export function registerProfileRoutes(
       const profileId = decodeURIComponent(c.req.param("profileId"));
       const documentId = decodeURIComponent(c.req.param("documentId"));
       await agent.getProfile(orgId, profileId);
+
       try {
         await attachSharedKnowledgeBaseDocument(orgId, profileId, documentId);
       } catch (error) {
@@ -1583,8 +1754,10 @@ export function registerProfileRoutes(
         ) {
           throw new NakamaApiError(error.message, 404);
         }
+
         throw error;
       }
+
       return json({ attached: true, documentId, profileId });
     }
   );
@@ -1597,17 +1770,20 @@ export function registerProfileRoutes(
       const profileId = decodeURIComponent(c.req.param("profileId"));
       const documentId = decodeURIComponent(c.req.param("documentId"));
       await agent.getProfile(orgId, profileId);
+
       const detached = await detachSharedKnowledgeBaseDocument(
         orgId,
         profileId,
         documentId
       );
+
       if (!detached) {
         throw new NakamaApiError(
           "Shared knowledge base document is not attached to this profile.",
           404
         );
       }
+
       return json({ detached: true, documentId, profileId });
     }
   );
@@ -1616,6 +1792,7 @@ export function registerProfileRoutes(
     const orgId = requireActiveOrgIdFromContext(c);
     const profileId = decodeURIComponent(c.req.param("profileId"));
     const avatar = await agent.getProfileAvatar(orgId, profileId);
+
     return new Response(avatar.bytes, {
       headers: { "Content-Type": avatar.mediaType },
     });
@@ -1625,7 +1802,8 @@ export function registerProfileRoutes(
     requirePlatformAdminFromContext(c);
     const orgId = requireActiveOrgIdFromContext(c);
     const profileId = decodeURIComponent(c.req.param("profileId"));
-    const body = await readJson<ImageAttachment>(c.req.raw);
+    const body = await readJson(c.req.raw, imageAttachmentSchema);
+
     return json<ProfileResponse>(
       await agent.uploadProfileAvatar(orgId, profileId, body)
     );
@@ -1636,6 +1814,7 @@ export function registerProfileRoutes(
     const orgId = requireActiveOrgIdFromContext(c);
     const profileId = decodeURIComponent(c.req.param("profileId"));
     await agent.deleteProfileAvatar(orgId, profileId);
+
     return new Response(null, { status: 204 });
   });
 
@@ -1643,6 +1822,7 @@ export function registerProfileRoutes(
     requireOrgAdminOrPlatformAdminFromContext(c);
     const orgId = requireActiveOrgIdFromContext(c);
     const profileId = decodeURIComponent(c.req.param("profileId"));
+
     return json<ProfileResponse>(await agent.getProfile(orgId, profileId));
   });
 
@@ -1652,8 +1832,10 @@ export function registerProfileRoutes(
     const profileId = decodeURIComponent(c.req.param("profileId"));
     const limitRaw = c.req.query("limit");
     const offsetRaw = c.req.query("offset");
+
     const limit =
       limitRaw === undefined ? undefined : Number.parseInt(limitRaw, 10);
+
     const offset =
       offsetRaw === undefined ? undefined : Number.parseInt(offsetRaw, 10);
 
@@ -1673,14 +1855,48 @@ export function registerProfileRoutes(
     );
   });
 
+  // The agents Nakama ships with, for the profile's chat agent setting.
+  app.get("/v1/acp-agent-presets", () =>
+    json<AcpAgentPresetsResponse>({
+      presets: listAcpAgentPresets(),
+    })
+  );
+
+  // Settings for the next chat of this profile, before the chat has a session.
+  app.get("/v1/profiles/:profileId/acp-settings", async (c) => {
+    const orgId = requireActiveOrgIdFromContext(c);
+    const profileId = decodeURIComponent(c.req.param("profileId"));
+
+    return json<AcpSessionSettingsResponse>(
+      await agent.getAcpDraftSettings(orgId, profileId)
+    );
+  });
+
+  app.put("/v1/profiles/:profileId/acp-settings/:configId", async (c) => {
+    requireNotViewerFromContext(c);
+    const orgId = requireActiveOrgIdFromContext(c);
+    const profileId = decodeURIComponent(c.req.param("profileId"));
+    const configId = decodeURIComponent(c.req.param("configId"));
+
+    const body = await readJson(
+      c.req.raw,
+      z.object({ value: z.string().min(1).max(256) })
+    );
+
+    return json<AcpSessionSettingsResponse>(
+      await agent.setAcpDraftSetting(orgId, profileId, configId, body.value)
+    );
+  });
+
   app.put("/v1/profiles/:profileId", async (c) => {
     const auth = getRequestAuth(c);
     const orgId = requireActiveOrgIdFromContext(c);
     const profileId = decodeURIComponent(c.req.param("profileId"));
-    const body = await readJson<UpdateProfileRequest>(c.req.raw);
+    const body = await readJson(c.req.raw, updateProfileSchema);
 
     if (!auth.isPlatformAdmin) {
       requireOrgAdmin(auth);
+
       if (!isOrgAdminAllowedProfileSettingsUpdate(body)) {
         throw new NakamaApiError("Forbidden", 403);
       }
@@ -1733,6 +1949,7 @@ export function registerProfileRoutes(
     const orgId = requireActiveOrgIdFromContext(c);
     const profileId = decodeURIComponent(c.req.param("profileId"));
     const body = await readOptionalJson<CloneProfileRequest>(c.req.raw, {});
+
     return json<ProfileResponse>(
       await agent.cloneProfile(orgId, profileId, body),
       201
@@ -1769,7 +1986,8 @@ export function registerProfileRoutes(
     requirePlatformAdminFromContext(c);
     const orgId = requireActiveOrgIdFromContext(c);
     const profileId = decodeURIComponent(c.req.param("profileId"));
-    const body = await readJson<MoveProfileRequest>(c.req.raw);
+    const body = await readJson(c.req.raw, moveProfileSchema);
+
     return json<ProfileResponse>(
       await agent.moveProfile(orgId, profileId, body)
     );
@@ -1780,6 +1998,7 @@ export function registerProfileRoutes(
     const orgId = requireActiveOrgIdFromContext(c);
     const profileId = decodeURIComponent(c.req.param("profileId"));
     await agent.deleteProfile(orgId, profileId);
+
     return new Response(null, { status: 204 });
   });
 }

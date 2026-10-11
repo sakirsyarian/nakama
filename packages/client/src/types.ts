@@ -7,6 +7,7 @@ import type {
   ChatUsage,
   CompactionResponse,
   SendMessageInput,
+  SendMessageRequest,
 } from "@nakama/core/contract";
 
 export interface NakamaClientOptions {
@@ -21,9 +22,19 @@ export interface NakamaClientOptions {
 
 export type StreamHandler = (delta: string) => void;
 
+export type JsonValue =
+  | boolean
+  | null
+  | number
+  | string
+  | JsonValue[]
+  | { [key: string]: JsonValue };
+
 export interface StreamHandlers {
   onChunk: StreamHandler;
   onContextUsage?: (usage: ChatContextUsage) => void;
+  /** Only called when the server sends its terminal done event. */
+  onDone?: () => void;
   onQuestionnaireUpdated?: (questionnaire: AgentQuestionnaire | null) => void;
   onSubAgentActivity?: (event: {
     parentToolCallId: string;
@@ -48,7 +59,7 @@ export interface StreamHandlers {
     toolCallId: string;
     toolGroupId?: string;
     tool: string;
-    input: Record<string, unknown>;
+    input: Record<string, JsonValue>;
   }) => void;
   onUsage?: (usage: ChatUsage) => void;
 }
@@ -57,13 +68,15 @@ export type SendMessageArg = string | SendMessageInput;
 
 export interface SendStreamOptions {
   signal?: AbortSignal;
+  whatsappContextToken?: string;
+  whatsappMessage?: SendMessageRequest["whatsappMessage"];
 }
 
 export interface RemoteChatSession {
   clear(): Promise<void>;
   compact(options?: { force?: boolean }): Promise<CompactionResponse>;
   createAutomation(prompt: string): Promise<AutomationDefinition>;
-  getMessages(): Promise<ChatMessage[]>;
+  getMessages(options?: { signal?: AbortSignal }): Promise<ChatMessage[]>;
   id: string;
   purge(): Promise<void>;
   send(input: SendMessageArg): Promise<string>;

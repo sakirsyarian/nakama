@@ -10,9 +10,10 @@ import {
   useQueryClient,
 } from "@tanstack/react-query";
 import { client } from "@/lib/client";
+import { invalidateQueries } from "@/lib/query-client";
 import { queryKeys } from "@/lib/query-keys";
 
-export function orgMembersQueryOptions(orgId: string) {
+function orgMembersQueryOptions(orgId: string) {
   return queryOptions({
     queryFn: () => client.listOrgMembers(orgId),
     queryKey: queryKeys.orgMembers(orgId),
@@ -30,9 +31,7 @@ function invalidateOrgMembers(
   queryClient: ReturnType<typeof useQueryClient>,
   orgId: string
 ) {
-  return queryClient.invalidateQueries({
-    queryKey: queryKeys.orgMembers(orgId),
-  });
+  return invalidateQueries(queryClient, queryKeys.orgMembers(orgId));
 }
 
 export function useInviteOrgMember(orgId: string) {

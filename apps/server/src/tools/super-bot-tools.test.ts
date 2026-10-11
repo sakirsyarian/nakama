@@ -10,6 +10,7 @@ import type {
   UpdateProfileRequest,
 } from "@nakama/core";
 import { runWriteFile } from "@nakama/core";
+import { z } from "zod";
 import {
   approveToolSetup,
   loadToolApiKey,
@@ -23,8 +24,32 @@ import {
 } from "../services/super-bot-session-state";
 import { createSuperBotTools } from "./super-bot-tools";
 
+type TestProfileService = Partial<
+  Pick<
+    ProfileService,
+    | "assignTool"
+    | "createProfile"
+    | "createTool"
+    | "getProfile"
+    | "getTool"
+    | "updateProfile"
+  >
+>;
+
+interface TestCreateProfileInput {
+  model?: string | null;
+  name: string;
+}
+
+interface TestHandlerConfig {
+  modulePath: string;
+  requiresApiKey?: boolean;
+}
+
 const originalConfigDir = process.env.NAKAMA_CONFIG_DIR;
+
 const ORG_ID = "org_test";
+
 const SESSION_ID = "session_test";
 
 describe("super bot create_tool", () => {
@@ -54,14 +79,17 @@ describe("super bot create_tool", () => {
       const assigned: string[] = [];
       let failAssignment = true;
       let stored: ToolDetail;
+
       const tools = createSuperBotTools(
-        {
+        asProfileService({
           async assignTool(orgId: string, profileId: string) {
             expect(orgId).toBe(ORG_ID);
+
             if (failAssignment) {
               failAssignment = false;
               throw new Error("Temporary assignment failure");
             }
+
             assigned.push(profileId);
           },
           async createTool(request: CreateToolRequest) {
@@ -74,6 +102,7 @@ describe("super bot create_tool", () => {
               id: "tool_setup_test",
               updatedAt: "now",
             };
+
             return stored;
           },
           async getProfile() {
@@ -82,21 +111,26 @@ describe("super bot create_tool", () => {
           async getTool() {
             return { tool: stored };
           },
-        } as unknown as ProfileService,
+        }),
         new SuperBotSessionState()
       );
+
       const propose = tools.find((tool) => tool.name === "propose_tool")!;
       const create = tools.find((tool) => tool.name === "create_tool")!;
       const context = { orgId: ORG_ID, sessionId: SESSION_ID };
-      const proposal = (await propose.run(
-        {
-          description: "Echo",
-          name: "echo",
-          plan: "Return the supplied input.",
-          requiresApiKey,
-        },
-        context
-      )) as { setupId: string };
+
+      const proposal = z.object({ setupId: z.string() }).parse(
+        await propose.run(
+          {
+            description: "Echo",
+            name: "echo",
+            plan: "Return the supplied input.",
+            requiresApiKey,
+          },
+          context
+        )
+      );
+
       const input = {
         description: "ignored",
         handlerConfig: {
@@ -106,8 +140,10 @@ describe("super bot create_tool", () => {
         name: "ignored",
         setupId: proposal.setupId,
       };
+
       await expect(create.run(input, context)).rejects.toThrow();
       expect(created).toHaveLength(0);
+
       if (requiresApiKey) {
         await expect(
           approveToolSetup(ORG_ID, proposal.setupId, { profileId: "target" })
@@ -116,10 +152,12 @@ describe("super bot create_tool", () => {
           "pending"
         );
       }
+
       const approval = await approveToolSetup(ORG_ID, proposal.setupId, {
         apiKey: "private-key",
         profileId: "target",
       });
+
       expect(JSON.stringify(approval)).not.toContain("private-key");
       await expect(
         create.run(input, { ...context, sessionId: "other" })
@@ -178,8 +216,9 @@ describe("super bot create_tool", () => {
 
       const capturedRequests: CreateToolRequest[] = [];
       const sessionState = new SuperBotSessionState();
+
       const tools = createSuperBotTools(
-        {
+        asProfileService({
           async createTool(request: CreateToolRequest): Promise<ToolDetail> {
             capturedRequests.push(request);
 
@@ -193,21 +232,28 @@ describe("super bot create_tool", () => {
               updatedAt: "2026-01-01T00:00:00.000Z",
             };
           },
-        } as ProfileService,
+        }),
         sessionState
       );
+
       const createTool = tools.find((tool) => tool.name === "create_tool");
+
       if (!createTool) {
         throw new Error("create_tool was not registered");
+      }
+
+      const handlerConfig: TestHandlerConfig = {
+        modulePath: "echo.js",
+      };
+
+      if (requiresApiKey) {
+        handlerConfig.requiresApiKey = requiresApiKey;
       }
 
       const result = await createTool.run(
         {
           description: "Echo input",
-          handlerConfig: {
-            modulePath: "echo.js",
-            ...(requiresApiKey ? { requiresApiKey } : {}),
-          },
+          handlerConfig,
           name: "echo",
         },
         { orgId: ORG_ID, sessionId: SESSION_ID }
@@ -216,32 +262,30 @@ describe("super bot create_tool", () => {
       expect(capturedRequests[0]?.name).toBe("echo");
       expect(capturedRequests[0]?.description).toBe("Echo input");
       expect(capturedRequests[0]?.handlerType).toBe("javascript");
-      expect(capturedRequests[0]?.handlerConfig).toEqual({
-        modulePath: "echo.js",
-        ...(requiresApiKey ? { requiresApiKey } : {}),
-      });
-      expect(result).toEqual({
-        ...(requiresApiKey
-          ? {
-              orgId: ORG_ID,
-              toolId: "tool_echo",
-              toolName: "echo",
-              type: "tool_credentials_required",
-            }
-          : {}),
+      expect(capturedRequests[0]?.handlerConfig).toEqual(handlerConfig);
+
+      const expectedResult = {
         tool: {
           createdAt: "2026-01-01T00:00:00.000Z",
           description: "Echo input",
-          handlerConfig: {
-            modulePath: "echo.js",
-            ...(requiresApiKey ? { requiresApiKey } : {}),
-          },
+          handlerConfig,
           handlerType: "javascript",
           id: "tool_echo",
           name: "echo",
           updatedAt: "2026-01-01T00:00:00.000Z",
         },
-      });
+      };
+
+      if (requiresApiKey) {
+        expect(result).toMatchObject({
+          orgId: ORG_ID,
+          toolId: "tool_echo",
+          toolName: "echo",
+          type: "tool_credentials_required",
+        });
+      }
+
+      expect(result).toMatchObject(expectedResult);
     }
   );
 
@@ -416,24 +460,13 @@ describe("super bot assign_tool_to_profile", () => {
           _orgId: string,
           profileId: string
         ): Promise<ProfileResponse> {
-          return {
-            profile: {
-              createdAt: "2026-01-01T00:00:00.000Z",
-              hasAvatar: false,
-              id: profileId,
-              isSuper: false,
-              mcpServerCount: 0,
-              mcpServers: [],
-              model: null,
-              name: "Default Bot",
-              skills: [],
-              soulActive: false,
-              systemPrompt: "You are helpful.",
-              toolCount: 1,
-              tools: [],
-              updatedAt: "2026-01-01T00:00:00.000Z",
-            },
-          };
+          return profileResponse({
+            id: profileId,
+            name: "Default Bot",
+            soulActive: false,
+            systemPrompt: "You are helpful.",
+            toolCount: 1,
+          });
         },
       },
       sessionState
@@ -488,24 +521,13 @@ describe("super bot assign_tool_to_profile", () => {
         ): Promise<ProfileResponse> {
           assignCalls += 1;
 
-          return {
-            profile: {
-              createdAt: "2026-01-01T00:00:00.000Z",
-              hasAvatar: false,
-              id: profileId,
-              isSuper: false,
-              mcpServerCount: 0,
-              mcpServers: [],
-              model: null,
-              name: "Other Bot",
-              skills: [],
-              soulActive: false,
-              systemPrompt: "You are helpful.",
-              toolCount: 1,
-              tools: [],
-              updatedAt: "2026-01-01T00:00:00.000Z",
-            },
-          };
+          return profileResponse({
+            id: profileId,
+            name: "Other Bot",
+            soulActive: false,
+            systemPrompt: "You are helpful.",
+            toolCount: 1,
+          });
         },
       },
       sessionState
@@ -555,11 +577,14 @@ describe("super bot create_profile", () => {
         updatedAt: "2026-01-01T00:00:00.000Z",
       },
     };
+
     let lookups = 0;
+
     const createProfile = getCreateProfileTool({
       async createProfile(orgId, request) {
         expect(orgId).toBe(ORG_ID);
         expect(request.model).toBe(expected);
+
         return {
           profile: {
             ...source.profile,
@@ -572,47 +597,41 @@ describe("super bot create_profile", () => {
         expect(orgId).toBe(ORG_ID);
         expect(profileId).toBe("super-bot");
         lookups++;
+
         return source;
       },
     });
 
-    await createProfile.run(
-      {
-        name: "New Bot",
-        ...(override === undefined ? {} : { model: override }),
-      },
-      { orgId: ORG_ID, profileId: "super-bot", sessionId: SESSION_ID }
-    );
+    const input: TestCreateProfileInput = {
+      name: "New Bot",
+    };
+
+    if (override !== undefined) {
+      input.model = override;
+    }
+
+    await createProfile.run(input, {
+      orgId: ORG_ID,
+      profileId: "super-bot",
+      sessionId: SESSION_ID,
+    });
     expect(lookups).toBe(override === undefined ? 1 : 0);
   });
 
   test("creates a profile on the first turn", async () => {
     const sessionState = new SuperBotSessionState();
     sessionState.beginTurn(SESSION_ID);
+
     const createProfile = getCreateProfileTool(
       {
         async createProfile(
           _orgId: string,
           request: CreateProfileRequest
         ): Promise<ProfileResponse> {
-          return {
-            profile: {
-              createdAt: "2026-01-01T00:00:00.000Z",
-              hasAvatar: false,
-              id: "gary",
-              isSuper: false,
-              mcpServerCount: 0,
-              mcpServers: [],
-              model: null,
-              name: request.name,
-              skills: [],
-              soulActive: true,
-              systemPrompt: "",
-              toolCount: 0,
-              tools: [],
-              updatedAt: "2026-01-01T00:00:00.000Z",
-            },
-          };
+          return profileResponse({
+            id: "gary",
+            name: request.name,
+          });
         },
       },
       sessionState
@@ -634,6 +653,7 @@ describe("super bot create_profile", () => {
     const sessionState = new SuperBotSessionState();
     sessionState.beginTurn(SESSION_ID);
     sessionState.beginTurn(SESSION_ID);
+
     const createProfile = getCreateProfileTool(
       {
         async createProfile(
@@ -641,24 +661,11 @@ describe("super bot create_profile", () => {
           request: CreateProfileRequest
         ): Promise<ProfileResponse> {
           capturedRequests.push(request);
-          return {
-            profile: {
-              createdAt: "2026-01-01T00:00:00.000Z",
-              hasAvatar: false,
-              id: "gary",
-              isSuper: false,
-              mcpServerCount: 0,
-              mcpServers: [],
-              model: null,
-              name: request.name,
-              skills: [],
-              soulActive: true,
-              systemPrompt: "",
-              toolCount: 0,
-              tools: [],
-              updatedAt: "2026-01-01T00:00:00.000Z",
-            },
-          };
+
+          return profileResponse({
+            id: "gary",
+            name: request.name,
+          });
         },
       },
       sessionState
@@ -687,24 +694,12 @@ describe("super bot create_profile", () => {
       ): Promise<ProfileResponse> {
         capturedRequests.push(request);
 
-        return {
-          profile: {
-            createdAt: "2026-01-01T00:00:00.000Z",
-            hasAvatar: false,
-            id: "support-bot",
-            isSuper: request.isSuper ?? false,
-            mcpServerCount: 0,
-            mcpServers: [],
-            model: request.model ?? null,
-            name: request.name,
-            skills: [],
-            soulActive: true,
-            systemPrompt: request.systemPrompt ?? "",
-            toolCount: 0,
-            tools: [],
-            updatedAt: "2026-01-01T00:00:00.000Z",
-          },
-        };
+        return profileResponse({
+          isSuper: request.isSuper ?? false,
+          model: request.model ?? null,
+          name: request.name,
+          systemPrompt: request.systemPrompt ?? "",
+        });
       },
     });
 
@@ -742,24 +737,12 @@ describe("super bot create_profile", () => {
       ): Promise<ProfileResponse> {
         capturedRequests.push(request);
 
-        return {
-          profile: {
-            createdAt: "2026-01-01T00:00:00.000Z",
-            hasAvatar: false,
-            id: "support-bot",
-            isSuper: request.isSuper ?? false,
-            mcpServerCount: 0,
-            mcpServers: [],
-            model: request.model ?? null,
-            name: request.name,
-            skills: [],
-            soulActive: true,
-            systemPrompt: request.systemPrompt ?? "",
-            toolCount: 0,
-            tools: [],
-            updatedAt: "2026-01-01T00:00:00.000Z",
-          },
-        };
+        return profileResponse({
+          isSuper: request.isSuper ?? false,
+          model: request.model ?? null,
+          name: request.name,
+          systemPrompt: request.systemPrompt ?? "",
+        });
       },
     });
 
@@ -767,10 +750,12 @@ describe("super bot create_profile", () => {
       additionalProperties: false,
       type: "object",
     });
-    expect(
-      (createProfile.parameters as { properties?: Record<string, unknown> })
-        .properties
-    ).not.toHaveProperty("id");
+
+    const parameters = z
+      .object({ properties: z.record(z.string(), z.json()).optional() })
+      .parse(createProfile.parameters);
+
+    expect(parameters.properties).not.toHaveProperty("id");
 
     await createProfile.run(
       {
@@ -786,6 +771,7 @@ describe("super bot create_profile", () => {
 
   test("rejects unsupported soul file keys", async () => {
     let createProfileCalled = false;
+
     const createProfile = getCreateProfileTool({
       async createProfile(): Promise<ProfileResponse> {
         createProfileCalled = true;
@@ -813,6 +799,7 @@ describe("super bot update_profile", () => {
     let updateProfileCalled = false;
     const sessionState = new SuperBotSessionState();
     sessionState.beginTurn(SESSION_ID);
+
     const updateProfile = getUpdateProfileTool(
       {
         async updateProfile(): Promise<ProfileResponse> {
@@ -840,9 +827,11 @@ describe("super bot update_profile", () => {
       profileId: string;
       request: UpdateProfileRequest;
     }> = [];
+
     const sessionState = new SuperBotSessionState();
     sessionState.beginTurn(SESSION_ID);
     sessionState.beginTurn(SESSION_ID);
+
     const updateProfile = getUpdateProfileTool(
       {
         async updateProfile(
@@ -851,24 +840,11 @@ describe("super bot update_profile", () => {
           request: UpdateProfileRequest
         ): Promise<ProfileResponse> {
           captured.push({ orgId, profileId, request });
-          return {
-            profile: {
-              createdAt: "2026-01-01T00:00:00.000Z",
-              hasAvatar: false,
-              id: profileId,
-              isSuper: false,
-              mcpServerCount: 0,
-              mcpServers: [],
-              model: null,
-              name: "Support Bot",
-              skills: [],
-              soulActive: true,
-              systemPrompt: request.systemPrompt ?? "",
-              toolCount: 0,
-              tools: [],
-              updatedAt: "2026-01-01T00:00:00.000Z",
-            },
-          };
+
+          return profileResponse({
+            id: profileId,
+            systemPrompt: request.systemPrompt ?? "",
+          });
         },
       },
       sessionState
@@ -891,6 +867,7 @@ describe("super bot update_profile", () => {
 
   test("clears the stored system prompt when an empty string is passed", async () => {
     const captured: UpdateProfileRequest[] = [];
+
     const updateProfile = getUpdateProfileTool({
       async updateProfile(
         _orgId: string,
@@ -898,24 +875,10 @@ describe("super bot update_profile", () => {
         request: UpdateProfileRequest
       ): Promise<ProfileResponse> {
         captured.push(request);
-        return {
-          profile: {
-            createdAt: "2026-01-01T00:00:00.000Z",
-            hasAvatar: false,
-            id: "support-bot",
-            isSuper: false,
-            mcpServerCount: 0,
-            mcpServers: [],
-            model: null,
-            name: "Support Bot",
-            skills: [],
-            soulActive: true,
-            systemPrompt: request.systemPrompt ?? "",
-            toolCount: 0,
-            tools: [],
-            updatedAt: "2026-01-01T00:00:00.000Z",
-          },
-        };
+
+        return profileResponse({
+          systemPrompt: request.systemPrompt ?? "",
+        });
       },
     });
 
@@ -929,6 +892,7 @@ describe("super bot update_profile", () => {
 
   test("updates soul files after confirmation", async () => {
     const captured: UpdateProfileRequest[] = [];
+
     const updateProfile = getUpdateProfileTool({
       async updateProfile(
         _orgId: string,
@@ -936,24 +900,10 @@ describe("super bot update_profile", () => {
         request: UpdateProfileRequest
       ): Promise<ProfileResponse> {
         captured.push(request);
-        return {
-          profile: {
-            createdAt: "2026-01-01T00:00:00.000Z",
-            hasAvatar: false,
-            id: "support-bot",
-            isSuper: false,
-            mcpServerCount: 0,
-            mcpServers: [],
-            model: null,
-            name: "Support Bot",
-            skills: [],
-            soulActive: true,
-            systemPrompt: "You are support.",
-            toolCount: 0,
-            tools: [],
-            updatedAt: "2026-01-01T00:00:00.000Z",
-          },
-        };
+
+        return profileResponse({
+          systemPrompt: "You are support.",
+        });
       },
     });
 
@@ -978,6 +928,7 @@ describe("super bot update_profile", () => {
 
   test("rejects update_profile with neither systemPrompt nor soulFiles", async () => {
     let updateProfileCalled = false;
+
     const updateProfile = getUpdateProfileTool({
       async updateProfile(): Promise<ProfileResponse> {
         updateProfileCalled = true;
@@ -998,6 +949,7 @@ describe("super bot update_profile", () => {
 
   test("rejects a missing profileId", async () => {
     let updateProfileCalled = false;
+
     const updateProfile = getUpdateProfileTool({
       async updateProfile(): Promise<ProfileResponse> {
         updateProfileCalled = true;
@@ -1017,6 +969,35 @@ describe("super bot update_profile", () => {
   });
 });
 
+function profileResponse(
+  overrides: Partial<ProfileResponse["profile"]> = {}
+): ProfileResponse {
+  return {
+    profile: {
+      createdAt: "2026-01-01T00:00:00.000Z",
+      hasAvatar: false,
+      id: "support-bot",
+      isSuper: false,
+      mcpServerCount: 0,
+      mcpServers: [],
+      model: null,
+      name: "Support Bot",
+      skills: [],
+      soulActive: true,
+      systemPrompt: "",
+      toolCount: 0,
+      tools: [],
+      updatedAt: "2026-01-01T00:00:00.000Z",
+      ...overrides,
+    },
+  };
+}
+
+function asProfileService(mock: TestProfileService): ProfileService {
+  // SAFETY: Each test provides every ProfileService method that its tool path invokes.
+  return mock as ProfileService;
+}
+
 function createTestTools(
   profileService: Partial<
     Pick<
@@ -1028,7 +1009,8 @@ function createTestTools(
   const sessionState = new SuperBotSessionState();
   sessionState.beginTurn(SESSION_ID);
   sessionState.beginTurn(SESSION_ID);
-  return createSuperBotTools(profileService as ProfileService, sessionState);
+
+  return createSuperBotTools(asProfileService(profileService), sessionState);
 }
 
 function getCreateToolTool(
@@ -1037,7 +1019,7 @@ function getCreateToolTool(
 ) {
   const tool = (
     sessionState
-      ? createSuperBotTools(profileService as ProfileService, sessionState)
+      ? createSuperBotTools(asProfileService(profileService), sessionState)
       : createTestTools(profileService)
   ).find((candidate) => candidate.name === "create_tool");
 
@@ -1054,13 +1036,14 @@ function getCreateProfileTool(
   sessionState?: SuperBotSessionState
 ) {
   const state = sessionState ?? new SuperBotSessionState();
+
   if (!sessionState) {
     state.beginTurn(SESSION_ID);
     state.beginTurn(SESSION_ID);
   }
 
   const tool = createSuperBotTools(
-    profileService as ProfileService,
+    asProfileService(profileService),
     state
   ).find((candidate) => candidate.name === "create_profile");
 
@@ -1076,13 +1059,14 @@ function getUpdateProfileTool(
   sessionState?: SuperBotSessionState
 ) {
   const state = sessionState ?? new SuperBotSessionState();
+
   if (!sessionState) {
     state.beginTurn(SESSION_ID);
     state.beginTurn(SESSION_ID);
   }
 
   const tool = createSuperBotTools(
-    profileService as ProfileService,
+    asProfileService(profileService),
     state
   ).find((candidate) => candidate.name === "update_profile");
 
@@ -1098,7 +1082,7 @@ function getAssignToolTool(
   sessionState: SuperBotSessionState
 ) {
   const tool = createSuperBotTools(
-    profileService as ProfileService,
+    asProfileService(profileService),
     sessionState
   ).find((candidate) => candidate.name === "assign_tool_to_profile");
 
@@ -1112,6 +1096,7 @@ function getAssignToolTool(
 async function captureError(promise: Promise<unknown>): Promise<Error | null> {
   try {
     await promise;
+
     return null;
   } catch (error) {
     return error instanceof Error ? error : new Error(String(error));

@@ -1,12 +1,17 @@
 # Nakama — one container: API, web dashboard, automation + task workers
 # Build & run: ./scripts/docker-build-run.sh
 
+# Keep image references literal so Dependabot can update all three pins.
+# Use patch-version tags so new Bun patches produce version updates.
+# Verify each proposed multi-arch digest with: docker buildx imagetools inspect <image>
+
 # --- Build architecture-independent web and JavaScript bundles once ---
-FROM --platform=$BUILDPLATFORM oven/bun:1.4-slim AS web-builder
+FROM --platform=$BUILDPLATFORM oven/bun:1.4.2-slim@sha256:cb3bbbb08e13a4a2ff400f24c7a2a1d5efa83f6ef8544d52d95a519631e2fc61 AS web-builder
 WORKDIR /app
 
 COPY package.json bun.lock ./
-COPY patches/@electron%2Fosx-sign@1.3.3.patch patches/
+# The frozen install needs every patch package.json lists.
+COPY patches patches
 COPY apps apps
 COPY packages packages
 
@@ -28,31 +33,34 @@ COPY --from=web-builder /app/apps/platform/whatsapp/dist /app/apps/platform/what
 COPY --from=web-builder /app/apps/platform/discord/dist /app/apps/platform/discord/dist
 COPY --from=web-builder /app/apps/platform/slack/dist /app/apps/platform/slack/dist
 
-FROM oven/bun:1.4-slim AS runtime-deps
-RUN mkdir -p /runtime-deps \
-  && printf '{"private":true}\n' > /runtime-deps/package.json \
-  && cd /runtime-deps \
-  && bun add --exact --production --ignore-scripts \
-    pm2@7.0.4 microsandbox@0.6.17 sharp@0.35.4 \
-    @vscode/ripgrep@1.18.0 @firecrawl/anydoc@0.1.3
+# Production runtime dependencies are installed from a committed manifest and
+# lockfile. Re-resolving version ranges at image build time let two builds of
+# the same commit ship different transitive bytes, so the lockfile is the input.
+FROM oven/bun:1.4.2-slim@sha256:cb3bbbb08e13a4a2ff400f24c7a2a1d5efa83f6ef8544d52d95a519631e2fc61 AS runtime-deps
+WORKDIR /runtime-deps
+
+COPY .docker/runtime-deps/package.json .docker/runtime-deps/bun.lock ./
+RUN bun install --frozen-lockfile --production --ignore-scripts
 
 # --- Production runtime (server + workspace packages + built static assets) ---
-FROM oven/bun:1.4-slim AS runtime
+FROM oven/bun:1.4.2-slim@sha256:cb3bbbb08e13a4a2ff400f24c7a2a1d5efa83f6ef8544d52d95a519631e2fc61 AS runtime
 WORKDIR /app
 
 RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates sudo python3 \
   && rm -rf /var/lib/apt/lists/*
 
 # Optional Google Meet audio-capture runtime. Chromium remains sandboxed and
-# runs as the existing non-root Nakama user.
+# runs as the existing non-root Nakama user. The manifest and lockfile are
+# copied unconditionally (two small files) so the install below can be
+# frozen; the packages themselves only land when the build arg is true.
 ARG INSTALL_MEET_DEPS=false
+COPY .docker/meet-deps/package.json .docker/meet-deps/bun.lock /opt/nakama-meet/
 RUN if [ "$INSTALL_MEET_DEPS" = "true" ]; then \
       apt-get update && apt-get install -y --no-install-recommends \
         chromium ffmpeg pulseaudio pulseaudio-utils fonts-liberation xvfb \
       && rm -rf /var/lib/apt/lists/* \
-      && mkdir -p /opt/nakama-meet \
       && cd /opt/nakama-meet \
-      && bun add --exact --production --ignore-scripts betterwright@2.8.1; \
+      && bun install --frozen-lockfile --production --ignore-scripts; \
     fi
 
 # Tool-output optimiser, on by default so the dashboard toggle works on a fresh
@@ -105,9 +113,14 @@ COPY --chown=1000:1000 --from=build-assets /app/apps/platform/discord/dist apps/
 COPY --chown=1000:1000 --from=build-assets /app/apps/platform/slack/dist apps/platform/slack/dist
 COPY --chown=1000:1000 --from=runtime-deps /runtime-deps/node_modules node_modules
 
+# Use the installed QMD CLI through Bun; its upstream launcher expects Node.
+RUN printf '#!/bin/sh\nexec bun /app/node_modules/@tobilu/qmd/dist/cli/qmd.js "$@"\n' > /usr/local/bin/qmd \
+  && chmod 755 /usr/local/bin/qmd
+
 RUN test -f apps/server/src/services/javascript-tool-runner.js \
   && test -f apps/server/src/services/plugin-runner.js \
-  && test -f node_modules/pm2/bin/pm2-runtime
+  && test -f node_modules/pm2/bin/pm2-runtime \
+  && qmd --version
 
 ENV NODE_ENV=production \
     NAKAMA_HOST=0.0.0.0 \

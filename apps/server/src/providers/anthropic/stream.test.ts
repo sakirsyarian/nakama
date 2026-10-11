@@ -9,17 +9,22 @@ afterEach(() => {
 });
 
 describe("Anthropic provider streaming", () => {
-  test("sends Opus 5.5 binding controls on streamed requests", async () => {
+  test("streams Sonnet 5.5 with adaptive binding controls", async () => {
     const provider = createAnthropicProvider({
       apiKey: "sk-ant-test",
-      fetch: (async (_input: RequestInfo | URL, init?: RequestInit) => {
+      fetch: async (_input: RequestInfo | URL, init?: RequestInit) => {
         expect(new Headers(init?.headers).get("anthropic-beta")).toBe(
           "thinking-binding-controls-2026-08-01"
         );
-        expect(JSON.parse(String(init?.body)).thinking).toEqual({
-          block_binding: { prefix_mismatch_behavior: "drop_block" },
-          type: "adaptive",
+        expect(JSON.parse(String(init?.body))).toMatchObject({
+          output_config: { effort: "high" },
+          thinking: {
+            block_binding: { prefix_mismatch_behavior: "drop_block" },
+            display: "summarized",
+            type: "adaptive",
+          },
         });
+
         return new Response(
           streamFromChunks([
             'event: message_start\r\ndata:{"type":"message_start","message":{"usage":{"input_tokens":4}}}\r\n\r\n',
@@ -28,13 +33,49 @@ describe("Anthropic provider streaming", () => {
           ]),
           { headers: { "Content-Type": "text/event-stream" } }
         );
-      }) as typeof fetch,
+      },
+      model: "claude-sonnet-5-5",
+    });
+
+    await provider.streamChat(
+      {
+        messages: [{ content: "Hello", role: "user" }],
+        providerOptions: { thinking: { effort: "high", enabled: true } },
+        system: "Be helpful.",
+      },
+      { onChunk: () => undefined }
+    );
+  });
+
+  test("sends Opus 5.5 binding controls on streamed requests", async () => {
+    const provider = createAnthropicProvider({
+      apiKey: "sk-ant-test",
+      fetch: async (_input: RequestInfo | URL, init?: RequestInit) => {
+        expect(new Headers(init?.headers).get("anthropic-beta")).toBe(
+          "thinking-binding-controls-2026-08-01"
+        );
+        expect(JSON.parse(String(init?.body)).thinking).toEqual({
+          block_binding: { prefix_mismatch_behavior: "drop_block" },
+          type: "adaptive",
+        });
+
+        return new Response(
+          streamFromChunks([
+            'event: message_start\r\ndata:{"type":"message_start","message":{"usage":{"input_tokens":4}}}\r\n\r\n',
+            'event: content_block_start\r\ndata:{"type":"content_block_start","index":0,"content_block":{"type":"text","text":"OK"}}\r\n\r\n',
+            'event: message_delta\r\ndata:{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}}\r\n\r\n',
+          ]),
+          { headers: { "Content-Type": "text/event-stream" } }
+        );
+      },
       model: "claude-opus-5-5",
     });
+
     const result = await provider.streamChat(
       { messages: [{ content: "Hello", role: "user" }], system: "Be helpful." },
       { onChunk: () => undefined }
     );
+
     expect(result.content).toBe("OK");
   });
 
@@ -54,7 +95,7 @@ describe("Anthropic provider streaming", () => {
       );
     });
 
-    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    globalThis.fetch = fetchMock;
 
     const provider = createAnthropicProvider({
       apiKey: "sk-ant-test",
@@ -62,6 +103,7 @@ describe("Anthropic provider streaming", () => {
     });
 
     const chunks: string[] = [];
+
     const result = await provider.streamChat(
       {
         messages: [{ content: "Say hello", role: "user" }],
@@ -98,7 +140,7 @@ describe("Anthropic cache buckets", () => {
         )
     );
 
-    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    globalThis.fetch = fetchMock;
 
     const provider = createAnthropicProvider({
       apiKey: "sk-ant-test",

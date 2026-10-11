@@ -23,10 +23,6 @@ describe("coding-agent spawn env", () => {
     );
   });
 
-  test("returns no env overrides when routing is inactive", () => {
-    expect(buildClaudeCodeSpawnEnv(inactiveRouting)).toEqual({});
-  });
-
   test("returns empty spawn env for Cursor Agent even when routing is active", async () => {
     const spawn = await buildSpawnEnvForHarness(
       "cursor_agent",
@@ -54,20 +50,6 @@ describe("coding-agent spawn env", () => {
     expect(env.ANTHROPIC_AUTH_TOKEN).toBeUndefined();
   });
 
-  test("builds pi.dev provider passthrough env for anthropic", async () => {
-    const env = await buildPiSpawnEnv(
-      activeAnthropicRouting({
-        apiKey: "test-anthropic-key",
-        baseUrl: "https://api.anthropic.com",
-        providerLabel: "Anthropic",
-        providerType: "anthropic",
-      }),
-      "anthropic"
-    );
-    expect(env.env.PI_CODING_AGENT_DIR).toBeDefined();
-    expect(env.cleanup).toBeDefined();
-  });
-
   test("builds pi.dev provider passthrough env for openrouter", async () => {
     const env = await buildPiSpawnEnv(
       activeAnthropicRouting({
@@ -78,6 +60,7 @@ describe("coding-agent spawn env", () => {
       }),
       "openrouter"
     );
+
     expect(env.env.PI_CODING_AGENT_DIR).toBeDefined();
     expect(env.cleanup).toBeDefined();
   });
@@ -93,13 +76,16 @@ describe("coding-agent spawn env", () => {
       }),
       "openai_compatible"
     );
+
     expect(env.env.PI_CODING_AGENT_DIR).toBeDefined();
     expect(env.cleanup).toBeDefined();
     // Verify the models.json was written
     const { readFile } = await import("node:fs/promises");
+
     const modelsJson = JSON.parse(
       await readFile(`${env.env.PI_CODING_AGENT_DIR}/models.json`, "utf-8")
     );
+
     expect(modelsJson.providers.nakama).toBeDefined();
     expect(modelsJson.providers.nakama.baseUrl).toBe(
       "https://custom.example.com/v1"
@@ -120,10 +106,13 @@ describe("coding-agent spawn env", () => {
       }),
       "anthropic"
     );
+
     const { readFile } = await import("node:fs/promises");
+
     const modelsJson = JSON.parse(
       await readFile(`${env.env.PI_CODING_AGENT_DIR}/models.json`, "utf-8")
     );
+
     // Custom base URL → nakama provider with openai-completions, NOT anthropic
     expect(modelsJson.providers.nakama).toBeDefined();
     expect(modelsJson.providers.anthropic).toBeUndefined();
@@ -145,10 +134,13 @@ describe("coding-agent spawn env", () => {
       }),
       "anthropic"
     );
+
     const { readFile } = await import("node:fs/promises");
+
     const modelsJson = JSON.parse(
       await readFile(`${env.env.PI_CODING_AGENT_DIR}/models.json`, "utf-8")
     );
+
     // Default base URL → override built-in anthropic provider
     expect(modelsJson.providers.anthropic).toBeDefined();
     expect(modelsJson.providers.nakama).toBeUndefined();

@@ -4,9 +4,15 @@ import {
   readApiErrorDetails,
   readApiErrorMessage,
 } from "@nakama/core/api-error";
+import {
+  HOST_BOUND_BROWSER_SESSION_COOKIE_NAMES,
+  PLAIN_BROWSER_SESSION_COOKIE_NAMES,
+} from "@nakama/core/browser-session-cookies";
 import type {
   AcceptOrgInviteRequest,
   AcceptOrgInviteResponse,
+  AcpAgentPresetsResponse,
+  AcpSessionSettingsResponse,
   AddOrgMemberRequest,
   AddOrgMemberResponse,
   AddOrgMemoryFactRequest,
@@ -41,8 +47,6 @@ import type {
   ComposioToolkitSummary,
   ConfigureProviderRequest,
   ConfigureProviderResponse,
-  CreateApiKeyRequest,
-  CreateApiKeyResponse,
   CreateAutomationRequest,
   CreateMcpServerRequest,
   CreateNotificationDestinationRequest,
@@ -74,6 +78,8 @@ import type {
   ImageAttachment,
   ImageGenerationSettings,
   ImageGenerationSettingsResponse,
+  ImportKnowledgeBaseZipRequest,
+  ImportKnowledgeBaseZipResponse,
   InitSoulResponse,
   InitUserContextResponse,
   InstallOrgPluginRequest,
@@ -84,7 +90,6 @@ import type {
   InvokePluginActionRequest,
   InvokePluginActionResponse,
   KnowledgeBaseDuplicateAction,
-  ListApiKeysResponse,
   ListArtifactsResponse,
   ListAutomationRunsResponse,
   ListAutomationsResponse,
@@ -99,6 +104,7 @@ import type {
   ListOrgMemoryProposalsResponse,
   ListOrgPluginsResponse,
   ListPluginReleasesResponse,
+  ListPluginUpdatesResponse,
   ListProfileChangeHistoryResponse,
   ListProfileComposioToolkitsResponse,
   ListProfilesResponse,
@@ -108,6 +114,7 @@ import type {
   ListSkillProposalsResponse,
   ListSkillSuggestionsResponse,
   ListSkillsResponse,
+  ListSkillVersionsResponse,
   ListTimezonesResponse,
   ListToolsResponse,
   ListUserOrgsResponse,
@@ -134,6 +141,7 @@ import type {
   OrgMemorySearchRequest,
   OrgMemorySearchResponse,
   OrgPluginDetail,
+  OrgPluginSummary,
   PasskeyAuthenticationOptionsResponse,
   PasskeyCredentialResponse,
   PasskeyRegistrationOptionsResponse,
@@ -162,7 +170,6 @@ import type {
   RestoreOrgMemoryHistoryResponse,
   RevokeArtifactShareResponse,
   RevokeBrowserSessionsResponse,
-  RotateApiKeyResponse,
   RotateLocalAuthTokenResponse,
   RunAutomationResponse,
   RunSkillCuratorInternalRequest,
@@ -174,6 +181,7 @@ import type {
   SendEmailTestRequest,
   SendEmailTestResponse,
   SendErrorTrackingTestResponse,
+  SendMessageRequest,
   SendMessageResponse,
   SessionMessagesResponse,
   SessionStatusResponse,
@@ -198,6 +206,7 @@ import type {
   SuggestToolParamsResponse,
   SyncSkillsResponse,
   SystemStatusResponse,
+  TelegramAccessRequestsResponse,
   TelegramPairingStartResponse,
   TelegramPairingStatusResponse,
   TelegramSettingsResponse,
@@ -207,6 +216,7 @@ import type {
   TimezoneSettingsResponse,
   TokenOptimizationResponse,
   TokenOptimizationUpdateResponse,
+  ToolCredentialStatus,
   ToolResponse,
   ToolSetupPlan,
   ToolSourceResponse,
@@ -258,12 +268,18 @@ import type {
   WebSearchSettingsResponse,
   WhatsAppSettingsResponse,
   WorkerLogsResponse,
+  WorkflowSqliteInspectResponse,
   WorkspaceEntry,
   XaiOAuthDeviceCompleteRequest,
   XaiOAuthDeviceCompleteResponse,
   XaiOAuthDeviceStartResponse,
 } from "@nakama/core/contract";
 import { withDisabledFetchIdle } from "@nakama/core/fetch-idle";
+import type {
+  MeetAction,
+  MeetActionInput,
+  MeetActionResults,
+} from "@nakama/core/google-meet";
 import { loadLocalAuthToken } from "@nakama/core/local-auth";
 import { resolveServerUrl } from "@nakama/core/runtime";
 import { readBrowserOrigin, readCookie } from "./browser";
@@ -283,7 +299,31 @@ import type {
   StreamHandlers,
 } from "./types";
 
+type JsonValue =
+  | boolean
+  | JsonValue[]
+  | number
+  | null
+  | string
+  | { [key: string]: JsonValue };
+
+type OfficialPluginInstallResponse = { install: OrgPluginSummary };
+
 export class NakamaClient {
+  invokeGoogleMeet<Action extends MeetAction>(
+    action: Action,
+    input: MeetActionInput | undefined,
+    orgId: string,
+    signal?: AbortSignal
+  ): Promise<MeetActionResults[Action]> {
+    return this.request(`/v1/meet/actions/${encodeURIComponent(action)}`, {
+      body: JSON.stringify(input ?? {}),
+      headers: { "X-Org-Id": orgId },
+      method: "POST",
+      signal,
+    });
+  }
+
   readonly baseUrl: string;
   private readonly fetchImpl: typeof fetch;
   private readonly credentials: RequestCredentials;
@@ -293,8 +333,8 @@ export class NakamaClient {
 
   constructor(options: NakamaClientOptions = {}) {
     this.baseUrl = (options.baseUrl ?? resolveServerUrl()).replace(/\/$/, "");
-    const fetchFn = options.fetch ?? fetch;
-    this.fetchImpl = ((input, init) => fetchFn(input, init)) as typeof fetch;
+    const fetchFn = options.fetch ?? globalThis.fetch.bind(globalThis);
+    this.fetchImpl = fetchFn;
     this.credentials = options.credentials ?? "include";
     this.clientOrigin = options.clientOrigin?.trim().replace(/\/$/, "") || null;
     this.authToken = options.authToken ?? null;
@@ -412,6 +452,7 @@ export class NakamaClient {
     data: ArrayBuffer;
   }> {
     const response = await this.fetchRaw("/v1/platform/data/export");
+
     return {
       data: await response.arrayBuffer(),
       filename:
@@ -426,6 +467,7 @@ export class NakamaClient {
     const response = await this.fetchRaw(
       `/v1/platform/users/${encodeURIComponent(userId)}/data/export`
     );
+
     return {
       data: await response.arrayBuffer(),
       filename:
@@ -440,6 +482,7 @@ export class NakamaClient {
     const request: PreviewDataImportRequest = {
       data: await encodeArchiveData(data),
     };
+
     return this.request<DataImportPreviewResponse>(
       "/v1/platform/data/import/preview",
       {
@@ -457,6 +500,7 @@ export class NakamaClient {
       confirm: options.confirm,
       data: await encodeArchiveData(data),
     };
+
     return this.request<RestoreDataImportResponse>(
       "/v1/platform/data/import/restore",
       {
@@ -472,6 +516,7 @@ export class NakamaClient {
     const request: PreviewDataImportRequest = {
       data: await encodeArchiveData(data),
     };
+
     return this.request<DataImportPreviewResponse>(
       "/v1/auth/setup/import/preview",
       {
@@ -489,6 +534,7 @@ export class NakamaClient {
       confirm: options.confirm,
       data: await encodeArchiveData(data),
     };
+
     return this.request<SetupRestoreDataImportResponse>(
       "/v1/auth/setup/import/restore",
       {
@@ -505,6 +551,7 @@ export class NakamaClient {
     const response = await this.fetchRaw(
       `/v1/profiles/${encodeURIComponent(profileId)}/pack/export`
     );
+
     return {
       data: await response.arrayBuffer(),
       filename:
@@ -517,12 +564,11 @@ export class NakamaClient {
     data: Blob | BufferSource | string,
     options: { name?: string } = {}
   ): Promise<ProfilePackPreviewResponse> {
-    const request: { data: string; name?: string } = {
+    const request = {
       data: await encodeArchiveData(data),
-    };
-    if (options.name?.trim()) {
-      request.name = options.name.trim();
-    }
+      name: options.name?.trim() || undefined,
+    } satisfies Pick<ProfilePackImportRequest, "data" | "name">;
+
     return this.request<ProfilePackPreviewResponse>(
       "/v1/profiles/pack/import/preview",
       {
@@ -541,6 +587,7 @@ export class NakamaClient {
       data: await encodeArchiveData(data),
       name: options.name,
     };
+
     return this.request<ProfilePackImportResponse>("/v1/profiles/pack/import", {
       body: JSON.stringify(request),
       method: "POST",
@@ -549,7 +596,7 @@ export class NakamaClient {
 
   async listPluginWorkers(orgId?: string): Promise<PluginWorkerStatus[]> {
     return this.request<PluginWorkerStatus[]>("/v1/workers/plugins", {
-      ...(orgId ? { headers: { "X-Org-Id": orgId } } : {}),
+      headers: orgId ? { "X-Org-Id": orgId } : undefined,
     });
   }
 
@@ -618,7 +665,18 @@ export class NakamaClient {
     lines?: number,
     profileId?: string
   ): Promise<WorkerLogsResponse> {
-    const query = `?${new URLSearchParams({ ...(lines === undefined ? {} : { lines: String(lines) }), ...(profileId ? { profileId } : {}) })}`;
+    const params = new URLSearchParams();
+
+    if (lines !== undefined) {
+      params.set("lines", String(lines));
+    }
+
+    if (profileId) {
+      params.set("profileId", profileId);
+    }
+
+    const query = `?${params}`;
+
     return this.request<WorkerLogsResponse>(
       `/v1/workers/${encodeURIComponent(name)}/logs${query}`
     );
@@ -640,20 +698,23 @@ export class NakamaClient {
     options: { source?: "catalog" | "remote" } = {}
   ): Promise<ModelsResponse> {
     const query = options.source === "remote" ? "?source=remote" : "";
+
     return this.request<ModelsResponse>(`/v1/models${query}`);
   }
 
   async getExternalModelCatalog(
     catalogId: "models-dev" | "openrouter" | "cerebras"
-  ): Promise<unknown> {
-    return this.request(`/v1/model-catalogs/${encodeURIComponent(catalogId)}`);
+  ): Promise<JsonValue> {
+    return this.request<JsonValue>(
+      `/v1/model-catalogs/${encodeURIComponent(catalogId)}`
+    );
   }
 
   async discoverModels(request: {
     baseUrl?: string;
     apiKey?: string;
     providerId?: string;
-    provider?: "ollama" | "openai_compatible" | "fireworks";
+    provider?: "ollama" | "openai_compatible" | "fireworks" | "netra";
     hostMode?: "local" | "cloud";
   }): Promise<ModelsResponse> {
     return this.request<ModelsResponse>("/v1/models/discover", {
@@ -762,10 +823,12 @@ export class NakamaClient {
   }
 
   async getSessionMessages(
-    sessionId: string
+    sessionId: string,
+    options: { signal?: AbortSignal } = {}
   ): Promise<SessionMessagesResponse> {
     return this.request<SessionMessagesResponse>(
-      `/v1/sessions/${encodeURIComponent(sessionId)}/messages`
+      `/v1/sessions/${encodeURIComponent(sessionId)}/messages`,
+      { signal: options.signal }
     );
   }
 
@@ -778,6 +841,48 @@ export class NakamaClient {
   async getSessionStatus(sessionId: string): Promise<SessionStatusResponse> {
     return this.request<SessionStatusResponse>(
       `/v1/sessions/${encodeURIComponent(sessionId)}/status`
+    );
+  }
+
+  async getSessionAcpSettings(
+    sessionId: string
+  ): Promise<AcpSessionSettingsResponse> {
+    return this.request<AcpSessionSettingsResponse>(
+      `/v1/sessions/${encodeURIComponent(sessionId)}/acp-settings`
+    );
+  }
+
+  async setSessionAcpSetting(
+    sessionId: string,
+    configId: string,
+    value: string
+  ): Promise<AcpSessionSettingsResponse> {
+    return this.request<AcpSessionSettingsResponse>(
+      `/v1/sessions/${encodeURIComponent(sessionId)}/acp-settings/${encodeURIComponent(configId)}`,
+      { body: JSON.stringify({ value }), method: "PUT" }
+    );
+  }
+
+  async getAcpAgentPresets(): Promise<AcpAgentPresetsResponse> {
+    return this.request<AcpAgentPresetsResponse>("/v1/acp-agent-presets");
+  }
+
+  async getProfileAcpSettings(
+    profileId: string
+  ): Promise<AcpSessionSettingsResponse> {
+    return this.request<AcpSessionSettingsResponse>(
+      `/v1/profiles/${encodeURIComponent(profileId)}/acp-settings`
+    );
+  }
+
+  async setProfileAcpSetting(
+    profileId: string,
+    configId: string,
+    value: string
+  ): Promise<AcpSessionSettingsResponse> {
+    return this.request<AcpSessionSettingsResponse>(
+      `/v1/profiles/${encodeURIComponent(profileId)}/acp-settings/${encodeURIComponent(configId)}`,
+      { body: JSON.stringify({ value }), method: "PUT" }
     );
   }
 
@@ -805,9 +910,11 @@ export class NakamaClient {
     options?: SendStreamOptions
   ): Promise<{ reconnected: boolean; reply?: string }> {
     const handlers = normalizeStreamHandlers(handler);
+
     const headers = this.buildHeaders("GET", {
       Accept: "text/event-stream",
     });
+
     const response = await this.fetchImpl(
       `${this.baseUrl}/v1/sessions/${encodeURIComponent(sessionId)}/stream`,
       withDisabledFetchIdle({
@@ -835,6 +942,7 @@ export class NakamaClient {
       handlers,
       options?.signal
     );
+
     return { reconnected: true, reply };
   }
 
@@ -857,20 +965,28 @@ export class NakamaClient {
     channel: AgentChannel | readonly AgentChannel[] = "web",
     options: { cursor?: string | null; limit?: number; query?: string } = {}
   ): Promise<ListSessionsResponse> {
-    const query = new URLSearchParams(
-      typeof channel === "string"
-        ? { channel, profileId }
-        : { channels: channel.join(","), profileId }
-    );
+    const query = new URLSearchParams();
+
+    if (Array.isArray(channel)) {
+      query.set("channels", channel.join(","));
+    } else {
+      query.set("channel", String(channel));
+    }
+
+    query.set("profileId", profileId);
+
     if (options.limit !== undefined) {
       query.set("limit", String(options.limit));
     }
+
     if (options.cursor) {
       query.set("cursor", options.cursor);
     }
+
     if (options.query) {
       query.set("q", options.query);
     }
+
     return this.request<ListSessionsResponse>(
       `/v1/sessions?${query.toString()}`
     );
@@ -898,13 +1014,17 @@ export class NakamaClient {
     options: { limit?: number; offset?: number } = {}
   ): Promise<ListProfileChangeHistoryResponse> {
     const query = new URLSearchParams();
+
     if (options.limit !== undefined) {
       query.set("limit", String(options.limit));
     }
+
     if (options.offset !== undefined) {
       query.set("offset", String(options.offset));
     }
+
     const suffix = query.size > 0 ? `?${query.toString()}` : "";
+
     return this.request<ListProfileChangeHistoryResponse>(
       `/v1/profiles/${encodeURIComponent(profileId)}/history${suffix}`
     );
@@ -987,9 +1107,7 @@ export class NakamaClient {
     );
   }
 
-  async getToolCredentialStatus(
-    toolId: string
-  ): Promise<{ configured: boolean }> {
+  async getToolCredentialStatus(toolId: string): Promise<ToolCredentialStatus> {
     return this.request(`/v1/tools/${encodeURIComponent(toolId)}/credentials`);
   }
 
@@ -1010,9 +1128,19 @@ export class NakamaClient {
   async saveToolCredential(
     toolId: string,
     apiKey: string
-  ): Promise<{ configured: boolean }> {
+  ): Promise<ToolCredentialStatus> {
     return this.request(`/v1/tools/${encodeURIComponent(toolId)}/credentials`, {
       body: JSON.stringify({ apiKey }),
+      method: "PUT",
+    });
+  }
+
+  async saveToolEnv(
+    toolId: string,
+    env: Record<string, string>
+  ): Promise<ToolCredentialStatus> {
+    return this.request(`/v1/tools/${encodeURIComponent(toolId)}/credentials`, {
+      body: JSON.stringify({ env }),
       method: "PUT",
     });
   }
@@ -1068,8 +1196,8 @@ export class NakamaClient {
       `/v1/profiles/${encodeURIComponent(profileId)}/tools`,
       {
         body: JSON.stringify(request),
+        headers: orgId ? { "X-Org-Id": orgId } : undefined,
         method: "POST",
-        ...(orgId ? { headers: { "X-Org-Id": orgId } } : {}),
       }
     );
   }
@@ -1082,7 +1210,7 @@ export class NakamaClient {
     return this.request<ProfileResponse>(
       `/v1/profiles/${encodeURIComponent(profileId)}/tools/${encodeURIComponent(toolId)}`,
       {
-        ...(orgId ? { headers: { "X-Org-Id": orgId } } : {}),
+        headers: orgId ? { "X-Org-Id": orgId } : undefined,
         method: "DELETE",
       }
     );
@@ -1120,10 +1248,12 @@ export class NakamaClient {
     );
   }
 
-  async deleteMcpServer(serverId: string): Promise<void> {
-    await this.request(`/v1/mcp/servers/${encodeURIComponent(serverId)}`, {
-      method: "DELETE",
-    });
+  async deleteMcpServer(serverId: string, force = false): Promise<void> {
+    const query = force ? "?force=true" : "";
+    await this.request(
+      `/v1/mcp/servers/${encodeURIComponent(serverId)}${query}`,
+      { method: "DELETE" }
+    );
   }
 
   async connectMcpServer(serverId: string): Promise<McpServerResponse> {
@@ -1189,6 +1319,27 @@ export class NakamaClient {
     );
   }
 
+  async listSkillVersions(
+    skillId: string,
+    orgId: string
+  ): Promise<ListSkillVersionsResponse> {
+    return this.request<ListSkillVersionsResponse>(
+      `/v1/skills/${encodeURIComponent(skillId)}/versions`,
+      { headers: { "X-Org-Id": orgId } }
+    );
+  }
+
+  async restoreSkillVersion(
+    skillId: string,
+    versionId: string,
+    orgId: string
+  ): Promise<SkillResponse> {
+    return this.request<SkillResponse>(
+      `/v1/skills/${encodeURIComponent(skillId)}/versions/${encodeURIComponent(versionId)}/restore`,
+      { headers: { "X-Org-Id": orgId }, method: "POST" }
+    );
+  }
+
   async readSkillFile(
     skillId: string,
     filePath: string,
@@ -1236,6 +1387,7 @@ export class NakamaClient {
     options?: { profileId?: string }
   ): Promise<SkillResponse> {
     const params = new URLSearchParams();
+
     if (options?.profileId) {
       params.set("profileId", options.profileId);
     }
@@ -1270,8 +1422,8 @@ export class NakamaClient {
       `/v1/profiles/${encodeURIComponent(profileId)}/skills`,
       {
         body: JSON.stringify(request),
+        headers: orgId ? { "X-Org-Id": orgId } : undefined,
         method: "POST",
-        ...(orgId ? { headers: { "X-Org-Id": orgId } } : {}),
       }
     );
   }
@@ -1283,7 +1435,10 @@ export class NakamaClient {
   ): Promise<ProfileResponse> {
     return this.request<ProfileResponse>(
       `/v1/profiles/${encodeURIComponent(profileId)}/skills/${encodeURIComponent(skillId)}`,
-      { ...(orgId ? { headers: { "X-Org-Id": orgId } } : {}), method: "DELETE" }
+      {
+        headers: orgId ? { "X-Org-Id": orgId } : undefined,
+        method: "DELETE",
+      }
     );
   }
 
@@ -1292,6 +1447,7 @@ export class NakamaClient {
     options: { includeContents?: boolean } = {}
   ): Promise<SoulStatusResponse> {
     const query = options.includeContents ? "?contents=true" : "";
+
     return this.request<SoulStatusResponse>(
       `/v1/profiles/${encodeURIComponent(profileId)}/soul${query}`
     );
@@ -1331,6 +1487,7 @@ export class NakamaClient {
     folder = ""
   ): Promise<ListWorkspaceFilesResponse> {
     const query = new URLSearchParams({ folder });
+
     return this.request<ListWorkspaceFilesResponse>(
       `/v1/profiles/${encodeURIComponent(profileId)}/workspace?${query}`
     );
@@ -1355,12 +1512,15 @@ export class NakamaClient {
     options: { render?: "markdown" } = {}
   ): Promise<Blob> {
     const query = new URLSearchParams({ path: filename });
+
     if (options.render) {
       query.set("render", options.render);
     }
+
     const response = await this.fetchRaw(
       `/v1/profiles/${encodeURIComponent(profileId)}/workspace/content?${query}`
     );
+
     return response.blob();
   }
 
@@ -1387,16 +1547,21 @@ export class NakamaClient {
     options: { folder?: string; limit?: number; offset?: number } = {}
   ): Promise<ListArtifactsResponse> {
     const query = new URLSearchParams();
+
     if (options.folder) {
       query.set("folder", options.folder);
     }
+
     if (options.limit !== undefined) {
       query.set("limit", String(options.limit));
     }
+
     if (options.offset !== undefined) {
       query.set("offset", String(options.offset));
     }
+
     const suffix = query.size > 0 ? `?${query.toString()}` : "";
+
     return this.request<ListArtifactsResponse>(
       `/v1/profiles/${encodeURIComponent(profileId)}/artifacts${suffix}`
     );
@@ -1407,6 +1572,7 @@ export class NakamaClient {
     filename: string
   ): Promise<DeleteArtifactResponse> {
     const query = new URLSearchParams({ path: filename });
+
     return this.request<DeleteArtifactResponse>(
       `/v1/profiles/${encodeURIComponent(profileId)}/artifacts?${query.toString()}`,
       { method: "DELETE" }
@@ -1418,6 +1584,7 @@ export class NakamaClient {
     path: string
   ): Promise<PublishArtifactShareResponse> {
     const body: PublishArtifactShareRequest = { path };
+
     if (this.clientOrigin) {
       body.clientOrigin = this.clientOrigin;
     }
@@ -1436,6 +1603,7 @@ export class NakamaClient {
     path: string
   ): Promise<ArtifactShareStatusResponse | null> {
     const query = new URLSearchParams({ path });
+
     return this.request<ArtifactShareStatusResponse | null>(
       `/v1/profiles/${encodeURIComponent(profileId)}/artifacts/shares/status?${query.toString()}`
     );
@@ -1454,25 +1622,118 @@ export class NakamaClient {
   async readProfileArtifactContent(
     profileId: string,
     artifactPath: string,
-    options: { inline?: boolean; render?: "markdown" } = {}
+    options: {
+      inline?: boolean;
+      render?: "markdown";
+      signal?: AbortSignal;
+      maxBytes?: number;
+    } = {}
   ): Promise<{ contentType: string; data: ArrayBuffer }> {
     const query = new URLSearchParams({ path: artifactPath });
+
     if (options.inline) {
       query.set("inline", "1");
     }
+
     if (options.render) {
       query.set("render", options.render);
     }
 
     const response = await this.fetchRaw(
-      `/v1/profiles/${encodeURIComponent(profileId)}/artifacts/content?${query.toString()}`
+      `/v1/profiles/${encodeURIComponent(profileId)}/artifacts/content?${query.toString()}`,
+      { signal: options.signal }
     );
+
+    let data: ArrayBuffer;
+
+    if (options.maxBytes === undefined) {
+      data = await response.arrayBuffer();
+    } else {
+      const maxBytes = options.maxBytes;
+
+      if (!Number.isSafeInteger(maxBytes) || maxBytes < 0) {
+        await response.body?.cancel();
+        throw new Error("maxBytes must be a nonnegative integer.");
+      }
+
+      const reader = response.body?.getReader();
+      const chunks: Uint8Array[] = [];
+      let size = 0;
+
+      const onAbort = () => {
+        void reader?.cancel().catch(() => {});
+      };
+
+      options.signal?.addEventListener("abort", onAbort, { once: true });
+
+      try {
+        if (Number(response.headers.get("Content-Length")) > maxBytes) {
+          throw new Error("Artifact exceeds the download byte budget.");
+        }
+
+        while (reader) {
+          options.signal?.throwIfAborted();
+          const { done, value } = await reader.read();
+
+          if (done) {
+            break;
+          }
+
+          size += value.byteLength;
+
+          if (size > maxBytes) {
+            throw new Error("Artifact exceeds the download byte budget.");
+          }
+
+          chunks.push(value);
+        }
+
+        options.signal?.throwIfAborted();
+        const bytes = new Uint8Array(size);
+        let offset = 0;
+
+        for (const chunk of chunks) {
+          bytes.set(chunk, offset);
+          offset += chunk.byteLength;
+        }
+
+        data = bytes.buffer;
+      } catch (error) {
+        await reader?.cancel().catch(() => {});
+        throw error;
+      } finally {
+        options.signal?.removeEventListener("abort", onAbort);
+        reader?.releaseLock();
+      }
+    }
 
     return {
       contentType:
         response.headers.get("Content-Type") ?? "application/octet-stream",
-      data: await response.arrayBuffer(),
+      data,
     };
+  }
+
+  async hasProfileArtifact(
+    profileId: string,
+    artifactPath: string
+  ): Promise<boolean> {
+    const query = new URLSearchParams({ path: artifactPath });
+
+    try {
+      await this.fetchRaw(
+        `/v1/profiles/${encodeURIComponent(profileId)}/artifacts/content?${query.toString()}`,
+        { method: "HEAD" }
+      );
+
+      return true;
+    } catch (error) {
+      if (error instanceof NakamaApiError && error.status === 404) {
+        return false;
+      }
+
+      throw error;
+    }
   }
 
   async writeProfileArtifactContent(
@@ -1502,13 +1763,16 @@ export class NakamaClient {
     document: DocumentAttachment,
     onDuplicate?: KnowledgeBaseDuplicateAction
   ): Promise<UploadOrganizationKnowledgeBaseResponse> {
+    const body: UploadKnowledgeBaseRequest = { document };
+
+    if (onDuplicate) {
+      body.onDuplicate = onDuplicate;
+    }
+
     return this.request(
       `/v1/orgs/${encodeURIComponent(orgId)}/knowledge-base`,
       {
-        body: JSON.stringify({
-          document,
-          ...(onDuplicate ? { onDuplicate } : {}),
-        } satisfies UploadKnowledgeBaseRequest),
+        body: JSON.stringify(body),
         method: "POST",
       }
     );
@@ -1557,13 +1821,31 @@ export class NakamaClient {
     document: DocumentAttachment,
     onDuplicate?: KnowledgeBaseDuplicateAction
   ): Promise<UploadKnowledgeBaseResponse> {
+    const body: UploadKnowledgeBaseRequest = { document };
+
+    if (onDuplicate) {
+      body.onDuplicate = onDuplicate;
+    }
+
     return this.request<UploadKnowledgeBaseResponse>(
       `/v1/profiles/${encodeURIComponent(profileId)}/knowledge-base`,
       {
+        body: JSON.stringify(body),
+        method: "POST",
+      }
+    );
+  }
+
+  async importKnowledgeBaseZip(
+    profileId: string,
+    zipBase64: string
+  ): Promise<ImportKnowledgeBaseZipResponse> {
+    return this.request<ImportKnowledgeBaseZipResponse>(
+      `/v1/profiles/${encodeURIComponent(profileId)}/knowledge-base/import-zip`,
+      {
         body: JSON.stringify({
-          document,
-          ...(onDuplicate ? { onDuplicate } : {}),
-        } satisfies UploadKnowledgeBaseRequest),
+          zipBase64,
+        } satisfies ImportKnowledgeBaseZipRequest),
         method: "POST",
       }
     );
@@ -1585,9 +1867,11 @@ export class NakamaClient {
     options: { inline?: boolean; render?: "text" } = {}
   ): Promise<{ contentType: string; data: ArrayBuffer }> {
     const query = new URLSearchParams();
+
     if (options.inline) {
       query.set("inline", "1");
     }
+
     if (options.render) {
       query.set("render", options.render);
     }
@@ -1608,6 +1892,7 @@ export class NakamaClient {
     options: { includeContent?: boolean } = {}
   ): Promise<UserContextStatusResponse> {
     const query = options.includeContent ? "?content=true" : "";
+
     return this.request<UserContextStatusResponse>(`/v1/user/context${query}`);
   }
 
@@ -1650,8 +1935,9 @@ export class NakamaClient {
 
         return response.automation;
       },
-      getMessages: async () => {
-        const response = await this.getSessionMessages(sessionId);
+      getMessages: async (options) => {
+        const response = await this.getSessionMessages(sessionId, options);
+
         return response.messages;
       },
       id: sessionId,
@@ -1665,6 +1951,7 @@ export class NakamaClient {
           input,
           this.clientOrigin ?? undefined
         );
+
         const response = await this.request<SendMessageResponse>(
           `/v1/sessions/${sessionId}/messages`,
           {
@@ -1681,14 +1968,30 @@ export class NakamaClient {
         options?: SendStreamOptions
       ) => {
         const handlers = normalizeStreamHandlers(handler);
-        const body = {
+
+        const body: SendMessageRequest = {
           ...resolveSendMessageBody(input, this.clientOrigin ?? undefined),
           stream: true,
         };
-        const headers = this.buildHeaders("POST", {
-          Accept: "text/event-stream",
-          "Content-Type": "application/json",
-        });
+
+        if (options?.whatsappMessage) {
+          body.whatsappMessage = options.whatsappMessage;
+        }
+
+        const headers = new Headers(
+          this.buildHeaders("POST", {
+            Accept: "text/event-stream",
+            "Content-Type": "application/json",
+          })
+        );
+
+        if (options?.whatsappContextToken) {
+          headers.set(
+            "X-Nakama-WhatsApp-Context-Token",
+            options.whatsappContextToken
+          );
+        }
+
         const response = await retryWhileTurnIsStopping(
           async () => {
             const attempt = await this.fetchImpl(
@@ -1750,6 +2053,7 @@ export class NakamaClient {
     const response = await this.request<AutomationResponse>(
       `/v1/automations/${encodeURIComponent(automationId)}`
     );
+
     return response.automation;
   }
 
@@ -1760,6 +2064,7 @@ export class NakamaClient {
       body: JSON.stringify(request),
       method: "POST",
     });
+
     return response.automation;
   }
 
@@ -1774,6 +2079,7 @@ export class NakamaClient {
         method: "PUT",
       }
     );
+
     return response.automation;
   }
 
@@ -1788,6 +2094,7 @@ export class NakamaClient {
       `/v1/automations/${encodeURIComponent(automationId)}/run`,
       withDisabledFetchIdle({ method: "POST" })
     );
+
     return response.run;
   }
 
@@ -1815,17 +2122,8 @@ export class NakamaClient {
     const response = await this.request<ListAutomationRunsResponse>(
       `/v1/automations/${encodeURIComponent(automationId)}/runs`
     );
-    return response.runs;
-  }
 
-  async deleteAutomationRun(
-    automationId: string,
-    runId: string
-  ): Promise<void> {
-    await this.request(
-      `/v1/automations/${encodeURIComponent(automationId)}/runs/${encodeURIComponent(runId)}`,
-      { method: "DELETE" }
-    );
+    return response.runs;
   }
 
   async markAutomationRunsRead(automationId: string): Promise<string> {
@@ -1833,51 +2131,71 @@ export class NakamaClient {
       `/v1/automations/${encodeURIComponent(automationId)}/runs/mark-read`,
       { method: "POST" }
     );
+
     return response.readThroughAt;
   }
 
   async inspectWorkflowSqlite(
     table?: string
-  ): Promise<import("@nakama/core").WorkflowSqliteInspectResponse> {
-    return (
-      await this.invokePluginAction("workflows", "database", {
-        input: { table },
-      })
-    ).result as import("@nakama/core").WorkflowSqliteInspectResponse;
+  ): Promise<WorkflowSqliteInspectResponse> {
+    const { result } =
+      await this.invokePluginAction<WorkflowSqliteInspectResponse>(
+        "workflows",
+        "database",
+        { input: { table } }
+      );
+
+    return result;
   }
   async listWorkflows(): Promise<ListWorkflowsResponse> {
+    const { result } = await this.invokePluginAction<StoredWorkflow[]>(
+      "workflows",
+      "list_workflows"
+    );
+
     return {
-      workflows: (await this.invokePluginAction("workflows", "list_workflows"))
-        .result as StoredWorkflow[],
+      workflows: result,
     };
   }
   async getWorkflow(workflowId: string): Promise<StoredWorkflow> {
-    return (
-      await this.invokePluginAction("workflows", "get_workflow", {
-        input: { workflowId },
-      })
-    ).result as StoredWorkflow;
+    const { result } = await this.invokePluginAction<StoredWorkflow | null>(
+      "workflows",
+      "get_workflow",
+      { input: { workflowId } }
+    );
+
+    if (!result) {
+      throw new Error("Workflow not found.");
+    }
+
+    return result;
   }
   async createWorkflow(
     request: CreateWorkflowRequest
   ): Promise<StoredWorkflow> {
     const { profileId, ...input } = request;
-    return (
-      await this.invokePluginAction("workflows", "create_workflow", {
-        input: { ...input, agentId: profileId },
-      })
-    ).result as StoredWorkflow;
+
+    const { result } = await this.invokePluginAction<StoredWorkflow>(
+      "workflows",
+      "create_workflow",
+      { input: { ...input, agentId: profileId } }
+    );
+
+    return result;
   }
   async updateWorkflow(
     workflowId: string,
     request: UpdateWorkflowRequest
   ): Promise<StoredWorkflow> {
     const { profileId, ...input } = request;
-    return (
-      await this.invokePluginAction("workflows", "update_workflow", {
-        input: { ...input, agentId: profileId, workflowId },
-      })
-    ).result as StoredWorkflow;
+
+    const { result } = await this.invokePluginAction<StoredWorkflow>(
+      "workflows",
+      "update_workflow",
+      { input: { ...input, agentId: profileId, workflowId } }
+    );
+
+    return result;
   }
   async deleteWorkflow(workflowId: string): Promise<void> {
     await this.invokePluginAction("workflows", "delete_workflow", {
@@ -1888,34 +2206,35 @@ export class NakamaClient {
     workflowId: string,
     request: RunWorkflowRequest = {}
   ): Promise<RunWorkflowResponse["run"]> {
-    const result = (
-      await this.invokePluginAction("workflows", "run_workflow", {
-        input: { workflowId, ...request },
-      })
-    ).result as RunWorkflowResponse;
+    const { result } = await this.invokePluginAction<RunWorkflowResponse>(
+      "workflows",
+      "run_workflow",
+      { input: { workflowId, ...request } }
+    );
+
     return result.run;
   }
   async listWorkflowRuns(
     workflowId: string
   ): Promise<ListWorkflowRunsResponse["runs"]> {
-    return (
-      await this.invokePluginAction("workflows", "runs", {
-        input: { workflowId },
-      })
-    ).result as ListWorkflowRunsResponse["runs"];
+    const { result } = await this.invokePluginAction<
+      ListWorkflowRunsResponse["runs"]
+    >("workflows", "runs", { input: { workflowId } });
+
+    return result;
   }
   async getWorkflowRun(
     workflowId: string,
     runId: string
   ): Promise<GetWorkflowRunResponse["run"]> {
-    const run = (
-      await this.invokePluginAction("workflows", "get_run", {
-        input: { runId, workflowId },
-      })
-    ).result as GetWorkflowRunResponse["run"] | null;
+    const { result: run } = await this.invokePluginAction<
+      GetWorkflowRunResponse["run"] | null
+    >("workflows", "get_run", { input: { runId, workflowId } });
+
     if (!run) {
       throw new Error("Workflow run not found.");
     }
+
     return run;
   }
   async deleteWorkflowRun(workflowId: string, runId: string): Promise<void> {
@@ -1937,10 +2256,13 @@ export class NakamaClient {
   async installOfficialPlugin(
     pluginId: string,
     orgId?: string
-  ): Promise<unknown> {
-    return this.request(
+  ): Promise<OfficialPluginInstallResponse> {
+    return this.request<OfficialPluginInstallResponse>(
       `/v1/plugins/official/${encodeURIComponent(pluginId)}/install`,
-      { method: "POST", ...(orgId ? { headers: { "X-Org-Id": orgId } } : {}) }
+      {
+        headers: orgId ? { "X-Org-Id": orgId } : undefined,
+        method: "POST",
+      }
     );
   }
 
@@ -1948,13 +2270,13 @@ export class NakamaClient {
     pluginId: string,
     expectedRevision: number,
     orgId?: string
-  ): Promise<unknown> {
-    return this.request(
+  ): Promise<OfficialPluginInstallResponse> {
+    return this.request<OfficialPluginInstallResponse>(
       `/v1/plugins/official/${encodeURIComponent(pluginId)}/reinstall`,
       {
         body: JSON.stringify({ expectedRevision }),
+        headers: orgId ? { "X-Org-Id": orgId } : undefined,
         method: "POST",
-        ...(orgId ? { headers: { "X-Org-Id": orgId } } : {}),
       }
     );
   }
@@ -1963,6 +2285,7 @@ export class NakamaClient {
     const response = await this.request<TimezoneSettingsResponse>(
       "/v1/settings/timezone"
     );
+
     return response.timezone;
   }
 
@@ -1974,6 +2297,7 @@ export class NakamaClient {
         method: "PUT",
       }
     );
+
     return response.timezone;
   }
 
@@ -1981,6 +2305,7 @@ export class NakamaClient {
     const response = await this.request<ThinkingSettingsResponse>(
       "/v1/settings/thinking"
     );
+
     return response.thinking;
   }
 
@@ -1994,6 +2319,7 @@ export class NakamaClient {
         method: "PUT",
       }
     );
+
     return response.thinking;
   }
 
@@ -2001,6 +2327,7 @@ export class NakamaClient {
     const response = await this.request<VisionSettingsResponse>(
       "/v1/settings/vision"
     );
+
     return response.vision;
   }
 
@@ -2012,6 +2339,7 @@ export class NakamaClient {
         method: "PUT",
       }
     );
+
     return response.vision;
   }
 
@@ -2019,6 +2347,7 @@ export class NakamaClient {
     const response = await this.request<TranscriptionSettingsResponse>(
       "/v1/settings/transcription"
     );
+
     return response.transcription;
   }
 
@@ -2032,6 +2361,7 @@ export class NakamaClient {
         method: "PUT",
       }
     );
+
     return response.transcription;
   }
 
@@ -2048,6 +2378,7 @@ export class NakamaClient {
     const response = await this.request<ImageGenerationSettingsResponse>(
       "/v1/settings/image-generation"
     );
+
     return response.imageGeneration;
   }
 
@@ -2061,6 +2392,7 @@ export class NakamaClient {
         method: "PUT",
       }
     );
+
     return response.imageGeneration;
   }
 
@@ -2104,6 +2436,35 @@ export class NakamaClient {
       }
     );
   }
+
+  async getTelegramAccessRequests(
+    profileId?: string
+  ): Promise<TelegramAccessRequestsResponse> {
+    return this.request<TelegramAccessRequestsResponse>(
+      `/v1/settings/telegram/requests?profileId=${encodeURIComponent(profileId ?? "")}`
+    );
+  }
+
+  async approveTelegramAccessRequest(
+    userId: number,
+    profileId?: string
+  ): Promise<TelegramSettingsResponse> {
+    return this.request<TelegramSettingsResponse>(
+      `/v1/settings/telegram/requests/${userId}/approve?profileId=${encodeURIComponent(profileId ?? "")}`,
+      { method: "POST" }
+    );
+  }
+
+  async denyTelegramAccessRequest(
+    userId: number,
+    profileId?: string
+  ): Promise<TelegramAccessRequestsResponse> {
+    return this.request<TelegramAccessRequestsResponse>(
+      `/v1/settings/telegram/requests/${userId}/deny?profileId=${encodeURIComponent(profileId ?? "")}`,
+      { method: "POST" }
+    );
+  }
+
   async startTelegramPairing(
     request: StartTelegramPairingRequest,
     profileId?: string
@@ -2324,6 +2685,7 @@ export class NakamaClient {
     const body: ComposioConnectRequest = {};
 
     const callbackOrigin = readBrowserOrigin();
+
     if (callbackOrigin) {
       body.callbackOrigin = callbackOrigin;
     }
@@ -2508,6 +2870,7 @@ export class NakamaClient {
     });
 
     this.applyAuthUserResponse(response);
+
     return response;
   }
 
@@ -2527,6 +2890,7 @@ export class NakamaClient {
     });
 
     this.applyAuthUserResponse(response);
+
     return response;
   }
   async getPasskeyLoginOptions(): Promise<PasskeyAuthenticationOptionsResponse> {
@@ -2582,14 +2946,12 @@ export class NakamaClient {
     credential: PasskeyCredentialResponse,
     name?: string
   ): Promise<PasskeyVerificationResponse> {
+    const body = { challenge, credential, name: name || undefined };
+
     return this.request<PasskeyVerificationResponse>(
       "/v1/auth/mfa/passkey/verify",
       {
-        body: JSON.stringify({
-          challenge,
-          credential,
-          ...(name ? { name } : {}),
-        }),
+        body: JSON.stringify(body),
         method: "POST",
       }
     );
@@ -2635,12 +2997,14 @@ export class NakamaClient {
     );
 
     this.setOrgId(response.orgId);
+
     return response;
   }
 
   async getMe(): Promise<AuthUserResponse> {
     const response = await this.request<AuthUserResponse>("/v1/auth/me");
     this.applyAuthUserResponse(response);
+
     return response;
   }
 
@@ -2651,7 +3015,9 @@ export class NakamaClient {
       body: JSON.stringify(request),
       method: "PATCH",
     });
+
     this.applyAuthUserResponse(response);
+
     return response;
   }
 
@@ -2771,6 +3137,12 @@ export class NakamaClient {
     );
   }
 
+  async listPluginUpdates(): Promise<ListPluginUpdatesResponse> {
+    return this.request<ListPluginUpdatesResponse>(
+      "/v1/platform/plugins/updates"
+    );
+  }
+
   async removePluginRelease(pluginId: string, version: string): Promise<void> {
     await this.request(
       `/v1/platform/plugins/releases/${encodeURIComponent(pluginId)}/${encodeURIComponent(version)}`,
@@ -2804,9 +3176,9 @@ export class NakamaClient {
       `/v1/plugins/${encodeURIComponent(pluginId)}/install`,
       {
         body: JSON.stringify(request),
+        headers: orgId ? { "X-Org-Id": orgId } : undefined,
         method: "POST",
         ...withDisabledFetchIdle({}),
-        ...(orgId ? { headers: { "X-Org-Id": orgId } } : {}),
       }
     );
   }
@@ -2818,13 +3190,14 @@ export class NakamaClient {
     orgId?: string
   ): Promise<OrgPluginDetail> {
     const request: PluginRevisionRequest = { expectedRevision };
+
     return this.request<OrgPluginDetail>(
       `/v1/plugins/${encodeURIComponent(pluginId)}/${action}`,
       {
         body: JSON.stringify(request),
+        headers: orgId ? { "X-Org-Id": orgId } : undefined,
         method: "POST",
         ...withDisabledFetchIdle({}),
-        ...(orgId ? { headers: { "X-Org-Id": orgId } } : {}),
       }
     );
   }
@@ -2856,6 +3229,7 @@ export class NakamaClient {
     orgId?: string
   ): Promise<PluginContributionChangePreview> {
     const query = new URLSearchParams({ targetVersion });
+
     return this.request<PluginContributionChangePreview>(
       `/v1/plugins/${encodeURIComponent(pluginId)}/update/preview?${query}`,
       orgId ? { headers: { "X-Org-Id": orgId } } : undefined
@@ -2871,9 +3245,9 @@ export class NakamaClient {
       `/v1/plugins/${encodeURIComponent(pluginId)}/update`,
       {
         body: JSON.stringify(request),
+        headers: orgId ? { "X-Org-Id": orgId } : undefined,
         method: "POST",
         ...withDisabledFetchIdle({}),
-        ...(orgId ? { headers: { "X-Org-Id": orgId } } : {}),
       }
     );
   }
@@ -2904,21 +3278,23 @@ export class NakamaClient {
     );
   }
 
-  async invokePluginAction(
+  async invokePluginAction<Result = unknown>(
     pluginId: string,
     actionKey: string,
     request: InvokePluginActionRequest = {},
     orgId?: string,
     signal?: AbortSignal
-  ): Promise<InvokePluginActionResponse> {
-    return this.request<InvokePluginActionResponse>(
+  ): Promise<Omit<InvokePluginActionResponse, "result"> & { result: Result }> {
+    return this.request<
+      Omit<InvokePluginActionResponse, "result"> & { result: Result }
+    >(
       `/v1/plugins/${encodeURIComponent(pluginId)}/actions/${encodeURIComponent(actionKey)}`,
       {
         body: JSON.stringify(request),
         method: "POST",
         signal,
         ...withDisabledFetchIdle({}),
-        ...(orgId ? { headers: { "X-Org-Id": orgId } } : {}),
+        headers: orgId ? { "X-Org-Id": orgId } : undefined,
       }
     );
   }
@@ -2971,6 +3347,7 @@ export class NakamaClient {
     );
 
     this.applyAuthUserResponse(response);
+
     return response;
   }
 
@@ -3012,39 +3389,6 @@ export class NakamaClient {
   ): Promise<RevokeBrowserSessionsResponse> {
     return this.request<RevokeBrowserSessionsResponse>(
       `/v1/auth/users/${encodeURIComponent(userId)}/sessions`,
-      { method: "DELETE" }
-    );
-  }
-
-  async createApiKey(
-    orgId: string,
-    request: CreateApiKeyRequest
-  ): Promise<CreateApiKeyResponse> {
-    return this.request<CreateApiKeyResponse>(
-      `/v1/orgs/${encodeURIComponent(orgId)}/api-keys`,
-      { body: JSON.stringify(request), method: "POST" }
-    );
-  }
-
-  async listApiKeys(orgId: string): Promise<ListApiKeysResponse> {
-    return this.request<ListApiKeysResponse>(
-      `/v1/orgs/${encodeURIComponent(orgId)}/api-keys`
-    );
-  }
-
-  async rotateApiKey(
-    orgId: string,
-    keyId: string
-  ): Promise<RotateApiKeyResponse> {
-    return this.request<RotateApiKeyResponse>(
-      `/v1/orgs/${encodeURIComponent(orgId)}/api-keys/${encodeURIComponent(keyId)}/rotate`,
-      { method: "POST" }
-    );
-  }
-
-  async deleteApiKey(orgId: string, keyId: string): Promise<void> {
-    await this.request(
-      `/v1/orgs/${encodeURIComponent(orgId)}/api-keys/${encodeURIComponent(keyId)}`,
       { method: "DELETE" }
     );
   }
@@ -3238,6 +3582,7 @@ export class NakamaClient {
     status?: "pending" | "approved" | "rejected"
   ): Promise<ListOrgMemoryProposalsResponse> {
     const query = status ? `?status=${encodeURIComponent(status)}` : "";
+
     return this.request<ListOrgMemoryProposalsResponse>(
       `/v1/orgs/${encodeURIComponent(orgId)}/memory/proposals${query}`,
       { headers: { "X-Org-Id": orgId } }
@@ -3281,16 +3626,21 @@ export class NakamaClient {
     } = {}
   ): Promise<ListSkillProposalsResponse> {
     const params = new URLSearchParams();
+
     if (options.status) {
       params.set("status", options.status);
     }
+
     if (options.profileId) {
       params.set("profileId", options.profileId);
     }
+
     if (options.sessionId) {
       params.set("sessionId", options.sessionId);
     }
+
     const query = params.toString();
+
     return this.request<ListSkillProposalsResponse>(
       `/v1/orgs/${encodeURIComponent(orgId)}/skill-proposals${query ? `?${query}` : ""}`,
       { headers: { "X-Org-Id": orgId } }
@@ -3332,16 +3682,21 @@ export class NakamaClient {
     } = {}
   ): Promise<ListSkillSuggestionsResponse> {
     const params = new URLSearchParams();
+
     if (options.sessionId) {
       params.set("sessionId", options.sessionId);
     }
+
     if (options.status) {
       params.set("status", options.status);
     }
+
     if (options.profileId) {
       params.set("profileId", options.profileId);
     }
+
     const query = params.toString();
+
     return this.request<ListSkillSuggestionsResponse>(
       `/v1/orgs/${encodeURIComponent(orgId)}/skill-suggestions${query ? `?${query}` : ""}`,
       { headers: { "X-Org-Id": orgId } }
@@ -3382,6 +3737,7 @@ export class NakamaClient {
     retried = false
   ): Promise<T> {
     const method = (init?.method ?? "GET").toUpperCase();
+
     const headers = this.buildHeaders(method, init?.headers, {
       hasBody: init?.body != null,
     });
@@ -3400,11 +3756,14 @@ export class NakamaClient {
       ) {
         if (!retried) {
           const freshToken = await loadLocalAuthToken();
+
           if (freshToken && freshToken !== this.authToken) {
             this.authToken = freshToken;
+
             return this.request(path, init, true);
           }
         }
+
         throw new NakamaAuthExpiredError(
           await readApiErrorMessage(response),
           path
@@ -3415,9 +3774,11 @@ export class NakamaClient {
     }
 
     if (response.status === 204) {
+      // SAFETY: This request's declared response type describes the empty 204 success contract.
       return undefined as T;
     }
 
+    // SAFETY: The typed request caller owns the JSON response contract for this endpoint.
     return (await response.json()) as T;
   }
 
@@ -3427,6 +3788,7 @@ export class NakamaClient {
     retried = false
   ): Promise<Response> {
     const method = (init?.method ?? "GET").toUpperCase();
+
     const headers = this.buildHeaders(method, init?.headers, {
       hasBody: false,
     });
@@ -3445,11 +3807,14 @@ export class NakamaClient {
       ) {
         if (!retried) {
           const freshToken = await loadLocalAuthToken();
+
           if (freshToken && freshToken !== this.authToken) {
             this.authToken = freshToken;
+
             return this.fetchRaw(path, init, true);
           }
         }
+
         throw new NakamaAuthExpiredError(
           await readApiErrorMessage(response),
           path
@@ -3467,37 +3832,43 @@ export class NakamaClient {
     headers?: HeadersInit,
     options: { hasBody?: boolean } = {}
   ): Record<string, string> {
-    const merged: Record<string, string> = {
-      ...((headers as Record<string, string>) ?? {}),
-    };
+    const merged = new Headers(headers);
 
-    if (options.hasBody && merged["Content-Type"] == null) {
-      merged["Content-Type"] = "application/json";
+    if (options.hasBody && !merged.has("Content-Type")) {
+      merged.set("Content-Type", "application/json");
     }
 
     if (this.authToken) {
-      merged["Authorization"] = `Bearer ${this.authToken}`;
+      merged.set("Authorization", `Bearer ${this.authToken}`);
     }
 
-    if (this.orgId && !merged["X-Org-Id"]) {
-      merged["X-Org-Id"] = this.orgId;
+    if (this.orgId && !merged.has("X-Org-Id")) {
+      merged.set("X-Org-Id", this.orgId);
     }
 
     if (isMutatingMethod(method)) {
-      const csrfToken = readCookie("nakama_csrf");
+      // HTTPS deployments issue the host-bound cookie; plain HTTP uses the
+      // unprefixed one. A cookie planted by a sibling host is never read on
+      // HTTPS because the server only trusts the prefixed name there.
+      const csrfToken =
+        readCookie(HOST_BOUND_BROWSER_SESSION_COOKIE_NAMES.csrf) ??
+        readCookie(PLAIN_BROWSER_SESSION_COOKIE_NAMES.csrf);
+
       if (csrfToken) {
-        merged["X-CSRF-Token"] = csrfToken;
+        merged.set("X-CSRF-Token", csrfToken);
       }
     }
 
-    return merged;
+    return Object.fromEntries(merged.entries());
   }
 }
+
 async function createApiError(
   response: Response,
   path: string
 ): Promise<NakamaApiError> {
   const details = await readApiErrorDetails(response);
+
   return new NakamaApiError(details.message, response.status, path, undefined, {
     totpEnabled: details.totpEnabled,
   });
@@ -3510,6 +3881,7 @@ function isMutatingMethod(method: string): boolean {
 async function encodeArchiveData(
   data: Blob | BufferSource | string
 ): Promise<string> {
+  // oxlint-disable-next-line anti-slop/no-runtime-typeof -- This public helper accepts a typed string-or-binary union, not untrusted JSON.
   if (typeof data === "string") {
     return data;
   }
@@ -3523,11 +3895,14 @@ async function encodeArchiveData(
       ? new Uint8Array(data)
       : new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
 
+  // oxlint-disable-next-line anti-slop/no-runtime-typeof -- Feature detection selects browser btoa or the Node Buffer fallback.
   if (typeof btoa === "function") {
     let binary = "";
+
     for (const byte of bytes) {
       binary += String.fromCharCode(byte);
     }
+
     return btoa(binary);
   }
 
@@ -3537,6 +3912,7 @@ async function encodeArchiveData(
 function readContentDispositionFilename(headers: Headers): string | null {
   const contentDisposition = headers.get("content-disposition");
   const match = contentDisposition?.match(/filename="([^"]+)"/i);
+
   return match?.[1] ?? null;
 }
 

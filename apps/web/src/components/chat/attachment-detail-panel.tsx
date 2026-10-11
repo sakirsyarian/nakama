@@ -70,6 +70,7 @@ export function AttachmentDetailPanel({
 
     function handleResize() {
       const clamped = clampWidth(width);
+
       if (clamped !== width) {
         onWidthChange(clamped);
       }
@@ -77,6 +78,7 @@ export function AttachmentDetailPanel({
 
     handleResize();
     window.addEventListener("resize", handleResize);
+
     return () => window.removeEventListener("resize", handleResize);
   }, [clampWidth, fullscreen, onWidthChange, width]);
 
@@ -170,9 +172,11 @@ export function AttachmentDetailPanel({
     }
 
     draggingRef.current = false;
+
     if (event.currentTarget.hasPointerCapture(event.pointerId)) {
       event.currentTarget.releasePointerCapture(event.pointerId);
     }
+
     document.body.style.cursor = "";
     document.body.style.userSelect = "";
   }

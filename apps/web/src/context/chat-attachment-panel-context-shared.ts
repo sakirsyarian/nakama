@@ -44,12 +44,15 @@ export function beginAttachmentPanelClose(
   }
 
   const id = current.id;
+
   const promise = Promise.resolve(current.onClose()).finally(() => {
     if (inFlight.current?.id === id) {
       inFlight.current = null;
     }
   });
+
   inFlight.current = { id, promise };
+
   return promise;
 }
 

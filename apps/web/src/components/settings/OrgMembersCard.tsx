@@ -1,7 +1,9 @@
 import type { OrgMemberSummary, OrgRole } from "@nakama/core/contract";
+import { Button } from "@nakama/ui/button";
 import { Card, CardContent } from "@nakama/ui/card";
+import { Input } from "@nakama/ui/input";
 import { toast } from "@nakama/ui/toast";
-import { useReducer } from "react";
+import { type FormEvent, useEffect, useReducer, useState } from "react";
 import {
   type OrgMemberAddCredentials,
   OrgMemberAddDialog,
@@ -127,7 +129,7 @@ function orgMembersReducer(
 }
 
 export function OrgMembersCard() {
-  const { user, activeOrg } = useAuth();
+  const { user, activeOrg, updateOrg } = useAuth();
   const orgId = activeOrg?.id ?? null;
 
   const {
@@ -135,10 +137,12 @@ export function OrgMembersCard() {
     isLoading,
     error: loadError,
   } = useOrgMembers(activeOrg?.role === "admin" ? orgId : null);
+
   const inviteMutation = useInviteOrgMember(orgId ?? "");
   const addMutation = useAddOrgMember(orgId ?? "");
   const updateMemberMutation = useUpdateOrgMember(orgId ?? "");
   const removeMutation = useRemoveOrgMember(orgId ?? "");
+
   const [state, dispatch] = useReducer(
     orgMembersReducer,
     initialOrgMembersState
@@ -186,8 +190,10 @@ export function OrgMembersCard() {
     dispatch({ type: "clear-secrets" });
 
     const email = state.inviteEmail.trim();
+
     if (!email) {
       dispatch({ type: "patch", values: { formError: "Email is required." } });
+
       return;
     }
 
@@ -200,6 +206,7 @@ export function OrgMembersCard() {
           if (result.delivered) {
             toast(`Invitation sent to ${email}.`);
           }
+
           dispatch({
             type: "patch",
             values: {
@@ -230,6 +237,7 @@ export function OrgMembersCard() {
         type: "patch",
         values: { formError: "Name and email are required." },
       });
+
       return;
     }
 
@@ -251,6 +259,7 @@ export function OrgMembersCard() {
                 formError: null,
               },
             });
+
             return;
           }
 
@@ -273,6 +282,7 @@ export function OrgMembersCard() {
 
   function handleEditSubmit(event: React.FormEvent) {
     event.preventDefault();
+
     if (!state.editingMember) {
       return;
     }
@@ -342,6 +352,7 @@ export function OrgMembersCard() {
             }
             onInviteOpenChange={(open) => {
               dispatch({ type: "patch", values: { inviteOpen: open } });
+
               if (open) {
                 dispatch({ type: "reset-invite" });
                 dispatch({ type: "clear-secrets" });
@@ -354,6 +365,14 @@ export function OrgMembersCard() {
             }
             onInviteSubmit={handleInviteSubmit}
             orgId={activeOrg.id}
+          />
+
+          <InviteDomainsForm
+            allowedDomains={activeOrg.allowedInviteDomains ?? []}
+            key={activeOrg.id}
+            onSave={(domains) =>
+              updateOrg(activeOrg.id, { allowedInviteDomains: domains })
+            }
           />
 
           {state.secretValue ? (
@@ -401,6 +420,76 @@ export function OrgMembersCard() {
         updatePending={updateMemberMutation.isPending}
       />
     </>
+  );
+}
+
+function InviteDomainsForm({
+  allowedDomains,
+  onSave,
+}: {
+  allowedDomains: string[];
+  onSave: (domains: string[]) => Promise<void>;
+}) {
+  const domainsValue = allowedDomains.join(", ");
+  const [value, setValue] = useState(domainsValue);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setValue(domainsValue);
+  }, [domainsValue]);
+
+  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setSaving(true);
+    setError(null);
+
+    try {
+      await onSave(
+        value
+          .split(/[,\n]+/)
+          .map((domain) => domain.trim())
+          .filter(Boolean)
+      );
+      toast("Allowed invite domains saved.");
+    } catch (err) {
+      setError(formatError(err));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <form
+      className="space-y-1.5 px-4 py-3"
+      onSubmit={(event) => void handleSubmit(event)}
+    >
+      <label
+        className="font-medium text-foreground text-sm"
+        htmlFor="allowed-invite-domains"
+      >
+        Allowed invite domains
+      </label>
+      <div className="flex items-center gap-3">
+        <Input
+          className="min-w-0 flex-1"
+          id="allowed-invite-domains"
+          onChange={(event) => setValue(event.target.value)}
+          value={value}
+        />
+        <Button disabled={saving} type="submit" variant="outline">
+          Save domains
+        </Button>
+      </div>
+      <p className="text-muted-foreground text-xs">
+        Separate domains with commas. Leave empty to allow any domain.
+      </p>
+      {error ? (
+        <p className="text-destructive text-sm" role="alert">
+          {error}
+        </p>
+      ) : null}
+    </form>
   );
 }
 
@@ -452,6 +541,7 @@ function OrgMembersCardDialogs({
         onCopyCredential={(value) => void onCopyAddCredential(value)}
         onOpenChange={(open) => {
           dispatch({ type: "patch", values: { addOpen: open } });
+
           if (!open) {
             dispatch({ type: "reset-add" });
           }
@@ -478,6 +568,7 @@ function OrgMembersCardDialogs({
         }
         onOpenChange={(open) => {
           dispatch({ type: "patch", values: { editOpen: open } });
+
           if (!open) {
             dispatch({ type: "reset-edit" });
           }

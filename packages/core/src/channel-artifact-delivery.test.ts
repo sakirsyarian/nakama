@@ -4,7 +4,6 @@ import {
   formatArtifactShareFooter,
   isAttachIntent,
   isAttachOnlyCommand,
-  isFreshReportRequest,
   mintDeliverableArtifacts,
   pushDeliverableArtifact,
   resolveArtifactForAttach,
@@ -34,29 +33,6 @@ describe("isAttachIntent", () => {
     expect(isAttachIntent("save a report")).toBe(false);
     expect(isAttachIntent("jangan kirim csv ke grup")).toBe(false);
     expect(isAttachIntent("tidak usah kirimkan file")).toBe(false);
-  });
-});
-
-describe("isFreshReportRequest", () => {
-  test("matches time-bound report requests in both languages", () => {
-    expect(isFreshReportRequest("tolong kirim laporan harian")).toBe(true);
-    expect(isFreshReportRequest("send today's report")).toBe(true);
-    expect(isFreshReportRequest("kirim laporan terbaru")).toBe(true);
-    expect(isFreshReportRequest("buatkan laporan hari ini")).toBe(true);
-  });
-
-  test("does not match plain attach or thanks", () => {
-    expect(isFreshReportRequest("kirim file rekap-well-test.csv")).toBe(false);
-    expect(isFreshReportRequest("send me the file")).toBe(false);
-    expect(isFreshReportRequest("thanks")).toBe(false);
-    expect(isFreshReportRequest("")).toBe(false);
-  });
-
-  test("ignores markers that only appear inside a filename", () => {
-    expect(isFreshReportRequest("kirim file daily-report.csv")).toBe(false);
-    expect(isFreshReportRequest("send me update-harga.csv")).toBe(false);
-    expect(isFreshReportRequest("kirim file laporan-terbaru.csv")).toBe(false);
-    expect(isFreshReportRequest("send me the latest-report.pdf")).toBe(false);
   });
 });
 
@@ -139,9 +115,9 @@ describe("resolveShareUrlForPublish", () => {
   });
 
   test("reuses cached URL on refresh", () => {
-    const cache: Record<string, string> = {
+    const cache = {
       "report.md": "https://app.example/s/tok_1",
-    };
+    } satisfies Parameters<typeof resolveShareUrlForPublish>[1];
 
     const resolved = resolveShareUrlForPublish(
       {
@@ -221,6 +197,7 @@ describe("pushDeliverableArtifact", () => {
       { ...base, filename: "a.md", path: "a.md" },
       2
     );
+
     registry = pushDeliverableArtifact(
       registry,
       { ...base, filename: "b.md", path: "b.md" },
@@ -240,16 +217,19 @@ describe("deliverTurnArtifactShares", () => {
   test("mints shares, updates session store, and sends footer", async () => {
     const artifactsRoot =
       "/Users/test/.nakama/orgs/org_1/profiles/profile_1/artifacts";
+
     const metaJson = JSON.stringify({
       mimeType: "text/markdown",
       savedAt: "2026-07-13T10:00:00.000Z",
       sizeBytes: 42,
     });
+
     const scratchMeta = JSON.stringify({
       mimeType: "application/json",
       savedAt: "2026-07-13T10:00:01.000Z",
       sizeBytes: 2,
     });
+
     const messages: ChatMessage[] = [
       { content: "save report", role: "user" },
       {
@@ -324,6 +304,7 @@ describe("deliverTurnArtifactShares", () => {
     ];
 
     const shareUrls: Record<string, string> = {};
+
     let registry: Array<{
       filename: string;
       mimeType: string;
@@ -333,6 +314,7 @@ describe("deliverTurnArtifactShares", () => {
       shareUrl: string | null;
       sizeBytes: number;
     }> = [];
+
     let saved = false;
     const footers: string[] = [];
     const published: string[] = [];
@@ -341,6 +323,7 @@ describe("deliverTurnArtifactShares", () => {
       conversationKey: "chat:1",
       publish: async (path) => {
         published.push(path);
+
         return {
           refreshed: false,
           sharePath: "/s/tok_1",
@@ -364,6 +347,7 @@ describe("deliverTurnArtifactShares", () => {
           if (update.artifactShareUrls) {
             Object.assign(shareUrls, update.artifactShareUrls);
           }
+
           if (update.deliverableArtifacts) {
             registry = update.deliverableArtifacts;
           }

@@ -1,4 +1,11 @@
 export const queryKeys = {
+  acpAgentPresets: ["acpAgentPresets"] as const,
+  acpSettings: {
+    profile: (profileId: string, agentKey: string) =>
+      ["acpSettings", "profile", profileId, agentKey] as const,
+    session: (sessionId: string, agentKey: string) =>
+      ["acpSettings", "session", sessionId, agentKey] as const,
+  },
   agentBrowser: {
     settings: ["agentBrowser", "settings"] as const,
   },
@@ -42,11 +49,9 @@ export const queryKeys = {
   },
   models: ["models"] as const,
   modelsDev: ["modelsDev"] as const,
-  notificationDestinations: {
-    all: ["notificationDestinations"] as const,
-  },
+  notificationDestinations: (orgId: string) =>
+    ["notificationDestinations", orgId] as const,
   openRouterModels: ["openRouterModels"] as const,
-  orgApiKeys: (orgId: string) => ["orgApiKeys", orgId] as const,
   orgMembers: (orgId: string) => ["orgMembers", orgId] as const,
   orgMemory: (orgId: string) => ["orgMemory", orgId] as const,
   orgMemoryHistory: (orgId: string) => ["orgMemoryHistory", orgId] as const,
@@ -59,6 +64,8 @@ export const queryKeys = {
     detail: (orgId: string, pluginId: string) =>
       ["plugins", orgId, pluginId] as const,
     releases: ["plugins", "releases"] as const,
+    // Under releases so approving a release refreshes the check too.
+    updates: ["plugins", "releases", "updates"] as const,
   },
   profiles: {
     all: ["profiles"] as const,
@@ -110,6 +117,7 @@ export const queryKeys = {
   },
   systemStatus: ["systemStatus"] as const,
   telegram: {
+    requests: ["telegram", "requests"] as const,
     settings: ["telegram", "settings"] as const,
   },
   thinkingSettings: ["thinking", "settings"] as const,

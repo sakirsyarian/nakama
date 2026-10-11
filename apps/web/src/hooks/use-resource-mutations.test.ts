@@ -9,7 +9,11 @@ import {
   test,
 } from "bun:test";
 import { NakamaApiError } from "@nakama/core/api-error";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import {
+  QueryClient,
+  QueryClientProvider,
+  QueryObserver,
+} from "@tanstack/react-query";
 import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
 import { renderToString } from "react-dom/server";
@@ -20,27 +24,93 @@ import {
 } from "@/context/auth-context-shared";
 import { artifactShareStorageKey } from "@/lib/artifact-share-storage";
 import { client } from "@/lib/client";
+import { invalidateQueries } from "@/lib/query-client";
 import { queryKeys } from "@/lib/query-keys";
 import {
+  useArtifactsExist,
   useAssignToolMutation,
   useRevokeArtifactShareMutation,
   useUnassignToolMutation,
 } from "./use-resource-mutations";
 
 const revoke = spyOn(client, "revokeProfileArtifactShare");
+
 const publish = spyOn(client, "publishProfileArtifactShare");
+
 const queryClient = new QueryClient({
   defaultOptions: { mutations: { retry: false } },
 });
+
 const variables = {
   path: "report.html",
   profileId: "profile",
   shareId: "old-share",
 };
+
 const queryKey = queryKeys.artifacts.shareStatus(
   variables.profileId,
   variables.path
 );
+
+test("cache updates invalidate matching keys and leave other organizations alone", async () => {
+  const first = queryKeys.orgMemory("first");
+  const second = queryKeys.orgMemory("second");
+  const history = [...queryKeys.orgMemoryHistory("first"), "revision"];
+
+  for (const key of [first, second, history]) {
+    queryClient.setQueryData(key, { value: "saved" });
+  }
+
+  await invalidateQueries(
+    queryClient,
+    first,
+    queryKeys.orgMemoryHistory("first")
+  );
+
+  expect(queryClient.getQueryState(first)?.isInvalidated).toBe(true);
+  expect(queryClient.getQueryState(history)?.isInvalidated).toBe(true);
+  expect(queryClient.getQueryState(second)?.isInvalidated).toBe(false);
+  expect(queryClient.getQueryData<{ value: string }>(second)).toEqual({
+    value: "saved",
+  });
+});
+
+test("cache updates start each refetch and wait for all updated data", async () => {
+  const first = Promise.withResolvers<number>();
+  const second = Promise.withResolvers<number>();
+  const keys = [["first"], ["second"]];
+
+  const stops = [first, second].map((pending, index) =>
+    new QueryObserver(queryClient, {
+      initialData: 0,
+      queryFn: () => pending.promise,
+      queryKey: keys[index],
+      staleTime: Number.POSITIVE_INFINITY,
+    }).subscribe(() => {})
+  );
+
+  try {
+    let finished = false;
+
+    const updating = invalidateQueries(queryClient, ...keys).then(() => {
+      finished = true;
+    });
+
+    expect(
+      keys.map((key) => queryClient.getQueryState(key)?.fetchStatus)
+    ).toEqual(["fetching", "fetching"]);
+    first.resolve(1);
+    await first.promise;
+    expect(finished).toBe(false);
+    second.resolve(2);
+    await updating;
+    expect(keys.map((key) => queryClient.getQueryData(key))).toEqual([1, 2]);
+  } finally {
+    for (const stop of stops) {
+      stop();
+    }
+  }
+});
 
 afterEach(() => {
   revoke.mockReset();
@@ -55,10 +125,13 @@ afterAll(() => {
 
 function renderMutation() {
   let mutation: ReturnType<typeof useRevokeArtifactShareMutation>;
+
   function Probe() {
     mutation = useRevokeArtifactShareMutation();
+
     return null;
   }
+
   renderToString(
     createElement(
       QueryClientProvider,
@@ -66,6 +139,7 @@ function renderMutation() {
       createElement(Probe)
     )
   );
+
   return () => mutation.mutateAsync(variables);
 }
 
@@ -73,6 +147,7 @@ test.each([200, 404])(
   "revoke completes and invalidates stale share status on HTTP %s",
   async (status) => {
     queryClient.setQueryData(queryKey, { active: true, id: variables.shareId });
+
     if (status === 404) {
       revoke.mockRejectedValue(new NakamaApiError("Not found", 404));
     } else {
@@ -101,6 +176,7 @@ test("revoke preserves HTTP 403 failures rather than allowing rotation to contin
 
 describe("artifact share controls with a stale share ID", () => {
   const unusedAuthAction = mock(async () => {});
+
   const auth: AuthContextValue = {
     activeOrg: {
       createdAt: "2026-09-06T00:00:00Z",
@@ -117,18 +193,23 @@ describe("artifact share controls with a stale share ID", () => {
     login: async () => ({ email: "admin@example.com", id: "admin" }),
     logout: unusedAuthAction,
     orgs: [],
+    platformOrgs: [],
+    platformOrgsError: false,
+    refreshPlatformOrgs: unusedAuthAction,
     refreshSession: unusedAuthAction,
     setup: unusedAuthAction,
     switchOrg: unusedAuthAction,
     updateOrg: unusedAuthAction,
     user: { email: "admin@example.com", id: "admin", isPlatformAdmin: false },
   };
+
   const storageKey = artifactShareStorageKey(
     "admin",
     "org",
     variables.profileId,
     variables.path
   );
+
   const store = new Map<string, string>();
   let previousLocalStorage: Storage;
 
@@ -162,13 +243,16 @@ describe("artifact share controls with a stale share ID", () => {
 
   function renderControls() {
     let controls: ReturnType<typeof useArtifactShareControls>;
+
     function Probe() {
       controls = useArtifactShareControls({
         artifactPath: variables.path,
         profileId: variables.profileId,
       });
+
       return null;
     }
+
     renderToString(
       createElement(
         QueryClientProvider,
@@ -180,6 +264,7 @@ describe("artifact share controls with a stale share ID", () => {
         )
       )
     );
+
     return {
       revoke: () => controls.handleRevoke(),
       rotate: () => controls.handleRotateLink(),
@@ -192,6 +277,7 @@ describe("artifact share controls with a stale share ID", () => {
       const replacement = { active: true, id: "replacement-share" };
       revoke.mockImplementation(() => {
         queryClient.setQueryData(queryKey, replacement);
+
         return Promise.reject(new NakamaApiError("Not found", 404));
       });
       publish.mockResolvedValue({
@@ -249,12 +335,14 @@ describe("artifact share controls with a stale share ID", () => {
   test("does not recover account A share after logout and account B login", async () => {
     const accountA = { ...auth, user: { ...auth.user!, id: "account-a" } };
     const accountB = { ...auth, user: { ...auth.user!, id: "account-b" } };
+
     const accountAStorageKey = artifactShareStorageKey(
       "account-a",
       "org",
       variables.profileId,
       variables.path
     );
+
     store.set(
       accountAStorageKey,
       JSON.stringify({
@@ -267,13 +355,18 @@ describe("artifact share controls with a stale share ID", () => {
     const container = document.createElement("div");
     const root = createRoot(container);
     let controls: ReturnType<typeof useArtifactShareControls>;
+    const observedShares: boolean[] = [];
+
     function Probe() {
       controls = useArtifactShareControls({
         artifactPath: variables.path,
         profileId: variables.profileId,
       });
+      observedShares.push(controls.isShared);
+
       return null;
     }
+
     const render = (value: AuthContextValue) =>
       root.render(
         createElement(
@@ -287,6 +380,10 @@ describe("artifact share controls with a stale share ID", () => {
       await act(async () => render(accountA));
       await act(async () => controls.openViewShareDialog());
       expect(controls!.publishedUrl).toBe("https://example.com/s/account-a");
+
+      observedShares.length = 0;
+      await act(async () => render(accountB));
+      expect(observedShares[0]).toBe(false);
 
       await act(async () =>
         render({ ...accountA, activeOrg: null, user: null })
@@ -310,15 +407,19 @@ test.each(["assign", "unassign"])(
       mode === "assign"
         ? spyOn(client, "assignTool")
         : spyOn(client, "unassignTool");
+
     let release!: (value: never) => void;
     let started!: () => void;
+
     const waiting = new Promise<void>((resolve) => {
       started = resolve;
     });
+
     const error = new Error("One action was rejected");
     spy.mockRejectedValueOnce(error);
     spy.mockImplementationOnce(() => {
       started();
+
       return new Promise((resolve) => {
         release = resolve;
       });
@@ -326,12 +427,15 @@ test.each(["assign", "unassign"])(
     const key = queryKeys.profiles.detail("profile");
     queryClient.setQueryData(key, { id: "profile" });
     let mutation!: ReturnType<typeof useAssignToolMutation>;
+
     function Probe() {
       const assign = useAssignToolMutation();
       const unassign = useUnassignToolMutation();
       mutation = mode === "assign" ? assign : unassign;
+
       return null;
     }
+
     renderToString(
       createElement(
         QueryClientProvider,
@@ -339,16 +443,21 @@ test.each(["assign", "unassign"])(
         createElement(Probe)
       )
     );
+
     try {
       let settled = false;
+
       const result = mutation
         .mutateAsync({ profileId: "profile", toolId: ["first", "second"] })
         .catch((failure) => {
           settled = true;
+
           return failure;
         });
+
       await waiting;
       expect(settled).toBe(false);
+      // SAFETY: The test controls this fixture or mock and asserts the resulting behavior.
       release({} as never);
       expect(await result).toBe(error);
       expect(spy).toHaveBeenCalledTimes(2);
@@ -358,3 +467,70 @@ test.each(["assign", "unassign"])(
     }
   }
 );
+
+test("useArtifactsExist hides only the artifacts the server reports missing", async () => {
+  const exists = spyOn(client, "hasProfileArtifact").mockImplementation(
+    async (_profileId, path) => {
+      if (path === "gone.md") {
+        return false;
+      }
+
+      if (path === "flaky.md") {
+        throw new NakamaApiError("Bad gateway", 502);
+      }
+
+      return true;
+    }
+  );
+
+  const existsClient = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+
+  let result: boolean[] = [];
+
+  function Probe() {
+    result = useArtifactsExist(
+      [
+        { path: "kept.md" },
+        { path: "gone.md" },
+        { path: "flaky.md" },
+        { ownerProfileId: "other", path: "shared.md" },
+      ],
+      "profile",
+      true
+    );
+
+    return null;
+  }
+
+  const render = () =>
+    renderToString(
+      createElement(
+        QueryClientProvider,
+        { client: existsClient },
+        createElement(Probe)
+      )
+    );
+
+  try {
+    render();
+    // Nothing is known yet, so every chip stays.
+    expect(result).toEqual([true, true, true, true]);
+
+    // A server render registers the queries without running them.
+    await Promise.allSettled(
+      existsClient
+        .getQueryCache()
+        .getAll()
+        .map((query) => query.fetch())
+    );
+    render();
+
+    expect(result).toEqual([true, false, true, true]);
+    expect(exists.mock.calls).toContainEqual(["other", "shared.md"]);
+  } finally {
+    exists.mockRestore();
+    existsClient.clear();
+  }
+});

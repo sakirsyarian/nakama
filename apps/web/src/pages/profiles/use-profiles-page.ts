@@ -1,14 +1,19 @@
 import type {
   CreateMcpServerRequest,
   CreateSkillRequest,
+  ImageAttachment,
   InstallSkillRequest,
   ProfileDetail,
 } from "@nakama/core/contract";
+import { parseDataUrl } from "@nakama/core/message-content";
+import { BASH_TOOL_ID } from "@nakama/core/tools/protected";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { useActiveChatProfile } from "@/context/use-active-chat-profile";
 import { useAuth } from "@/context/use-auth";
+import { useAcpChatControls } from "@/hooks/use-acp-settings";
 import {
+  useAcpAgentPresetsQuery,
   useMcpServersQuery,
   useModelsQuery,
   useProfileQuery,
@@ -38,6 +43,11 @@ import {
   useUpdateProfileMutation,
   useUploadProfileAvatarMutation,
 } from "@/hooks/use-resource-mutations";
+import {
+  acpAgentSettingsKey,
+  NO_ACP_AGENT_PRESETS,
+  presetIdForAgent,
+} from "@/lib/acp-settings";
 import { resolveProfilesPageProfileId } from "@/lib/chat-history";
 import { formatError } from "@/lib/client";
 import {
@@ -45,7 +55,6 @@ import {
   groupModelsByProvider,
   profileModelSelectionValue,
 } from "@/lib/models";
-import { fileToImageAttachment } from "@/lib/profile-images";
 import {
   type ProfileDetailTab,
   type ProfileSaveStatus,
@@ -55,6 +64,11 @@ import {
   type RemoveAssignmentTarget,
   resolveProfileDetailTab,
 } from "@/pages/profiles/profiles-page.shared";
+import { readFileAsDataUrl } from "../../lib/read-file-as-data-url";
+
+function fileToImageAttachment(file: File): Promise<ImageAttachment | null> {
+  return readFileAsDataUrl(file).then(parseDataUrl, () => null);
+}
 
 function isProfilesPageBusy(flags: {
   assignMcpPending: boolean;
@@ -139,12 +153,14 @@ export function useProfilesPage() {
   const { profileId: liveChatProfileId } = useActiveChatProfile();
   const { user } = useAuth();
   const canManageProfile = user?.isPlatformAdmin === true;
+
   const {
     data: profiles = [],
     isLoading: profilesLoading,
     isFetching: profilesRefreshing,
     error: profilesError,
   } = useProfilesQuery();
+
   const { data: allTools = [] } = useToolsQuery();
   const { data: allMcpServers = [] } = useMcpServersQuery();
   const { data: composioToolkitsData } = useComposioToolkits();
@@ -156,15 +172,36 @@ export function useProfilesPage() {
     selectedIdRef.current = selectedId;
   }, [selectedId]);
   const { data: profileComposioData } = useProfileComposioToolkits(selectedId);
-  const { data: allSkills = [] } = useSkillsQuery();
+
+  const {
+    data: allSkills = [],
+    isLoading: skillsLoading,
+    error: skillsError,
+  } = useSkillsQuery();
+
   const { data: modelsResponse } = useModelsQuery();
+
   const {
     data: detail = null,
     isLoading: detailLoading,
     error: detailError,
     refetch: refetchDetail,
   } = useProfileQuery(selectedId);
+
   const updateMutation = useUpdateProfileMutation();
+
+  const acpAgentPresets =
+    useAcpAgentPresetsQuery().data ?? NO_ACP_AGENT_PRESETS;
+
+  const acpModelControls = useAcpChatControls({
+    agentKey: acpAgentSettingsKey(detail?.acpAgent),
+    enabled: Boolean(detail?.acpAgent),
+    profileId: selectedId,
+    sessionId: null,
+  });
+
+  const acpAgentId = presetIdForAgent(detail?.acpAgent, acpAgentPresets);
+  const { mutateAsync: updateProfile } = updateMutation;
   const cloneProfileMutation = useCloneProfileMutation();
   const deleteMutation = useDeleteProfileMutation();
   const uploadAvatarMutation = useUploadProfileAvatarMutation();
@@ -187,8 +224,10 @@ export function useProfilesPage() {
   const [cloneTargetId, setCloneTargetId] = useState<string | null>(null);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [deleteTargetId, setDeleteTargetId] = useState<string | null>(null);
+
   const [removeConfirm, setRemoveConfirm] =
     useState<RemoveAssignmentTarget | null>(null);
+
   const [mcpCreateOpen, setMcpCreateOpen] = useState(false);
   const [skillCreateOpen, setSkillCreateOpen] = useState(false);
   const [skillInstallOpen, setSkillInstallOpen] = useState(false);
@@ -205,6 +244,7 @@ export function useProfilesPage() {
   const savingRef = useRef(false);
   const pendingSaveRef = useRef(false);
   const performSaveRef = useRef<() => Promise<boolean>>(async () => true);
+
   const editStateRef = useRef({
     detail,
     editModel,
@@ -257,6 +297,7 @@ export function useProfilesPage() {
 
   const refreshing =
     profilesRefreshing || (detailLoading && Boolean(selectedId));
+
   const detailTab = resolveProfileDetailTab(searchParams.get("tab"));
 
   const isDirty = useMemo(() => {
@@ -303,11 +344,13 @@ export function useProfilesPage() {
 
       if (!snapshot.editName.trim()) {
         setSaveStatus("idle");
+
         return;
       }
 
       if (!profileHasPendingEdits(snapshot)) {
         setSaveStatus("idle");
+
         return;
       }
 
@@ -327,6 +370,7 @@ export function useProfilesPage() {
 
     if (savingRef.current) {
       pendingSaveRef.current = true;
+
       return false;
     }
 
@@ -346,6 +390,7 @@ export function useProfilesPage() {
     }
 
     const name = nameDraft.trim();
+
     if (!name) {
       return false;
     }
@@ -356,6 +401,7 @@ export function useProfilesPage() {
       modelDraft === baselineModel
     ) {
       setSaveStatus("idle");
+
       return true;
     }
 
@@ -398,6 +444,7 @@ export function useProfilesPage() {
     } catch (err) {
       setSaveStatus("error");
       setError(formatError(err));
+
       return false;
     } finally {
       savingRef.current = false;
@@ -442,6 +489,7 @@ export function useProfilesPage() {
 
   const flushSave = useCallback(async (): Promise<boolean> => {
     clearScheduledSave();
+
     return performSave();
   }, [clearScheduledSave, performSave]);
 
@@ -472,7 +520,33 @@ export function useProfilesPage() {
     [scheduleSave]
   );
 
+  // Saved right away, not debounced: the agent is a choice, not text. An empty
+  // preset id returns the profile to the built-in chat.
+  const handleEditAcpAgent = useCallback(
+    async (presetId: string) => {
+      if (!selectedId) {
+        return;
+      }
+
+      const agent =
+        acpAgentPresets.find((preset) => preset.id === presetId)?.agent ?? null;
+
+      setError(null);
+
+      try {
+        await updateProfile({
+          input: { acpAgent: agent },
+          profileId: selectedId,
+        });
+      } catch (err) {
+        setError(formatError(err));
+      }
+    },
+    [acpAgentPresets, selectedId, updateProfile]
+  );
+
   const switchingProfileRef = useRef(false);
+
   const handleSelectProfileRef = useRef<(profileId: string) => Promise<void>>(
     async () => undefined
   );
@@ -483,11 +557,13 @@ export function useProfilesPage() {
       setSearchParams(
         (current) => {
           const next = new URLSearchParams(current);
+
           if (nextProfileId) {
             next.set("profile", nextProfileId);
           } else {
             next.delete("profile");
           }
+
           return next;
         },
         { replace: true }
@@ -501,11 +577,13 @@ export function useProfilesPage() {
       setSearchParams(
         (current) => {
           const next = new URLSearchParams(current);
+
           if (nextTab === "profile") {
             next.delete("tab");
           } else {
             next.set("tab", nextTab);
           }
+
           return next;
         },
         { replace: true }
@@ -516,6 +594,7 @@ export function useProfilesPage() {
 
   useEffect(() => {
     const queryError = profilesError ?? detailError;
+
     if (queryError) {
       setError(formatError(queryError));
     }
@@ -526,6 +605,7 @@ export function useProfilesPage() {
       if (selectedIdRef.current !== null) {
         setSelectedId(null);
       }
+
       return;
     }
 
@@ -533,6 +613,7 @@ export function useProfilesPage() {
 
     if (!profileInitializedRef.current) {
       profileInitializedRef.current = true;
+
       const initialProfileId = resolveProfilesPageProfileId({
         liveChatProfileId,
         profiles,
@@ -542,6 +623,7 @@ export function useProfilesPage() {
       if (initialProfileId) {
         setSelectedId(initialProfileId);
       }
+
       return;
     }
 
@@ -551,10 +633,12 @@ export function useProfilesPage() {
       urlProfileId !== selectedIdRef.current
     ) {
       void handleSelectProfileRef.current(urlProfileId);
+
       return;
     }
 
     const current = selectedIdRef.current;
+
     if (current && !profiles.some((profile) => profile.id === current)) {
       setSelectedId(profiles[0]!.id);
     }
@@ -626,6 +710,7 @@ export function useProfilesPage() {
 
     for (const assignment of profileComposioData.assignments) {
       const toolkit = toolkitById.get(assignment.toolkitId);
+
       if (!toolkit) {
         continue;
       }
@@ -677,6 +762,7 @@ export function useProfilesPage() {
         savedPrompt: baselinePrompt,
         savedModel: baselineModel,
       } = editStateRef.current;
+
       const hasPendingEdits =
         nameDraft.trim() !== baselineName ||
         promptDraft !== baselinePrompt ||
@@ -687,11 +773,14 @@ export function useProfilesPage() {
       try {
         if (hasPendingEdits && nameDraft.trim()) {
           const saved = await performSave();
+
           if (!saved) {
             const current = selectedIdRef.current;
+
             if (current) {
               setSelectedId(current);
             }
+
             return;
           }
         }
@@ -718,6 +807,7 @@ export function useProfilesPage() {
       (current) => {
         const next = new URLSearchParams(current);
         next.delete("create");
+
         return next;
       },
       { replace: true }
@@ -776,6 +866,7 @@ export function useProfilesPage() {
 
   async function handleDeleteConfirm() {
     const profileId = deleteTargetId;
+
     const profile = profileId
       ? profiles.find((entry) => entry.id === profileId)
       : null;
@@ -812,11 +903,13 @@ export function useProfilesPage() {
 
     try {
       const pluginId = allTools.find((tool) => tool.id === toolId)?.pluginId;
+
       const ids = pluginId
         ? availableTools.flatMap((tool) =>
             tool.pluginId === pluginId ? [tool.id] : []
           )
         : [toolId];
+
       await assignMutation.mutateAsync({ profileId: selectedId, toolId: ids });
     } catch (err) {
       setError(formatError(err));
@@ -853,6 +946,7 @@ export function useProfilesPage() {
         ...request,
         connect: true,
       });
+
       await assignMcpMutation.mutateAsync({
         profileId: selectedId,
         serverId: response.server.id,
@@ -867,7 +961,7 @@ export function useProfilesPage() {
 
   async function handleAssignSkill(skillId: string) {
     if (!selectedId) {
-      return;
+      throw new Error("Select a profile first.");
     }
 
     setError(null);
@@ -876,7 +970,19 @@ export function useProfilesPage() {
       await assignSkillMutation.mutateAsync({ profileId: selectedId, skillId });
     } catch (err) {
       setError(formatError(err));
+      throw err;
     }
+  }
+
+  async function handleAssignBash() {
+    if (!selectedId) {
+      throw new Error("Select a profile first.");
+    }
+
+    await assignMutation.mutateAsync({
+      profileId: selectedId,
+      toolId: [BASH_TOOL_ID],
+    });
   }
 
   async function handleDeleteSkill(skillId: string) {
@@ -1028,6 +1134,7 @@ export function useProfilesPage() {
 
       if (!attachment) {
         setError("Could not read the selected image.");
+
         return;
       }
 
@@ -1057,11 +1164,19 @@ export function useProfilesPage() {
   const deleteTarget = deleteTargetId
     ? profiles.find((entry) => entry.id === deleteTargetId)
     : null;
+
   const cloneTarget = cloneTargetId
     ? profiles.find((entry) => entry.id === cloneTargetId)
     : null;
 
   return {
+    acpAgentId,
+    acpAgentPresets,
+    acpCurrentModelSelection: acpModelControls.currentModelSelection,
+    acpEffortOptions: acpModelControls.effortOptions,
+    acpEffortValue: acpModelControls.effortValue,
+    acpIsSaving: acpModelControls.isSaving,
+    acpModelGroups: acpModelControls.providerModelGroups,
     allMcpServers,
     allSkills,
     allTools,
@@ -1096,6 +1211,7 @@ export function useProfilesPage() {
     editPrompt,
     error,
     flushSave,
+    handleAssignBash,
     handleAssignComposioToolkit,
     handleAssignMcpServer,
     handleAssignSkill,
@@ -1110,6 +1226,7 @@ export function useProfilesPage() {
     handleDeleteConfirm,
     handleDeleteOpenChange,
     handleDeleteSkill,
+    handleEditAcpAgent,
     handleEditModelChange,
     handleEditNameChange,
     handleEditPromptChange,
@@ -1135,6 +1252,8 @@ export function useProfilesPage() {
     removeConfirm,
     saveStatus,
     selectedId,
+    setAcpEffort: acpModelControls.setEffort,
+    setAcpModel: acpModelControls.setModel,
     setCreateOpen,
     setDeleteOpen,
     setDetailTab,
@@ -1146,6 +1265,8 @@ export function useProfilesPage() {
     setSkillInstallOpen,
     skillCreateOpen,
     skillInstallOpen,
+    skillsError,
+    skillsLoading,
     unassignMcpMutation,
     unassignMutation,
     unassignSkillMutation,

@@ -1,7 +1,8 @@
 import { existsSync, lstatSync, mkdirSync, renameSync } from "node:fs";
-import { cp } from "node:fs/promises";
+import { cp, rm } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type {
+  AcpAgentConfig,
   AssignMcpServerRequest,
   AssignSkillRequest,
   AssignToolRequest,
@@ -12,6 +13,8 @@ import type {
   DeleteOrganizationKnowledgeBaseResponse,
   DocumentAttachment,
   ImageAttachment,
+  ImportKnowledgeBaseZipEntry,
+  ImportKnowledgeBaseZipResponse,
   JsonSchema,
   KnowledgeBaseDocument,
   KnowledgeBaseDuplicateAction,
@@ -19,7 +22,6 @@ import type {
   ListProfilesResponse,
   ListToolsResponse,
   MoveProfileRequest,
-  ProfileDetail,
   ProfileResponse,
   ProfileSummary,
   ToolDetail,
@@ -34,6 +36,7 @@ import {
   createId,
   DEFAULT_KNOWLEDGE_SOURCES,
   deleteProfileAvatar,
+  ensureKnowledgeBaseDirs,
   getKnowledgeBaseDir,
   getProfileSharedDocumentIds,
   getProfileSoulDir,
@@ -44,6 +47,8 @@ import {
   listKnowledgeBaseDocuments,
   listOrganizationKnowledgeBaseDocuments,
   NakamaApiError,
+  nanoid,
+  normalizeKnowledgeBaseMediaType,
   pathExists,
   uploadKnowledgeBaseDocument as persistKnowledgeBaseDocument,
   uploadOrganizationKnowledgeBaseDocument as persistOrganizationKnowledgeBaseDocument,
@@ -59,6 +64,10 @@ import {
 import { listChannelOwners } from "@nakama/core/channel-config-shared";
 import { readTextIfExists } from "@nakama/core/fs";
 import {
+  MAX_KNOWLEDGE_DOCUMENT_BYTES,
+  MAX_KNOWLEDGE_ZIP_BYTES,
+} from "@nakama/core/message-content";
+import {
   BUILTIN_TOOL_IDS,
   isProtectedToolId,
 } from "@nakama/core/tools/protected";
@@ -71,6 +80,8 @@ import {
   ensureBuiltinToolDefinitions,
   ensureProfileDefaultBundledSkills,
 } from "@nakama/db";
+import { unzipSync } from "fflate";
+import { z } from "zod";
 import {
   CUSTOM_TOOL_HANDLERS,
   type CustomToolType,
@@ -78,6 +89,7 @@ import {
   getCustomToolHandler,
   isCustomToolType,
 } from "./custom-tool-handlers";
+import { parseToolEnvDeclarations } from "./custom-tool-shared";
 import { toMcpServerSummaries } from "./mcp-service";
 import { MemoryBackendService } from "./memory-backend-service";
 import {
@@ -96,6 +108,97 @@ import { toSkillSummaries } from "./skills-service";
 import { readToolSource } from "./tool-source";
 
 const PROFILE_ID_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/;
+
+const MAX_KNOWLEDGE_ZIP_ENTRIES = 100;
+
+const MAX_KNOWLEDGE_ZIP_UNCOMPRESSED_BYTES = 100 * 1024 * 1024;
+
+const KNOWLEDGE_ZIP_EXTENSIONS = new Set([
+  ".txt",
+  ".md",
+  ".csv",
+  ".pdf",
+  ".docx",
+]);
+
+function readKnowledgeZip(zipBase64: string): Record<string, Uint8Array> {
+  if (!isString(zipBase64) || zipBase64.length === 0) {
+    throw new NakamaApiError("ZIP data is required.", 400);
+  }
+
+  if (zipBase64.length > Math.ceil(MAX_KNOWLEDGE_ZIP_BYTES / 3) * 4) {
+    throw new NakamaApiError("ZIP file exceeds the 20 MiB limit.", 413);
+  }
+
+  const archive = Buffer.from(zipBase64, "base64");
+
+  if (archive.length > MAX_KNOWLEDGE_ZIP_BYTES) {
+    throw new NakamaApiError("ZIP file exceeds the 20 MiB limit.", 413);
+  }
+
+  // The canonical round-trip rejects invalid characters and padding without
+  // the regex engine's input-size limit on otherwise valid large archives.
+  if (archive.toString("base64") !== zipBase64) {
+    throw new NakamaApiError("Invalid base64 ZIP data.", 400);
+  }
+
+  let count = 0;
+  let totalBytes = 0;
+  const names = new Set<string>();
+
+  try {
+    return unzipSync(archive, {
+      filter: ({ name, originalSize }) => {
+        count += 1;
+        totalBytes += originalSize;
+
+        if (
+          count > MAX_KNOWLEDGE_ZIP_ENTRIES ||
+          !Number.isSafeInteger(originalSize) ||
+          originalSize < 0 ||
+          originalSize > MAX_KNOWLEDGE_DOCUMENT_BYTES ||
+          totalBytes > MAX_KNOWLEDGE_ZIP_UNCOMPRESSED_BYTES
+        ) {
+          throw new NakamaApiError("ZIP file exceeds the entry limits.", 413);
+        }
+
+        const path = name.endsWith("/") ? name.slice(0, -1) : name;
+
+        if (
+          !path ||
+          path.startsWith("/") ||
+          path.includes("\\") ||
+          /^[A-Za-z]:/.test(path) ||
+          /[\u0000-\u001f\u007f]/.test(path) ||
+          path
+            .split("/")
+            .some((segment) => !segment || segment === "." || segment === "..")
+        ) {
+          throw new NakamaApiError("ZIP file contains an invalid path.", 400);
+        }
+
+        if (!name.endsWith("/")) {
+          const normalized = path.normalize("NFC");
+
+          if (names.has(normalized)) {
+            throw new NakamaApiError("ZIP file contains duplicate paths.", 400);
+          }
+
+          names.add(normalized);
+        }
+
+        return true;
+      },
+    });
+  } catch (error) {
+    if (error instanceof NakamaApiError) {
+      throw error;
+    }
+
+    throw new NakamaApiError("Invalid ZIP file.", 400);
+  }
+}
+
 const BASIC_PROFILE_TOOL_IDS = [
   BUILTIN_TOOL_IDS.write_file,
   BUILTIN_TOOL_IDS.edit_file,
@@ -104,6 +207,7 @@ const BASIC_PROFILE_TOOL_IDS = [
   BUILTIN_TOOL_IDS.knowledge_base_search,
   BUILTIN_TOOL_IDS.web_fetch,
 ] as const;
+
 const SOUL_FILE_KEY_BY_NAME = {
   "INSTRUCTIONS.md": "instructions",
   "MEMORY.md": "memory",
@@ -113,9 +217,6 @@ const SOUL_FILE_KEY_BY_NAME = {
 
 /** Everything in the soul stack except MEMORY.md, which a clone starts fresh. */
 const CLONED_SOUL_FILE_KEYS = ["instructions", "soul", "style"] as const;
-
-/** How many `-2`, `-3` suffixes to try before giving up on a generated id. */
-const CLONE_ID_ATTEMPTS = 50;
 
 async function copyProfileAvatarTo(
   orgId: string,
@@ -139,6 +240,9 @@ async function copyKnowledgeBaseTo(
   sourceId: string,
   profileId: string
 ): Promise<void> {
+  // A legacy `data/knowledge-base` is only moved by KB operations, so migrate
+  // it before looking for the current-layout directory.
+  await ensureKnowledgeBaseDirs(orgId, sourceId);
   const from = getKnowledgeBaseDir(orgId, sourceId);
 
   if (!(await pathExists(from))) {
@@ -153,17 +257,6 @@ async function copyKnowledgeBaseTo(
   });
 }
 
-function slugifyProfileName(name: string): string {
-  return (
-    name
-      .trim()
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, "-")
-      .replace(/^-+|-+$/g, "")
-      .slice(0, 64) || "profile"
-  );
-}
-
 export class ProfileService {
   beforeChannelOwnerDelete?: (
     orgId: string,
@@ -176,6 +269,7 @@ export class ProfileService {
 
   async listProfiles(orgId: string): Promise<ListProfilesResponse> {
     const profiles = await this.db.listProfilesForOrg(orgId);
+
     const summaries = await Promise.all(
       profiles.map((profile) => this.toProfileSummary(profile))
     );
@@ -213,8 +307,9 @@ export class ProfileService {
 
     validateGeneratedSoulFiles(request.soulFiles);
 
-    const profileId = await this.resolveNewProfileId(request.id, name);
+    const profileId = await this.resolveNewProfileId(request.id);
     const now = new Date().toISOString();
+
     const profile: StoredProfileRecord = {
       automationsEnabled: true,
       createdAt: now,
@@ -258,7 +353,7 @@ export class ProfileService {
     }
 
     const name = request.name?.trim() || `${source.name} (copy)`;
-    const profileId = await this.resolveCloneProfileId(request.id, name);
+    const profileId = await this.resolveNewProfileId(request.id);
     const now = new Date().toISOString();
 
     await this.db.upsertProfile({
@@ -277,12 +372,43 @@ export class ProfileService {
       updatedAt: now,
     });
 
-    await this.copyProfileSoul(orgId, sourceId, profileId);
-    await this.copyProfileAssignments(sourceId, profileId);
-    await copyProfileAvatarTo(orgId, sourceId, profileId);
-    await copyKnowledgeBaseTo(orgId, sourceId, profileId);
+    try {
+      await this.copyProfileSoul(orgId, sourceId, profileId);
+      await this.copyProfileAssignments(sourceId, profileId);
+      await copyProfileAvatarTo(orgId, sourceId, profileId);
+      await copyKnowledgeBaseTo(orgId, sourceId, profileId);
+    } catch (error) {
+      await this.cleanupFailedClone(orgId, sourceId, profileId);
+      throw error;
+    }
 
     return this.getProfile(orgId, profileId);
+  }
+
+  private async cleanupFailedClone(
+    orgId: string,
+    sourceId: string,
+    profileId: string
+  ): Promise<void> {
+    await rm(getProfileSoulDir(orgId, profileId), {
+      force: true,
+      recursive: true,
+    });
+
+    for (const tool of await this.db.listToolsForProfile(sourceId)) {
+      await this.db.unassignToolFromProfile(profileId, tool.id);
+    }
+
+    for (const skill of await this.db.listSkillsForProfile(sourceId)) {
+      await this.db.unassignSkillFromProfile(profileId, skill.id);
+    }
+
+    for (const server of await this.db.listMcpServersForProfile(sourceId)) {
+      await this.db.unassignMcpServerFromProfile(profileId, server.id);
+    }
+
+    await this.db.replaceProfileComposioToolkits(profileId, []);
+    await this.db.deleteProfile(profileId);
   }
 
   private async copyProfileSoul(
@@ -330,34 +456,6 @@ export class ProfileService {
     }
   }
 
-  /**
-   * An explicit id must be free, same as create. A generated one is suffixed
-   * until it is, because cloning twice is a normal thing to do.
-   */
-  private async resolveCloneProfileId(
-    requestedId: string | undefined,
-    name: string
-  ): Promise<string> {
-    if (requestedId?.trim()) {
-      return this.resolveNewProfileId(requestedId, name);
-    }
-
-    const base = slugifyProfileName(name);
-
-    for (let suffix = 1; suffix <= CLONE_ID_ATTEMPTS; suffix++) {
-      const candidate = suffix === 1 ? base : `${base}-${suffix}`;
-
-      if (!(await this.db.getProfile(candidate))) {
-        return this.resolveNewProfileId(candidate, name);
-      }
-    }
-
-    throw new NakamaApiError(
-      `Could not find a free profile id for "${name}".`,
-      409
-    );
-  }
-
   async updateProfile(
     orgId: string,
     profileId: string,
@@ -368,6 +466,7 @@ export class ProfileService {
     const now = new Date().toISOString();
 
     validateGeneratedSoulFiles(request.soulFiles);
+    validateAcpAgent(request.acpAgent);
 
     const nextSystemPrompt =
       request.systemPrompt === undefined
@@ -376,6 +475,8 @@ export class ProfileService {
 
     await this.db.upsertProfile({
       ...profile,
+      acpAgent:
+        request.acpAgent === undefined ? profile.acpAgent : request.acpAgent,
       automationsEnabled:
         request.automationsEnabled === undefined
           ? profile.automationsEnabled !== false
@@ -400,6 +501,7 @@ export class ProfileService {
 
     if (meta && request.systemPrompt !== undefined) {
       const before = profile.systemPrompt;
+
       if (before !== nextSystemPrompt) {
         await recordProfileChangeEvent(this.db, {
           actorUserId: meta.actorUserId,
@@ -416,19 +518,25 @@ export class ProfileService {
 
     if (meta && request.soulFiles) {
       const soulDir = getProfileSoulDir(orgId, profileId);
+
       for (const [fileName, content] of Object.entries(request.soulFiles)) {
         if (content === undefined) {
           continue;
         }
+
         const field = soulFieldFromFileName(fileName);
+
         if (!field) {
           continue;
         }
+
         const before =
           (await readTextIfExists(join(soulDir, fileName))) ?? null;
+
         if (before === content) {
           continue;
         }
+
         await recordProfileChangeEvent(this.db, {
           actorUserId: meta.actorUserId,
           afterValue: content,
@@ -456,6 +564,7 @@ export class ProfileService {
     request: MoveProfileRequest
   ): Promise<ProfileResponse> {
     await this.requireProfile(orgId, profileId);
+
     for (const platform of [
       "telegram",
       "discord",
@@ -473,28 +582,37 @@ export class ProfileService {
         );
       }
     }
+
     const destination = request?.organizationId;
-    if (typeof destination !== "string" || !destination.trim()) {
+
+    if (!(isString(destination) && destination.trim())) {
       throw new NakamaApiError("Destination organization is required.", 400);
     }
+
     const target = await this.db.getOrganizationById(destination);
+
     if (!target || target.archivedAt) {
       throw new NakamaApiError("Destination organization is unavailable.", 404);
     }
+
     if (destination === orgId) {
       throw new NakamaApiError("Choose another organization.", 400);
     }
+
     const sessions = (await this.db.listSessions()).filter(
       (session) => session.profileId === profileId
     );
+
     if (sessions.some((session) => sessionTurnRegistry.isActive(session.id))) {
       throw new NakamaApiError(
         "Wait for active chats to finish before moving this profile.",
         409
       );
     }
+
     const from = getProfileSoulDir(orgId, profileId);
     const to = getProfileSoulDir(destination, profileId);
+
     const paths: [string, string][] = [
       [from, to],
       ...sessions.map((session): [string, string] => [
@@ -502,7 +620,9 @@ export class ProfileService {
         sessionHistoryArchivePath(destination, session.id),
       ]),
     ];
+
     const moved: [string, string][] = [];
+
     try {
       for (const [source, targetPath] of paths) {
         if (lstatSync(targetPath, { throwIfNoEntry: false })) {
@@ -511,20 +631,25 @@ export class ProfileService {
             409
           );
         }
+
         if (!existsSync(source)) {
           continue;
         }
+
         mkdirSync(dirname(targetPath), { recursive: true });
         renameSync(source, targetPath);
         moved.push([source, targetPath]);
       }
+
       await this.db.moveProfile(profileId, orgId, destination, from, to);
     } catch (error) {
       for (const [source, targetPath] of moved.reverse()) {
         renameSync(targetPath, source);
       }
+
       throw error;
     }
+
     return this.getProfile(destination, profileId);
   }
 
@@ -533,6 +658,7 @@ export class ProfileService {
 
     if (profile.isDefault) {
       const orgProfiles = await this.db.listProfilesForOrg(orgId);
+
       const successor = orgProfiles.find(
         (entry) => entry.id !== profileId && !entry.isSuper
       );
@@ -554,6 +680,7 @@ export class ProfileService {
     if (!profile.isDefault) {
       await this.beforeChannelOwnerDelete?.(orgId, profileId);
     }
+
     const deleted = await deleteProfileWithHistoryArchives(
       this.db,
       orgId,
@@ -567,19 +694,23 @@ export class ProfileService {
 
   async listTools(orgId: string): Promise<ListToolsResponse> {
     await ensureBuiltinToolDefinitions(this.db);
+
     const tools = (await this.db.listTools()).filter(
       (tool) => !tool.orgId || tool.orgId === orgId
     );
+
     return { tools: tools.map(toToolDetail) };
   }
 
   async getTool(toolId: string): Promise<ToolResponse> {
     const tool = await this.requireTool(toolId);
+
     return { tool: await enrichToolParameters(toToolDetail(tool)) };
   }
 
   async getToolSource(toolId: string): Promise<ToolSourceResponse> {
     const tool = await this.requireTool(toolId);
+
     return readToolSource(tool);
   }
 
@@ -589,6 +720,7 @@ export class ProfileService {
   ): Promise<ListToolsResponse> {
     await this.requireProfile(orgId, profileId);
     const tools = await this.db.listToolsForProfile(profileId);
+
     return { tools: tools.map(toToolSummary) };
   }
 
@@ -633,9 +765,18 @@ export class ProfileService {
     }
 
     const handlerType = readToolHandlerType(request.handlerType);
+
+    const rawHandlerConfig = request.handlerConfig;
+
+    if (!isRawCustomToolHandlerConfig(rawHandlerConfig)) {
+      throw new Error(
+        `Custom tools require handlerConfig.modulePath ending in "${CUSTOM_TOOL_HANDLERS[handlerType].extension}".`
+      );
+    }
+
     const handlerConfig = readCustomToolHandlerConfig(
       handlerType,
-      request.handlerConfig
+      rawHandlerConfig
     );
 
     await CUSTOM_TOOL_HANDLERS[handlerType].validateModule(
@@ -643,6 +784,7 @@ export class ProfileService {
     );
 
     const now = new Date().toISOString();
+
     const record: StoredToolRecord = {
       createdAt: now,
       description,
@@ -701,6 +843,7 @@ export class ProfileService {
           profileId,
           toolId
         );
+
         if (!removed) {
           throw new Error("Tool is not assigned to this profile.");
         }
@@ -749,6 +892,7 @@ export class ProfileService {
           profileId,
           serverId
         );
+
         if (!removed) {
           throw new Error("MCP server is not assigned to this profile.");
         }
@@ -768,7 +912,7 @@ export class ProfileService {
 
     const skill = await this.db.getSkill(request.skillId);
 
-    if (!skill) {
+    if (!skill || (skill.orgId != null && skill.orgId !== orgId)) {
       throw new Error("Skill not found.");
     }
 
@@ -797,6 +941,7 @@ export class ProfileService {
           profileId,
           skillId
         );
+
         if (!removed) {
           throw new Error("Skill is not assigned to this profile.");
         }
@@ -812,11 +957,13 @@ export class ProfileService {
     options: { limit?: number; offset?: number } = {}
   ) {
     await this.requireProfile(orgId, profileId);
+
     const events = await this.db.listProfileChangeEvents(
       orgId,
       profileId,
       options
     );
+
     return {
       events: await describeProfileChangeEvents(this.db, orgId, events),
     };
@@ -875,16 +1022,20 @@ export class ProfileService {
     profileId: string
   ): Promise<ListKnowledgeBaseResponse> {
     await this.requireProfile(orgId, profileId);
+
     const [documents, sharedDocumentIds, organizationDocuments] =
       await Promise.all([
         listKnowledgeBaseDocuments(orgId, profileId),
         getProfileSharedDocumentIds(orgId, profileId),
         listOrganizationKnowledgeBaseDocuments(orgId),
       ]);
+
     const shared = organizationDocuments
       .filter((document) => sharedDocumentIds.includes(document.id))
       .map((document) => ({ ...document, scope: "organization" as const }));
+
     const sources = DEFAULT_KNOWLEDGE_SOURCES;
+
     return {
       documents: [
         ...documents.map((document) => ({
@@ -913,7 +1064,9 @@ export class ProfileService {
         document,
         onDuplicate
       );
+
       await this.memoryBackend.syncKnowledge(orgId, profileId);
+
       return {
         document: uploaded.document,
         outcome: uploaded.outcome,
@@ -928,8 +1081,113 @@ export class ProfileService {
         error instanceof Error
           ? error.message
           : "Failed to upload knowledge base document.";
+
       throw new NakamaApiError(message, 400);
     }
+  }
+
+  async importKnowledgeBaseZip(
+    orgId: string,
+    profileId: string,
+    zipBase64: string
+  ): Promise<ImportKnowledgeBaseZipResponse> {
+    await this.requireProfile(orgId, profileId);
+    const archive = readKnowledgeZip(zipBase64);
+
+    const files = Object.entries(archive).filter(
+      ([name]) =>
+        !(name.endsWith("/") || name.startsWith("__MACOSX/")) &&
+        name.split("/").at(-1) !== ".DS_Store"
+    );
+
+    if (
+      !files.some(([name]) =>
+        KNOWLEDGE_ZIP_EXTENSIONS.has(
+          name.slice(name.lastIndexOf(".")).toLowerCase()
+        )
+      )
+    ) {
+      throw new NakamaApiError("ZIP file has no supported documents.", 400);
+    }
+
+    const entries: ImportKnowledgeBaseZipEntry[] = [];
+
+    for (const [filename, bytes] of files) {
+      const extension = filename.slice(filename.lastIndexOf(".")).toLowerCase();
+
+      if (!KNOWLEDGE_ZIP_EXTENSIONS.has(extension)) {
+        entries.push({
+          filename,
+          outcome: "unsupported",
+          reason: "Unsupported document type.",
+        });
+        continue;
+      }
+
+      try {
+        const { document } = await persistKnowledgeBaseDocument(
+          orgId,
+          profileId,
+          {
+            data: Buffer.from(bytes).toString("base64"),
+            filename,
+            mediaType: normalizeKnowledgeBaseMediaType("", filename),
+          },
+          "error"
+        );
+
+        const entry = {
+          documentId: document.id,
+          filename,
+          outcome: "created",
+          status: document.status,
+        };
+
+        if (document.error) {
+          entry.reason = document.error;
+        }
+
+        entries.push(entry);
+      } catch (error) {
+        if (error instanceof KnowledgeBaseDuplicateError) {
+          entries.push({
+            documentId: error.existing.id,
+            filename,
+            match: error.match,
+            outcome: "duplicate",
+            status: error.existing.status,
+          });
+          continue;
+        }
+
+        entries.push({
+          filename,
+          outcome: "error",
+          reason:
+            error instanceof Error
+              ? error.message
+              : "Could not import document.",
+        });
+      }
+    }
+
+    await this.memoryBackend.syncKnowledge(orgId, profileId);
+
+    return {
+      entries,
+      profileId,
+      totals: {
+        created: entries.filter((entry) => entry.outcome === "created").length,
+        duplicate: entries.filter((entry) => entry.outcome === "duplicate")
+          .length,
+        error: entries.filter((entry) => entry.outcome === "error").length,
+        failedExtraction: entries.filter(
+          (entry) => entry.outcome === "created" && entry.status === "failed"
+        ).length,
+        unsupported: entries.filter((entry) => entry.outcome === "unsupported")
+          .length,
+      },
+    };
   }
 
   async deleteKnowledgeBaseDocument(
@@ -938,6 +1196,7 @@ export class ProfileService {
     documentId: string
   ): Promise<DeleteKnowledgeBaseResponse> {
     await this.requireProfile(orgId, profileId);
+
     const deleted = await removeKnowledgeBaseDocument(
       orgId,
       profileId,
@@ -960,6 +1219,7 @@ export class ProfileService {
    */
   private async orgProfileIds(orgId: string): Promise<string[]> {
     const profiles = await this.db.listProfilesForOrg(orgId);
+
     return profiles.map((profile) => profile.id);
   }
 
@@ -967,6 +1227,7 @@ export class ProfileService {
     orgId: string
   ): Promise<{ documents: KnowledgeBaseDocument[] }> {
     const documents = await listOrganizationKnowledgeBaseDocuments(orgId);
+
     return {
       documents: documents.map((document) => ({
         ...document,
@@ -987,6 +1248,7 @@ export class ProfileService {
         onDuplicate,
         await this.orgProfileIds(orgId)
       );
+
       return {
         document: { ...uploaded.document, scope: "organization" },
         outcome: uploaded.outcome,
@@ -1006,6 +1268,7 @@ export class ProfileService {
         error instanceof Error
           ? error.message
           : "Failed to upload knowledge base document.";
+
       throw new NakamaApiError(message, 400);
     }
   }
@@ -1047,6 +1310,7 @@ export class ProfileService {
         error instanceof Error
           ? error.message
           : "Knowledge base document not found.";
+
       throw new NakamaApiError(message, 404);
     }
   }
@@ -1071,15 +1335,23 @@ export class ProfileService {
         error instanceof Error
           ? error.message
           : "Knowledge base document not found.";
+
       throw new NakamaApiError(message, 404);
     }
   }
 
+  /**
+   * Generated ids are random (names may repeat across orgs), so an id only
+   * collides when the caller asked for a specific one.
+   */
   private async resolveNewProfileId(
-    requestedId: string | undefined,
-    name: string
+    requestedId: string | undefined
   ): Promise<string> {
-    const trimmed = requestedId?.trim() || slugifyProfileName(name);
+    const trimmed = requestedId?.trim();
+
+    if (!trimmed) {
+      return nanoid();
+    }
 
     if (!PROFILE_ID_PATTERN.test(trimmed)) {
       throw new NakamaApiError(
@@ -1088,13 +1360,34 @@ export class ProfileService {
       );
     }
 
-    const existing = await this.db.getProfile(trimmed);
-
-    if (existing) {
-      throw new NakamaApiError("Profile id already exists.", 409);
+    if (await this.isProfileIdTaken(trimmed)) {
+      throw new NakamaApiError(
+        `Profile id "${trimmed}" is already taken.`,
+        409
+      );
     }
 
     return trimmed;
+  }
+
+  /**
+   * On Windows `Sales` and `sales` would share one profile folder, because
+   * NTFS names are case-insensitive, so there an id taken in any case is taken.
+   */
+  private async isProfileIdTaken(id: string): Promise<boolean> {
+    if (await this.db.getProfile(id)) {
+      return true;
+    }
+
+    if (process.platform !== "win32") {
+      return false;
+    }
+
+    const lowered = id.toLowerCase();
+
+    return (await this.db.listProfiles()).some(
+      (profile) => profile.id.toLowerCase() === lowered
+    );
   }
 
   private async requireProfile(
@@ -1144,6 +1437,7 @@ export class ProfileService {
     const soulStack = await resolveSoulStackForProfile(orgId, profile.id);
 
     return {
+      acpAgent: profile.acpAgent ?? null,
       automationsEnabled: profile.automationsEnabled !== false,
       createdAt: profile.createdAt,
       hasAvatar: await hasProfileAvatar(orgId, profile.id),
@@ -1198,6 +1492,7 @@ async function enrichToolParameters(
     } satisfies StoredToolRecord);
 
   const loaded = await handler.load(source);
+
   if (!loaded?.parameters) {
     return detail;
   }
@@ -1214,8 +1509,6 @@ function toToolDetail(record: StoredToolRecord): ToolDetail {
   };
 }
 
-export type { ProfileDetail };
-
 function readToolHandlerType(handlerType: string | undefined): CustomToolType {
   if (handlerType === undefined) {
     return "javascript";
@@ -1230,54 +1523,81 @@ function readToolHandlerType(handlerType: string | undefined): CustomToolType {
   );
 }
 
+interface ParsedCustomToolHandlerConfig {
+  env?: ReturnType<typeof parseToolEnvDeclarations>;
+  modulePath: string;
+  parameters?: JsonSchema;
+  requiresApiKey?: boolean;
+}
+
+function isJsonSchema<T>(value: T): value is T & JsonSchema {
+  return value instanceof Object && !Array.isArray(value);
+}
+
+interface RawCustomToolHandlerConfig {
+  env?: unknown;
+  modulePath?: unknown;
+  parameters?: unknown;
+  requiresApiKey?: unknown;
+}
+
+function isRawCustomToolHandlerConfig(
+  value: unknown
+): value is RawCustomToolHandlerConfig {
+  return value instanceof Object && !Array.isArray(value);
+}
+
 function readCustomToolHandlerConfig(
   handlerType: CustomToolType,
-  handlerConfig: unknown
-): { modulePath: string; parameters?: JsonSchema; requiresApiKey?: boolean } {
+  handlerConfig: RawCustomToolHandlerConfig
+) {
   const { extension } = CUSTOM_TOOL_HANDLERS[handlerType];
 
-  if (typeof handlerConfig !== "object" || handlerConfig === null) {
+  const modulePath = handlerConfig.modulePath;
+
+  if (!(isString(modulePath) && modulePath.trim().endsWith(extension))) {
     throw new Error(
       `Custom tools require handlerConfig.modulePath ending in "${extension}".`
     );
   }
 
-  const config = handlerConfig as Record<string, unknown>;
-  const modulePath = config.modulePath;
+  const parameters = handlerConfig.parameters;
+  const requiresApiKey = handlerConfig.requiresApiKey;
 
   if (
-    typeof modulePath !== "string" ||
-    !modulePath.trim().endsWith(extension)
-  ) {
-    throw new Error(
-      `Custom tools require handlerConfig.modulePath ending in "${extension}".`
-    );
-  }
-
-  const parameters = config.parameters;
-  if (
-    config.requiresApiKey !== undefined &&
-    typeof config.requiresApiKey !== "boolean"
+    requiresApiKey !== undefined &&
+    Object.prototype.toString.call(requiresApiKey) !== "[object Boolean]"
   ) {
     throw new Error("handlerConfig.requiresApiKey must be a boolean.");
   }
 
-  if (
-    parameters !== undefined &&
-    (typeof parameters !== "object" ||
-      parameters === null ||
-      Array.isArray(parameters))
-  ) {
+  if (parameters !== undefined && !isJsonSchema(parameters)) {
     throw new Error(
       "handlerConfig.parameters must be a JSON schema object when provided."
     );
   }
 
-  return {
+  const rawEnv = z.array(z.json()).optional().parse(handlerConfig.env);
+
+  const env = parseToolEnvDeclarations(rawEnv);
+
+  const result: ParsedCustomToolHandlerConfig = {
     modulePath: modulePath.trim(),
-    ...(config.requiresApiKey === true ? { requiresApiKey: true } : {}),
-    ...(parameters === undefined ? {} : { parameters }),
   };
+
+  if (env.length > 0) {
+    result.env = env;
+  }
+
+  if (requiresApiKey === true) {
+    result.requiresApiKey = true;
+  }
+
+  if (parameters !== undefined) {
+    result.parameters = parameters;
+  }
+
+  return result;
 }
 
 async function writeGeneratedSoulFiles(
@@ -1318,14 +1638,34 @@ async function writeSoulFileEntries(
       continue;
     }
 
-    if (typeof content !== "string") {
+    if (!isString(content)) {
       throw new Error(`Soul file content must be a string: ${fileName}`);
     }
 
     await writeSoulFile(
       soulDir,
+      // SAFETY: The key was checked against SOUL_FILE_KEY_BY_NAME above.
       SOUL_FILE_KEY_BY_NAME[fileName as keyof typeof SOUL_FILE_KEY_BY_NAME],
       content
+    );
+  }
+}
+
+const ACP_AGENT_MAX_ARGS = 32;
+
+function validateAcpAgent(agent: AcpAgentConfig | null | undefined): void {
+  if (!agent) {
+    return;
+  }
+
+  if (!agent.command.trim()) {
+    throw new NakamaApiError("ACP agent command is required.", 400);
+  }
+
+  if (agent.args.length > ACP_AGENT_MAX_ARGS) {
+    throw new NakamaApiError(
+      `ACP agent takes at most ${ACP_AGENT_MAX_ARGS} arguments.`,
+      400
     );
   }
 }
@@ -1345,8 +1685,12 @@ function validateGeneratedSoulFiles(
       throw new Error(`Unsupported soul file: ${key}`);
     }
 
-    if (typeof value !== "string") {
+    if (!isString(value)) {
       throw new Error(`Soul file content must be a string: ${key}`);
     }
   }
+}
+
+function isString<T>(value: T): value is T & string {
+  return Object.prototype.toString.call(value) === "[object String]";
 }

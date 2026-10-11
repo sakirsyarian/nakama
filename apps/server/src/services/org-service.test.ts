@@ -1,16 +1,26 @@
 import { describe, expect, test } from "bun:test";
-import { access, mkdir, readFile, writeFile } from "node:fs/promises";
+import { access, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
   type EmailOutboundAdapter,
   getOrgConfigDir,
   getProfileSoulDir,
+  getUserConfigDir,
+  getUserConfigPath,
   NakamaApiError,
+  type ToolSetupPlan,
+  writeParsedConfigIni,
 } from "@nakama/core";
 import { LOCAL_CLIENT_USER_ID } from "@nakama/core/local-auth";
 import { createInMemoryDatabaseAdapter } from "@nakama/db";
 import { setupTestConfigDir } from "../test-config-dir";
 import { AuthService } from "./auth-service";
+import {
+  loadToolApiKey,
+  loadToolSetup,
+  saveToolApiKey,
+  saveToolSetup,
+} from "./custom-tool-shared";
 import { OrgService } from "./org-service";
 
 setupTestConfigDir("nakama-org-service-test-");
@@ -21,6 +31,7 @@ function createOrgService(
 ) {
   const databaseAdapter = createInMemoryDatabaseAdapter();
   const authService = new AuthService();
+
   return {
     authService,
     databaseAdapter,
@@ -59,15 +70,18 @@ describe("OrgService", () => {
     const profiles = await databaseAdapter.listProfilesForOrg(
       bootstrapped.organization.id
     );
+
     expect(profiles.some((profile) => profile.isDefault)).toBe(true);
     expect(profiles.some((profile) => profile.isSuper)).toBe(true);
 
     const defaultProfile = profiles.find((profile) => profile.isDefault);
     expect(defaultProfile).toBeTruthy();
+
     const soulPath = join(
       getProfileSoulDir(bootstrapped.organization.id, defaultProfile!.id),
       "SOUL.md"
     );
+
     const soulContent = await readFile(soulPath, "utf8");
     expect(soulContent).not.toContain("# Your Name");
   });
@@ -117,11 +131,13 @@ describe("OrgService", () => {
       orgId: second.organization.id,
       userId: bootstrapped.user.id,
     });
+
     expect(switched.slug).toBe("beta-switch");
   });
 
   test("updates organization monthly LLM turn limit", async () => {
     const { orgService } = createOrgService();
+
     const created = await orgService.createOrganization({
       name: "Acme Corp",
       slug: "acme-usage-limit",
@@ -140,6 +156,60 @@ describe("OrgService", () => {
         monthlyLlmTurnLimit: -1,
       })
     ).rejects.toMatchObject({ status: 400 });
+  });
+
+  test("stores normalized allowed invite domains for an organization", async () => {
+    const { databaseAdapter, orgService } = createOrgService();
+
+    const created = await orgService.createOrganization({
+      name: "Acme",
+      slug: "acme-invite-domains",
+    });
+
+    const updated = await orgService.updateOrganization(
+      created.organization.id,
+      { allowedInviteDomains: [" Acme.COM ", "partner.example", "acme.com"] }
+    );
+
+    expect(updated.allowedInviteDomains).toEqual([
+      "acme.com",
+      "partner.example",
+    ]);
+    expect(
+      (await databaseAdapter.getOrganizationById(created.organization.id))
+        ?.allowedInviteDomains
+    ).toEqual(["acme.com", "partner.example"]);
+  });
+
+  test("rejects malformed invite-domain settings without replacing the policy", async () => {
+    const { databaseAdapter, orgService } = createOrgService();
+
+    const created = await orgService.createOrganization({
+      name: "Acme",
+      slug: "acme-invalid-invite-domains",
+    });
+
+    await orgService.updateOrganization(created.organization.id, {
+      allowedInviteDomains: ["acme.com"],
+    });
+
+    for (const allowedInviteDomains of [
+      ["*.acme.com"],
+      [""],
+      // SAFETY: This deliberately wrong input tests runtime validation.
+      "acme.com" as string[],
+    ]) {
+      await expect(
+        orgService.updateOrganization(created.organization.id, {
+          allowedInviteDomains,
+        })
+      ).rejects.toMatchObject({ status: 400 });
+    }
+
+    expect(
+      (await databaseAdapter.getOrganizationById(created.organization.id))
+        ?.allowedInviteDomains
+    ).toEqual(["acme.com"]);
   });
 
   test("updates organization consolidate flag", async () => {
@@ -164,6 +234,7 @@ describe("OrgService", () => {
 
   test("persists validated skill curator freshness clocks", async () => {
     const { orgService } = createOrgService();
+
     const created = await orgService.createOrganization({
       name: "Acme Corp",
       slug: "acme-freshness-clocks",
@@ -196,6 +267,7 @@ describe("OrgService", () => {
         skillsCuratorStaleAfterDays: 7,
       }
     );
+
     expect(updated.skillsCuratorStaleAfterDays).toBe(7);
     expect(updated.skillsCuratorArchiveAfterDays).toBe(21);
   });
@@ -241,6 +313,7 @@ describe("OrgService", () => {
     const profiles = await databaseAdapter.listProfilesForOrg(
       created.organization.id
     );
+
     expect(
       profiles.some(
         (profile) => profile.isSuper && profile.name === "Super Bot"
@@ -270,6 +343,7 @@ describe("OrgService", () => {
 
   test("adds a member with a generated temporary password", async () => {
     const { orgService } = createOrgService();
+
     const created = await orgService.createOrganization({
       name: "Acme",
       slug: "acme",
@@ -289,6 +363,7 @@ describe("OrgService", () => {
 
   test("adds a member without phone", async () => {
     const { orgService } = createOrgService();
+
     const created = await orgService.createOrganization({
       name: "Acme",
       slug: "acme-no-member-phone",
@@ -309,6 +384,7 @@ describe("OrgService", () => {
 
   test("rejects member names with control characters", async () => {
     const { orgService } = createOrgService();
+
     const created = await orgService.createOrganization({
       name: "Acme",
       slug: "acme-member-control-chars",
@@ -327,6 +403,7 @@ describe("OrgService", () => {
 
   test("rejects member names longer than 120 characters", async () => {
     const { orgService } = createOrgService();
+
     const created = await orgService.createOrganization({
       name: "Acme",
       slug: "acme-member-name-too-long",
@@ -345,6 +422,7 @@ describe("OrgService", () => {
 
   test("rejects empty member names", async () => {
     const { orgService } = createOrgService();
+
     const created = await orgService.createOrganization({
       name: "Acme",
       slug: "acme-empty-member-name",
@@ -363,6 +441,7 @@ describe("OrgService", () => {
 
   test("allows changing password after provisioning", async () => {
     const { orgService } = createOrgService();
+
     const created = await orgService.createOrganization({
       admin: {
         email: "admin@acme.com",
@@ -396,6 +475,7 @@ describe("OrgService", () => {
 
   test("revokes all browser sessions when password changes", async () => {
     const { orgService, databaseAdapter } = createOrgService();
+
     const created = await orgService.createOrganization({
       admin: {
         email: "admin@acme.com",
@@ -439,6 +519,7 @@ describe("OrgService", () => {
 
     const sessionA =
       await databaseAdapter.getBrowserSessionBySessionTokenHash("hash_a");
+
     const sessionB =
       await databaseAdapter.getBrowserSessionBySessionTokenHash("hash_b");
 
@@ -448,6 +529,7 @@ describe("OrgService", () => {
 
   test("updates own profile email phone and name", async () => {
     const { orgService } = createOrgService();
+
     const created = await orgService.createOrganization({
       admin: {
         email: "admin@acme.com",
@@ -459,6 +541,7 @@ describe("OrgService", () => {
     });
 
     const userId = created.adminMember!.member.userId;
+
     const updated = await orgService.updateOwnProfile(userId, {
       currentPassword: created.adminMember!.temporaryPassword!,
       email: "updated@acme.com",
@@ -474,16 +557,19 @@ describe("OrgService", () => {
     const profileOnly = await orgService.updateOwnProfile(userId, {
       name: "Renamed Admin",
     });
+
     expect(profileOnly.name).toBe("Renamed Admin");
   });
 
   test("requires the current password before changing email", async () => {
     const { databaseAdapter, orgService } = createOrgService();
+
     const created = await orgService.createOrganization({
       admin: { email: "admin@acme.com", name: "Acme Admin" },
       name: "Acme",
       slug: "acme-email-reauth",
     });
+
     const userId = created.adminMember!.member.userId;
 
     await expect(
@@ -530,6 +616,7 @@ describe("OrgService", () => {
       name: "Acme",
       slug: "acme",
     });
+
     const invite = await orgService.createInvite({
       email: "legacy@acme.com",
       invitedByUserId: "user_platform",
@@ -547,17 +634,101 @@ describe("OrgService", () => {
     expect(accepted.role).toBe("member");
   });
 
+  test("only creates invites for allowed email domains", async () => {
+    const sent: string[] = [];
+
+    const { databaseAdapter, orgService } = createOrgService({
+      send: async (input) => {
+        sent.push(input.to);
+
+        return { ok: true };
+      },
+    });
+
+    const created = await orgService.createOrganization({
+      name: "Acme",
+      slug: "acme-invite-restriction",
+    });
+
+    await orgService.updateOrganization(created.organization.id, {
+      allowedInviteDomains: ["acme.com"],
+    });
+
+    await expect(
+      orgService.createInvite({
+        email: "guest@other.com",
+        invitedByUserId: "user_platform",
+        orgId: created.organization.id,
+        role: "member",
+      })
+    ).rejects.toMatchObject({ status: 400 });
+    expect(
+      await databaseAdapter.getPendingOrgInvite(
+        created.organization.id,
+        "guest@other.com"
+      )
+    ).toBeNull();
+    expect(sent).toEqual([]);
+
+    const allowed = await orgService.createInvite({
+      email: "guest@ACME.COM",
+      invitedByUserId: "user_platform",
+      orgId: created.organization.id,
+      role: "member",
+    });
+
+    expect(allowed.invite.email).toBe("guest@acme.com");
+    expect(sent).toEqual(["guest@acme.com"]);
+  });
+
+  test("rejects an existing invite if the allowed domains change before acceptance", async () => {
+    const { databaseAdapter, orgService } = createOrgService();
+
+    const created = await orgService.createOrganization({
+      name: "Acme",
+      slug: "acme-invite-policy-change",
+    });
+
+    const invite = await orgService.createInvite({
+      email: "guest@other.com",
+      invitedByUserId: "user_platform",
+      orgId: created.organization.id,
+      role: "member",
+    });
+
+    await orgService.updateOrganization(created.organization.id, {
+      allowedInviteDomains: ["acme.com"],
+    });
+
+    await expect(
+      orgService.acceptInvite({
+        password: "secret123",
+        token: invite.token!,
+      })
+    ).rejects.toMatchObject({ status: 400 });
+    expect(await databaseAdapter.getUserByEmail("guest@other.com")).toBeNull();
+    expect(
+      await databaseAdapter.getPendingOrgInvite(
+        created.organization.id,
+        "guest@other.com"
+      )
+    ).not.toBeNull();
+  });
+
   test("emails an invite link without returning its raw token", async () => {
     const sent: Array<{ subject: string; text: string; to: string }> = [];
+
     const { orgService } = createOrgService(
       {
         send: async (input) => {
           sent.push(input);
+
           return { ok: true };
         },
       },
       () => "https://nakama.example.com"
     );
+
     const created = await orgService.createOrganization({
       name: "Acme",
       slug: "acme-email-invite",
@@ -585,6 +756,7 @@ describe("OrgService", () => {
     const { orgService } = createOrgService({
       send: async () => ({ error: "SMTP unavailable", ok: false }),
     });
+
     const created = await orgService.createOrganization({
       name: "Acme",
       slug: "acme-manual-invite",
@@ -603,15 +775,18 @@ describe("OrgService", () => {
 
   test("emails a password reset link without returning its raw token", async () => {
     const sent: Array<{ subject: string; text: string; to: string }> = [];
+
     const { orgService, authService } = createOrgService(
       {
         send: async (input) => {
           sent.push(input);
+
           return { ok: true };
         },
       },
       () => "https://nakama.example.com"
     );
+
     await orgService.bootstrapInitialSetup({
       admin: {
         email: "admin@acme.com",
@@ -637,6 +812,7 @@ describe("OrgService", () => {
     const { orgService, authService, databaseAdapter } = createOrgService({
       send: async () => ({ error: "SMTP unavailable", ok: false }),
     });
+
     const bootstrapped = await orgService.bootstrapInitialSetup({
       admin: {
         email: "admin@acme.com",
@@ -646,6 +822,7 @@ describe("OrgService", () => {
       },
       organization: { name: "Acme", slug: "acme-reset-once" },
     });
+
     const now = new Date().toISOString();
     await databaseAdapter.createBrowserSession({
       activeOrgId: bootstrapped.organization.id,
@@ -663,10 +840,12 @@ describe("OrgService", () => {
       "admin@acme.com",
       true
     );
+
     const requested = await orgService.requestPasswordReset(
       "admin@acme.com",
       true
     );
+
     expect(requested.delivered).toBe(false);
     expect(requested.token).toStartWith("tc_reset_");
 
@@ -682,8 +861,10 @@ describe("OrgService", () => {
         updated!.passwordHash
       )
     ).toBe(true);
+
     const session =
       await databaseAdapter.getBrowserSessionBySessionTokenHash("session_hash");
+
     expect(session?.revokedAt).not.toBeNull();
     await expect(
       orgService.resetPassword({
@@ -701,6 +882,7 @@ describe("OrgService", () => {
 
   test("rejects expired password reset tokens", async () => {
     const { orgService, authService, databaseAdapter } = createOrgService();
+
     const bootstrapped = await orgService.bootstrapInitialSetup({
       admin: {
         email: "admin@acme.com",
@@ -710,6 +892,7 @@ describe("OrgService", () => {
       },
       organization: { name: "Acme", slug: "acme-reset-expired" },
     });
+
     const token = "tc_reset_expired";
     const now = new Date().toISOString();
     await databaseAdapter.createPasswordResetToken({
@@ -728,9 +911,11 @@ describe("OrgService", () => {
 
   test("does not reveal an unknown password reset address", async () => {
     let sends = 0;
+
     const { orgService } = createOrgService({
       send: async () => {
         sends += 1;
+
         return { ok: true };
       },
     });
@@ -746,6 +931,7 @@ describe("OrgService", () => {
     const { orgService, authService } = createOrgService({
       send: async () => ({ error: "SMTP unavailable", ok: false }),
     });
+
     await orgService.bootstrapInitialSetup({
       admin: {
         email: "admin@acme.com",
@@ -764,12 +950,15 @@ describe("OrgService", () => {
 
   test("returns a public reset response without waiting for SMTP", async () => {
     let finishDelivery: (result: { ok: boolean }) => void = () => undefined;
+
     const delivery = new Promise<{ ok: boolean }>((resolve) => {
       finishDelivery = resolve;
     });
+
     const { orgService, authService } = createOrgService({
       send: () => delivery,
     });
+
     await orgService.bootstrapInitialSetup({
       admin: {
         email: "admin@acme.com",
@@ -781,10 +970,12 @@ describe("OrgService", () => {
     });
 
     const response = orgService.requestPasswordReset("admin@acme.com");
+
     const settled = await Promise.race([
       response,
       Bun.sleep(100).then(() => null),
     ]);
+
     finishDelivery({ ok: true });
 
     expect(settled).toEqual({ delivered: true, token: null });
@@ -834,6 +1025,7 @@ describe("OrgService", () => {
 
   test("lists, updates, and removes members", async () => {
     const { orgService } = createOrgService();
+
     const created = await orgService.createOrganization({
       admin: {
         email: "admin@acme.com",
@@ -868,6 +1060,7 @@ describe("OrgService", () => {
         role: "member",
       }
     );
+
     expect(updated.member.name).toBe("Viewer Prime");
     expect(updated.member.phone).toBe("+628222333444");
     expect(updated.member.role).toBe("member");
@@ -882,6 +1075,7 @@ describe("OrgService", () => {
 
   test("protects the last org admin from removal or demotion", async () => {
     const { orgService } = createOrgService();
+
     const created = await orgService.createOrganization({
       admin: {
         email: "admin@acme.com",
@@ -918,6 +1112,7 @@ describe("OrgService", () => {
 
   test("protects the last org admin from removal or demotion when the other admin is disabled", async () => {
     const { orgService } = createOrgService();
+
     const created = await orgService.createOrganization({
       admin: {
         email: "admin@acme.com",
@@ -954,6 +1149,7 @@ describe("OrgService", () => {
 
   test("removeMember rejects bad userId shape before membership lookup", async () => {
     const { orgService } = createOrgService();
+
     const created = await orgService.createOrganization({
       admin: {
         email: "admin@acme.com",
@@ -981,6 +1177,7 @@ describe("OrgService", () => {
 
   test("removeMember 404s the same for unknown userId and user not in org", async () => {
     const { orgService, databaseAdapter, authService } = createOrgService();
+
     const created = await orgService.createOrganization({
       admin: {
         email: "admin@acme.com",
@@ -1022,6 +1219,7 @@ describe("OrgService", () => {
 
   test("archives an org and hides it from membership lists", async () => {
     const { orgService, authService, databaseAdapter } = createOrgService();
+
     const bootstrapped = await orgService.bootstrapInitialSetup({
       admin: {
         email: "admin@acme.com",
@@ -1031,6 +1229,7 @@ describe("OrgService", () => {
       },
       organization: { name: "Acme", slug: "acme-archive" },
     });
+
     const second = await orgService.createOrganization(
       { name: "Beta", slug: "beta-archive" },
       bootstrapped.user.id
@@ -1048,6 +1247,7 @@ describe("OrgService", () => {
     const stored = await databaseAdapter.getOrganizationById(
       bootstrapped.organization.id
     );
+
     expect(stored?.archivedAt).toBeTruthy();
 
     await expect(
@@ -1062,11 +1262,13 @@ describe("OrgService", () => {
       undefined,
       bootstrapped.organization.id
     );
+
     expect(resolved).toBe(second.organization.id);
   });
 
   test("permanently deletes an archived org and its files", async () => {
     const { orgService, authService, databaseAdapter } = createOrgService();
+
     const bootstrapped = await orgService.bootstrapInitialSetup({
       admin: {
         email: "admin@acme.com",
@@ -1076,16 +1278,37 @@ describe("OrgService", () => {
       },
       organization: { name: "Acme", slug: "acme-permanent-delete" },
     });
+
     const kept = await orgService.createOrganization(
       { name: "Beta", slug: "beta-permanent-delete" },
       bootstrapped.user.id
     );
+
     const orgDir = getOrgConfigDir(bootstrapped.organization.id);
     await mkdir(orgDir, { recursive: true });
     await writeFile(join(orgDir, "private-data.txt"), "private data");
+
+    const retiredDir = join(
+      getUserConfigDir(),
+      "retired-app-users",
+      bootstrapped.organization.id
+    );
+
+    const keptRetired = join(
+      getUserConfigDir(),
+      "retired-app-users",
+      kept.organization.id
+    );
+
+    await mkdir(retiredDir, { recursive: true });
+    await mkdir(keptRetired, { recursive: true });
+    await writeFile(join(retiredDir, "private.txt"), "retired data");
+    await writeFile(join(keptRetired, "private.txt"), "kept data");
+
     const deletedProfile = (
       await databaseAdapter.listProfilesForOrg(bootstrapped.organization.id)
     )[0]!;
+
     await databaseAdapter.createBrowserSession({
       activeOrgId: bootstrapped.organization.id,
       createdAt: new Date().toISOString(),
@@ -1125,14 +1348,126 @@ describe("OrgService", () => {
       )
     ).toMatchObject({ activeOrgId: null });
     await expect(access(orgDir)).rejects.toThrow();
+    await expect(access(retiredDir)).rejects.toThrow();
+    expect(await readFile(join(keptRetired, "private.txt"), "utf8")).toBe(
+      "kept data"
+    );
+  });
+
+  test("permanent deletion removes tool secrets from the global config", async () => {
+    const { orgService, authService } = createOrgService();
+
+    const bootstrapped = await orgService.bootstrapInitialSetup({
+      admin: {
+        email: "admin@acme.com",
+        name: "Acme Admin",
+        passwordHash: await authService.hashPassword("password123"),
+        phone: "",
+      },
+      organization: { name: "Acme", slug: "acme-tool-secret-delete" },
+    });
+
+    const kept = await orgService.createOrganization(
+      { name: "Beta", slug: "beta-tool-secret-delete" },
+      bootstrapped.user.id
+    );
+
+    // Unrelated sections share the file; the purge must leave them alone.
+    await writeParsedConfigIni(
+      { web_public_url: "https://acme.example.com" },
+      {
+        "provider.keep-me": {
+          api_key: "sk-keep-provider",
+          label: "Keep",
+          type: "openai",
+        },
+        "tool-key.not-an-encoded-section": { api_key: "sk-foreign-shape" },
+      }
+    );
+
+    const deletedPlan: ToolSetupPlan = {
+      description: "Connect the Acme tool",
+      id: "setup_deleted_org",
+      name: "Acme tool",
+      plan: "paste the api key",
+      requiresApiKey: true,
+      sessionId: "session_deleted_org",
+      status: "pending",
+    };
+
+    await saveToolApiKey(
+      bootstrapped.organization.id,
+      "tool_deleted_org",
+      "sk-deleted-org-secret"
+    );
+    await saveToolSetup(bootstrapped.organization.id, deletedPlan);
+    await saveToolApiKey(
+      kept.organization.id,
+      "tool_kept_org",
+      "sk-kept-org-secret"
+    );
+    await saveToolSetup(kept.organization.id, {
+      ...deletedPlan,
+      id: "setup_kept_org",
+      name: "Beta tool",
+      sessionId: "session_kept_org",
+    });
+
+    await orgService.archiveOrganization(
+      bootstrapped.organization.id,
+      bootstrapped.user.id
+    );
+    await orgService.permanentlyDeleteOrganization(
+      bootstrapped.organization.id
+    );
+
+    expect(
+      await loadToolApiKey(bootstrapped.organization.id, "tool_deleted_org")
+    ).toBeUndefined();
+    await expect(
+      loadToolSetup(bootstrapped.organization.id, "setup_deleted_org")
+    ).rejects.toMatchObject({ status: 404 });
+
+    const raw = await readFile(getUserConfigPath(), "utf8");
+    expect(raw).not.toContain("sk-deleted-org-secret");
+    expect(raw).toContain("sk-keep-provider");
+    expect(raw).toContain("sk-foreign-shape");
+    expect(raw).toContain("web_public_url=https://acme.example.com");
+    expect(await loadToolApiKey(kept.organization.id, "tool_kept_org")).toBe(
+      "sk-kept-org-secret"
+    );
+    expect(
+      (await loadToolSetup(kept.organization.id, "setup_kept_org")).id
+    ).toBe("setup_kept_org");
+
+    // Retention: the purge rewrites in place and keeps no shadow copy of the
+    // secret anywhere under the config directory.
+    const files = await readdir(getUserConfigDir(), {
+      encoding: "utf8",
+      recursive: true,
+    });
+
+    for (const file of files) {
+      let content: string;
+
+      try {
+        content = await readFile(join(getUserConfigDir(), file), "utf8");
+      } catch {
+        continue;
+      }
+
+      expect(content).not.toContain("sk-deleted-org-secret");
+    }
   });
 
   test("refuses to permanently delete an active org", async () => {
     const { orgService, databaseAdapter } = createOrgService();
+
     const created = await orgService.createOrganization({
       name: "Acme",
       slug: "acme-active-delete",
     });
+
     const orgDir = getOrgConfigDir(created.organization.id);
 
     await expect(
@@ -1147,6 +1482,7 @@ describe("OrgService", () => {
 
   test("clears a stale session org when the user has no remaining memberships", async () => {
     const { orgService, authService, databaseAdapter } = createOrgService();
+
     const bootstrapped = await orgService.bootstrapInitialSetup({
       admin: {
         email: "admin@acme.com",
@@ -1156,6 +1492,7 @@ describe("OrgService", () => {
       },
       organization: { name: "Acme", slug: "acme-session-clear" },
     });
+
     await databaseAdapter.createBrowserSession({
       activeOrgId: bootstrapped.organization.id,
       createdAt: new Date().toISOString(),
@@ -1179,15 +1516,18 @@ describe("OrgService", () => {
       "session_stale",
       bootstrapped.organization.id
     );
+
     expect(resolved).toBeNull();
 
     const session =
       await databaseAdapter.getBrowserSessionBySessionTokenHash("token_stale");
+
     expect(session?.activeOrgId).toBeNull();
   });
 
   test("refuses to archive the actor's last remaining membership", async () => {
     const { orgService, authService } = createOrgService();
+
     const bootstrapped = await orgService.bootstrapInitialSetup({
       admin: {
         email: "admin@acme.com",
@@ -1197,6 +1537,7 @@ describe("OrgService", () => {
       },
       organization: { name: "Acme", slug: "acme-last-membership" },
     });
+
     await orgService.createOrganization({
       name: "Other",
       slug: "other-last-membership",
@@ -1212,6 +1553,7 @@ describe("OrgService", () => {
 
   test("refuses updates on an archived org", async () => {
     const { orgService, authService } = createOrgService();
+
     const bootstrapped = await orgService.bootstrapInitialSetup({
       admin: {
         email: "admin@acme.com",
@@ -1221,6 +1563,7 @@ describe("OrgService", () => {
       },
       organization: { name: "Acme", slug: "acme-update-archive" },
     });
+
     await orgService.createOrganization(
       { name: "Beta", slug: "beta-update-archive" },
       bootstrapped.user.id
@@ -1239,6 +1582,7 @@ describe("OrgService", () => {
 
   test("refuses to archive the last active org", async () => {
     const { orgService } = createOrgService();
+
     const created = await orgService.createOrganization({
       name: "Only",
       slug: "only-org",
@@ -1255,6 +1599,7 @@ describe("OrgService", () => {
 
   test("refuses a second archive and unknown id", async () => {
     const { orgService, authService } = createOrgService();
+
     const bootstrapped = await orgService.bootstrapInitialSetup({
       admin: {
         email: "admin@acme.com",
@@ -1264,6 +1609,7 @@ describe("OrgService", () => {
       },
       organization: { name: "Acme", slug: "acme-twice" },
     });
+
     await orgService.createOrganization(
       { name: "Beta", slug: "beta-twice" },
       bootstrapped.user.id
@@ -1286,6 +1632,7 @@ describe("OrgService", () => {
 
   test("rejects invite accept for an archived org", async () => {
     const { orgService, authService } = createOrgService();
+
     const bootstrapped = await orgService.bootstrapInitialSetup({
       admin: {
         email: "admin@acme.com",
@@ -1295,16 +1642,19 @@ describe("OrgService", () => {
       },
       organization: { name: "Acme", slug: "acme-invite-archive" },
     });
+
     await orgService.createOrganization(
       { name: "Beta", slug: "beta-invite-archive" },
       bootstrapped.user.id
     );
+
     const invite = await orgService.createInvite({
       email: "guest@acme.com",
       invitedByUserId: bootstrapped.user.id,
       orgId: bootstrapped.organization.id,
       role: "member",
     });
+
     await orgService.archiveOrganization(
       bootstrapped.organization.id,
       bootstrapped.user.id
@@ -1317,6 +1667,7 @@ describe("OrgService", () => {
 
   test("rejects member mutators on an archived org and allows them on an active org", async () => {
     const { orgService, authService } = createOrgService();
+
     const bootstrapped = await orgService.bootstrapInitialSetup({
       admin: {
         email: "admin@acme.com",
@@ -1326,10 +1677,12 @@ describe("OrgService", () => {
       },
       organization: { name: "Acme", slug: "acme-member-archive" },
     });
+
     const active = await orgService.createOrganization(
       { name: "Beta", slug: "beta-member-archive" },
       bootstrapped.user.id
     );
+
     await orgService.archiveOrganization(
       bootstrapped.organization.id,
       bootstrapped.user.id
@@ -1352,11 +1705,13 @@ describe("OrgService", () => {
       phone: "",
       role: "member",
     });
+
     const updated = await orgService.updateMember(
       active.organization.id,
       added.member.userId,
       { role: "viewer" }
     );
+
     expect(updated.member.role).toBe("viewer");
     await orgService.removeMember(active.organization.id, added.member.userId);
     const listed = await orgService.listMembers(active.organization.id);

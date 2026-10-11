@@ -3,6 +3,7 @@ import {
   copyFile,
   mkdir,
   mkdtemp,
+  readdir,
   readFile,
   realpath,
   rm,
@@ -11,10 +12,9 @@ import {
 } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { readArtifactFile } from "../artifacts";
 import { convertDocxToMarkdown } from "../docx-text";
 import { getGlobalSkillsDir } from "../skills/paths";
-import { ensureAppUserSoulDir, getProfileSoulDir } from "../soul/resolve";
+import { getProfileSoulDir } from "../soul/resolve";
 import {
   PathGuardError,
   runDeleteFile,
@@ -27,6 +27,7 @@ import {
 import { buildToolExecutionContext } from "./context";
 
 const PROFILE_CONTEXT = { orgId: "org_test", profileId: "profile_test" };
+
 const originalConfigDir = process.env.NAKAMA_CONFIG_DIR;
 
 describe("file builtin tools", () => {
@@ -38,15 +39,18 @@ describe("file builtin tools", () => {
       await rm(tempDir, { force: true, recursive: true });
       tempDir = "";
     }
+
     if (configDir) {
       await rm(configDir, { force: true, recursive: true });
       configDir = "";
     }
+
     if (originalConfigDir === undefined) {
       delete process.env.NAKAMA_CONFIG_DIR;
     } else {
       process.env.NAKAMA_CONFIG_DIR = originalConfigDir;
     }
+
     setDefaultFileGuardOptions({});
   });
 
@@ -68,6 +72,7 @@ describe("file builtin tools", () => {
   test("write_file preserves indentation and boundary whitespace", async () => {
     tempDir = await mkdtemp(path.join(os.tmpdir(), "nakama-write-"));
     const content = "    caf\u00e9\r\n    second line\r\n\r\n";
+
     const result = await runWriteFile(
       { content, path: "snippet.md" },
       PROFILE_CONTEXT,
@@ -89,6 +94,7 @@ describe("file builtin tools", () => {
 
   test("write_file resolves relative paths from profile workspace", async () => {
     tempDir = await mkdtemp(path.join(os.tmpdir(), "nakama-write-"));
+
     const result = await runWriteFile(
       { content: "relative", path: "notes.txt" },
       PROFILE_CONTEXT,
@@ -168,6 +174,7 @@ describe("file builtin tools", () => {
     await mkdir(toolsDir, { recursive: true });
 
     const targetPath = path.join(toolsDir, "echo.js");
+
     const result = await runWriteFile(
       {
         content: "export async function run() { return null; }",
@@ -511,11 +518,13 @@ describe("file builtin tools", () => {
       tempDir = await mkdtemp(path.join(os.tmpdir(), "nakama-read-image-"));
       const bytes = Buffer.from(hex, "hex");
       await writeFile(path.join(tempDir, "image.bin"), bytes);
+
       const result = await runReadFile(
         { limit: 1, offset: 100, path: "image.bin" },
         PROFILE_CONTEXT,
         { workspaceRoot: tempDir }
       );
+
       expect(result.images).toEqual([
         { data: bytes.toString("base64"), mediaType },
       ]);
@@ -596,6 +605,7 @@ describe("file builtin tools", () => {
       "nested\n",
       "utf8"
     );
+
     const context = {
       ...PROFILE_CONTEXT,
       forbidProfileSkillMarkdownWrites: true,
@@ -731,6 +741,42 @@ describe("file builtin tools", () => {
     ).toBe("index");
   });
 
+  test.skipIf(process.platform !== "win32")(
+    "forbidMemoryWrites refuses memory file names in any casing on Windows",
+    async () => {
+      tempDir = await mkdtemp(path.join(os.tmpdir(), "nakama-cognito-case-"));
+      const context = { ...PROFILE_CONTEXT, forbidMemoryWrites: true };
+
+      // MEMORY.md does not exist yet, so nothing canonicalises the caller's
+      // casing, and NTFS would create the one file memory is read from.
+      for (const target of [
+        "memory.md",
+        "Memory.MD",
+        "MEMORY-ARCHIVE/2026-09.md",
+        "memory-archive/2026-09.MD",
+      ]) {
+        await expect(
+          runWriteFile({ content: "learned", path: target }, context, {
+            workspaceRoot: tempDir,
+          })
+        ).rejects.toThrow(/cognito/i);
+      }
+
+      expect(await readdir(tempDir)).toEqual([]);
+
+      await runWriteFile(
+        { content: "mine", path: "notes/memory.md" },
+        context,
+        {
+          workspaceRoot: tempDir,
+        }
+      );
+      expect(
+        await readFile(path.join(tempDir, "notes", "memory.md"), "utf8")
+      ).toBe("mine");
+    }
+  );
+
   test("memory files stay writable when forbidMemoryWrites is unset", async () => {
     tempDir = await mkdtemp(path.join(os.tmpdir(), "nakama-cognito-off-"));
 
@@ -794,6 +840,52 @@ describe("file builtin tools", () => {
     ).rejects.toThrow(/tool\.js.*Phase 1/);
   });
 
+  test.skipIf(process.platform !== "win32")(
+    "file tools refuse NTFS stream names that alias protected files on Windows",
+    async () => {
+      tempDir = await mkdtemp(path.join(os.tmpdir(), "nakama-skill-tool-ads-"));
+      await mkdir(path.join(tempDir, "skills", "notes"), { recursive: true });
+
+      // NTFS writes `tool.js::$DATA` to tool.js itself, and `notes 10:30.md`
+      // to a hidden stream of a file named `notes 10`.
+      for (const target of [
+        "skills/notes/tool.js::$DATA",
+        "skills/notes/tool.ts::$DATA",
+        "notes 10:30.md",
+      ]) {
+        await expect(
+          runWriteFile(
+            { content: "export default {};", path: target },
+            PROFILE_CONTEXT,
+            { workspaceRoot: tempDir }
+          )
+        ).rejects.toMatchObject({ code: "SPECIAL_FILE" });
+      }
+
+      await expect(
+        runWriteFile(
+          { content: "learned", path: "MEMORY.md::$DATA" },
+          { ...PROFILE_CONTEXT, forbidMemoryWrites: true },
+          { workspaceRoot: tempDir }
+        )
+      ).rejects.toMatchObject({ code: "SPECIAL_FILE" });
+      expect(await readdir(path.join(tempDir, "skills", "notes"))).toEqual([]);
+      expect(await readdir(tempDir)).toEqual(["skills"]);
+
+      await runWriteFile(
+        { content: "plain", path: "skills/notes/helper.md" },
+        PROFILE_CONTEXT,
+        { workspaceRoot: tempDir }
+      );
+      expect(
+        await readFile(
+          path.join(tempDir, "skills", "notes", "helper.md"),
+          "utf8"
+        )
+      ).toBe("plain");
+    }
+  );
+
   test("write_docx produces a real Word archive that reads back as markdown", async () => {
     tempDir = await mkdtemp(path.join(os.tmpdir(), "nakama-docx-"));
     const targetPath = path.join(tempDir, "laporan.docx");
@@ -827,6 +919,7 @@ describe("file builtin tools", () => {
       PROFILE_CONTEXT,
       { workspaceRoot: tempDir }
     );
+
     const second = await runWriteDocx(
       { markdown: "# Kedua", path: "artifacts/laporan.docx" },
       PROFILE_CONTEXT,
@@ -946,6 +1039,7 @@ describe("file builtin tools", () => {
     const outsidePath = path.join(configDir, "private.txt");
     await writeFile(outsidePath, "private");
     await symlink(outsidePath, path.join(skillDir, "escape.md"));
+
     for (const target of [
       outsidePath,
       path.join(skillDir, "escape.md"),
@@ -1101,82 +1195,16 @@ describe("file builtin tools", () => {
       runReadFile({ path: "/etc/nakama-should-fail" }, PROFILE_CONTEXT, opts)
     ).rejects.toThrow(/relative path under the active profile workspace/i);
   });
-  test("an app user's artifacts are written under that user's folder", async () => {
-    configDir = await mkdtemp(path.join(os.tmpdir(), "nakama-appuser-"));
-    process.env.NAKAMA_CONFIG_DIR = configDir;
-    const appUserId = "app-user-42";
-    const userRoot = await ensureAppUserSoulDir(
-      PROFILE_CONTEXT.orgId,
-      PROFILE_CONTEXT.profileId,
-      appUserId
-    );
-    const context = buildToolExecutionContext({
-      ...PROFILE_CONTEXT,
-      workspaceRoot: userRoot,
-    });
-
-    const docx = await runWriteDocx(
-      { markdown: "# Draft", path: "artifacts/draft.docx" },
-      context
-    );
-    const text = await runWriteFile(
-      { content: "notes", path: "artifacts/notes.txt" },
-      context
-    );
-
-    expect(docx.path).toBe(
-      await realpath(path.join(userRoot, "artifacts", "draft.docx"))
-    );
-    expect(text.path).toBe(
-      await realpath(path.join(userRoot, "artifacts", "notes.txt"))
-    );
-    // The read side resolves the same folder, so the file it names is reachable.
-    await expect(
-      readArtifactFile({
-        appUserId,
-        filename: "draft.docx",
-        orgId: PROFILE_CONTEXT.orgId,
-        profileId: PROFILE_CONTEXT.profileId,
-      })
-    ).resolves.toMatchObject({ filePath: docx.path });
-  });
-
-  test("everything outside artifacts stays on the profile for an app user", async () => {
-    configDir = await mkdtemp(path.join(os.tmpdir(), "nakama-appuser-"));
-    process.env.NAKAMA_CONFIG_DIR = configDir;
-    const profileRoot = getProfileSoulDir(
-      PROFILE_CONTEXT.orgId,
-      PROFILE_CONTEXT.profileId
-    );
-    const userRoot = await ensureAppUserSoulDir(
-      PROFILE_CONTEXT.orgId,
-      PROFILE_CONTEXT.profileId,
-      "app-user-42"
-    );
-    const context = buildToolExecutionContext({
-      ...PROFILE_CONTEXT,
-      workspaceRoot: userRoot,
-    });
-
-    // The knowledge base and the soul stack live on the profile, and an app-user
-    // session still has to reach them.
-    const written = await runWriteFile(
-      { content: "shared", path: "knowledge-base/policy.md" },
-      context
-    );
-
-    expect(written.path).toBe(
-      await realpath(path.join(profileRoot, "knowledge-base", "policy.md"))
-    );
-  });
 
   test("a session with no app user writes artifacts where it always did", async () => {
     configDir = await mkdtemp(path.join(os.tmpdir(), "nakama-appuser-"));
     process.env.NAKAMA_CONFIG_DIR = configDir;
+
     const profileRoot = getProfileSoulDir(
       PROFILE_CONTEXT.orgId,
       PROFILE_CONTEXT.profileId
     );
+
     const context = buildToolExecutionContext(PROFILE_CONTEXT);
 
     const result = await runWriteDocx(

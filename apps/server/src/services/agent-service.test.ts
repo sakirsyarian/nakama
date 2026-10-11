@@ -15,6 +15,7 @@ import {
   type ToolContext,
   type ToolDefinition,
 } from "@nakama/core";
+import { NETRA_AGENT_MODEL_ID } from "@nakama/core/discovery-providers";
 import type { StoredProfileRecord } from "@nakama/db";
 import {
   createInMemoryDatabaseAdapter,
@@ -36,6 +37,51 @@ import { SkillsService } from "./skills-service";
 
 const ORG_ID = "org_test";
 
+interface AgentServiceSuperBotToolsAccess {
+  superBotTools: ToolDefinition[];
+}
+
+interface AgentServiceCodingContextAccess {
+  formatCodingDelegationContext(
+    orgId: string,
+    profileId: string
+  ): Promise<string>;
+}
+
+interface AgentServiceProfileToolsAccess {
+  resolveProfileTools(
+    profile: StoredProfileRecord,
+    options?: {
+      includeAutomationTools?: boolean;
+      includeQuestionTools?: boolean;
+      includeSkillManageTools?: boolean;
+      includeTodoTools?: boolean;
+    }
+  ): Promise<Array<{ name: string }>>;
+}
+
+interface AgentServiceHarnessAccess {
+  createHarness(options: {
+    orgId: string;
+    provider: ProviderClient;
+    providerInstance: ProviderInstance;
+    modelId: string;
+    thinking: { enabled: boolean; effort: "medium" };
+  }): { provider: ProviderClient };
+}
+
+interface AgentServiceProviderOptionsAccess {
+  resolveChatProviderOptions: (
+    providerInstance: ProviderInstance,
+    thinkingSettings: { enabled: boolean; effort: "low" | "medium" | "high" }
+  ) => { thinking?: { enabled: boolean; effort: string } } | undefined;
+}
+
+function privateServiceAccess<T>(service: AgentService): T {
+  // SAFETY: Tests use named interfaces for private service members.
+  return Object.create(service) as T;
+}
+
 describe("Super Bot provider inheritance", () => {
   setupTestConfigDir("nakama-inherited-provider-");
 
@@ -43,11 +89,13 @@ describe("Super Bot provider inheritance", () => {
     "persists the resolved %s selection on the new profile",
     async (source) => {
       const db = createInMemoryDatabaseAdapter();
+
       const profile = {
         ...createDefaultProfile(),
         isSuper: true,
         model: source === "server default" ? null : "openai-1::gpt-4.1",
       };
+
       await db.upsertProfile(profile);
       await db.upsertSession({
         agentQuestionnaire: null,
@@ -59,6 +107,7 @@ describe("Super Bot provider inheritance", () => {
         profileId: profile.id,
         title: null,
       });
+
       const provider = {
         apiKey: "test-key",
         createdAt: profile.createdAt,
@@ -66,6 +115,7 @@ describe("Super Bot provider inheritance", () => {
         label: "OpenAI",
         type: "openai" as const,
       };
+
       const service = new AgentService(
         {
           defaultProviderId: provider.id,
@@ -74,10 +124,15 @@ describe("Super Bot provider inheritance", () => {
         null,
         db
       );
-      const tool = (
-        service as unknown as { superBotTools: ToolDefinition[] }
+
+      // SAFETY: This test checks the private tool built from its profile fixture.
+      const tool = privateServiceAccess<AgentServiceSuperBotToolsAccess>(
+        service
       ).superBotTools.find((entry) => entry.name === "create_profile");
+
       expect(tool).toBeDefined();
+
+      // SAFETY: This test controls the fixture shape at this boundary.
       const result = (await tool!.run(
         { name: "New Agent" },
         {
@@ -86,11 +141,13 @@ describe("Super Bot provider inheritance", () => {
           sessionId: "super-session",
         }
       )) as ProfileResponse;
+
       const expected =
         source === "session"
           ? "openai-2::gpt-4.1-mini"
           : (profile.model ??
             `${provider.id}::${resolveDefaultModelForInstance(provider)}`);
+
       expect(result.profile.model).toBe(expected);
       expect((await db.getProfile(result.profile.id))?.model).toBe(expected);
     }
@@ -106,15 +163,18 @@ describe("AgentService sub-agent roles", () => {
     const service = new AgentService(null, null, db);
     let promptRole: ToolContext["orgRole"];
     let toolRole: ToolContext["orgRole"];
+
     const tool: ToolDefinition = {
       description: "Observe child context",
       name: "observe_role",
       parameters: { properties: {}, type: "object" },
       run(_input, context) {
         toolRole = context.orgRole;
+
         return Promise.resolve({ ok: true });
       },
     };
+
     Object.assign(service, {
       _providerConfigured: true,
       createHarnessForProfile: () => ({
@@ -123,9 +183,11 @@ describe("AgentService sub-agent roles", () => {
           streamChat(input: GenerateChatInput) {
             const done = input.messages.at(-1)?.role === "tool";
             const content = done ? "Done" : "";
+
             const toolCalls = done
               ? []
               : [{ arguments: {}, id: "call_role", name: tool.name }];
+
             return Promise.resolve({
               assistantMessage: { content, role: "assistant", toolCalls },
               content,
@@ -141,6 +203,7 @@ describe("AgentService sub-agent roles", () => {
         orgRole: ToolContext["orgRole"]
       ) => {
         promptRole = orgRole;
+
         return Promise.resolve({ soulActive: false, systemPrompt: "Test" });
       },
       resolveProfileTools: () => Promise.resolve([tool]),
@@ -154,6 +217,7 @@ describe("AgentService sub-agent roles", () => {
         profileId: "profile_default",
         task: "Observe the child role",
       });
+
       expect(result.status).toBe("success");
       expect(promptRole).toBe(orgRole);
       expect(toolRole).toBe(orgRole);
@@ -165,12 +229,15 @@ describe("AgentService branching", () => {
   test("reopens a saved session with a retired ChatGPT model", async () => {
     const db = createInMemoryDatabaseAdapter();
     await db.upsertProfile(createDefaultProfile());
+
     const sessionId = await new AgentService(null, null, db).createSession(
       ORG_ID,
       "web",
       "profile_default"
     );
+
     await db.updateSessionModel(sessionId, "chatgpt-1::gpt-5.4-mini");
+
     const service = new AgentService(
       {
         defaultProviderId: "chatgpt-1",
@@ -202,6 +269,7 @@ describe("AgentService branching", () => {
       ...createDefaultProfile(),
       model: "provider-1::profile-default",
     });
+
     const service = new AgentService(
       {
         defaultProviderId: "provider-1",
@@ -304,6 +372,7 @@ describe("AgentService branching", () => {
       "web",
       "profile_default"
     );
+
     await db.replaceMessagesForSession(sourceSessionId, [
       {
         createdAt: "2026-06-14T10:00:00.000Z",
@@ -357,11 +426,15 @@ describe("AgentService branching", () => {
       branchSessionId,
       ORG_ID
     );
+
     expect(branchMessages?.messages).toEqual([
       { content: "Hello", role: "user" },
       { content: "Hi there", role: "assistant" },
     ]);
     expect(branchMessages?.messageMeta).toHaveLength(2);
+    expect(
+      branchMessages?.messageMeta.map((message) => message.createdAt)
+    ).toEqual(["2026-06-14T10:00:00.000Z", "2026-06-14T10:00:01.000Z"]);
 
     const branchTodos = await service.getSessionTodos(branchSessionId, ORG_ID);
     expect(branchTodos).toEqual([]);
@@ -378,6 +451,7 @@ describe("AgentService branching", () => {
       sourceSessionId,
       ORG_ID
     );
+
     expect(sourceMessages?.messages).toHaveLength(3);
   });
 
@@ -391,6 +465,7 @@ describe("AgentService branching", () => {
       "web",
       "profile_default"
     );
+
     await db.replaceMessagesForSession(sourceSessionId, [
       {
         createdAt: "2026-06-14T10:00:00.000Z",
@@ -406,7 +481,7 @@ describe("AgentService branching", () => {
     ).rejects.toThrow("messageIndex is out of bounds.");
   });
 
-  test("falls back to org default when the requested profile is missing", async () => {
+  test("falls back to org default only when no profile is requested", async () => {
     const database = await createSqliteDatabase(":memory:");
     const db = database.adapter;
     const now = new Date().toISOString();
@@ -433,11 +508,12 @@ describe("AgentService branching", () => {
       });
 
       const service = new AgentService(null, null, db);
-      const sessionId = await service.createSession(
-        ORG_ID,
-        "web",
-        "missing_profile"
-      );
+      await expect(
+        service.createSession(ORG_ID, "web", "missing_profile")
+      ).rejects.toMatchObject({ status: 404 });
+      expect(await db.listSessions()).toEqual([]);
+
+      const sessionId = await service.createSession(ORG_ID, "web");
       const session = await db.getSession(sessionId);
 
       expect(session?.profileId).toBe("profile_custom");
@@ -459,6 +535,7 @@ describe("AgentService session org scope", () => {
       orgId: "org_other",
     });
     const service = new AgentService(null, null, db);
+
     const sessionId = await service.createSession(
       ORG_ID,
       "web",
@@ -475,6 +552,7 @@ describe("AgentService session org scope", () => {
 describe("AgentService thinking provider options", () => {
   test("keeps thinking enabled for openai-compatible providers", () => {
     const db = createInMemoryDatabaseAdapter();
+
     const service = new AgentService(
       {
         defaultProviderId: "compat-1",
@@ -498,23 +576,9 @@ describe("AgentService thinking provider options", () => {
       db
     );
 
-    const options = (
-      service as unknown as {
-        resolveChatProviderOptions: (
-          providerInstance: {
-            type: "openai_compatible";
-            id: string;
-            label: string;
-            apiKey: string;
-            baseUrl: string;
-            createdAt: string;
-          },
-          thinkingSettings: {
-            enabled: boolean;
-            effort: "low" | "medium" | "high";
-          }
-        ) => { thinking?: { enabled: boolean; effort: string } } | undefined;
-      }
+    // SAFETY: The test supplies valid provider and thinking values below.
+    const options = privateServiceAccess<AgentServiceProviderOptionsAccess>(
+      service
     ).resolveChatProviderOptions(
       {
         apiKey: "",
@@ -531,20 +595,57 @@ describe("AgentService thinking provider options", () => {
   });
 });
 
+test("rejects a Netra provider when the model endpoint rejects its API key", async () => {
+  using fetchMock = spyOn(globalThis, "fetch").mockImplementation(
+    async () => new Response("invalid key", { status: 401 })
+  );
+
+  const service = new AgentService(null, null, createInMemoryDatabaseAdapter());
+
+  await expect(
+    service.createProvider({
+      apiKey: "invalid-key",
+      model: NETRA_AGENT_MODEL_ID,
+      type: "netra",
+    })
+  ).rejects.toMatchObject({ status: 400 });
+  expect(fetchMock).toHaveBeenCalled();
+});
+
+test("discovers the supported Netra model without a custom base URL", async () => {
+  using fetchMock = spyOn(globalThis, "fetch").mockImplementation(async () =>
+    Response.json({ data: [{ id: NETRA_AGENT_MODEL_ID }] })
+  );
+
+  const service = new AgentService(null, null, createInMemoryDatabaseAdapter());
+
+  const result = await service.discoverModels({
+    apiKey: "test-key",
+    provider: "netra",
+  });
+
+  expect(result.provider).toBe("netra");
+  expect(result.models.map((model) => model.id)).toEqual([
+    NETRA_AGENT_MODEL_ID,
+  ]);
+  expect(fetchMock).toHaveBeenCalled();
+});
+
 describe("AgentService usage pricing context", () => {
   setupTestConfigDir("nakama-usage-context-");
 
   test("retains each harness's rates when another provider completes during a stream", async () => {
     const db = createInMemoryDatabaseAdapter();
-    const tracker = await LlmUsageTracker.create(db);
-    const service = new AgentService(null, null, db, tracker) as unknown as {
-      createHarness(options: {
-        provider: ProviderClient;
-        providerInstance: ProviderInstance;
-        modelId: string;
-        thinking: { enabled: boolean; effort: "medium" };
-      }): { provider: ProviderClient };
-    };
+    const tracker = new LlmUsageTracker(db);
+
+    const service = new AgentService(null, null, db, tracker);
+
+    // SAFETY: The test builds the harness with the options shown below.
+    const createHarness =
+      privateServiceAccess<AgentServiceHarnessAccess>(
+        service
+      ).createHarness.bind(service);
+
     const result: ChatCompletionResult = {
       assistantMessage: { content: "ok", role: "assistant" },
       content: "ok",
@@ -555,15 +656,19 @@ describe("AgentService usage pricing context", () => {
         totalTokens: 120_000,
       },
     };
+
     const stream = Promise.withResolvers<ChatCompletionResult>();
+
     const provider: ProviderClient = {
       generateChat: () => Promise.resolve(result),
       generateText: () => Promise.resolve({ content: "unused" }),
       name: "openai",
       streamChat: () => stream.promise,
     };
+
     const options = {
       modelId: "gpt-5.5",
+      orgId: ORG_ID,
       provider,
       providerInstance: {
         apiKey: "test",
@@ -574,13 +679,17 @@ describe("AgentService usage pricing context", () => {
       },
       thinking: { effort: "medium" as const, enabled: false },
     };
-    const api = service.createHarness(options).provider;
+
+    const api = createHarness.call(service, options).provider;
+
     const input = {
       messages: [{ content: "hi", role: "user" as const }],
       system: "s",
     };
+
     const pending = api.streamChat(input, { onChunk: () => undefined });
-    const subscription = service.createHarness({
+
+    const subscription = createHarness.call(service, {
       ...options,
       providerInstance: {
         ...options.providerInstance,
@@ -588,24 +697,27 @@ describe("AgentService usage pricing context", () => {
         type: "chatgpt",
       },
     }).provider;
+
     expect((await subscription.generateChat(input)).usage?.costUsd).toBe(0);
     stream.resolve(result);
     expect((await pending).usage?.costUsd).toBeCloseTo(1.1);
     // Cached harnesses keep their own rates after another harness is built.
     expect((await api.generateChat(input)).usage?.costUsd).toBeCloseTo(1.1);
-    await tracker.reloadFromDatabase();
-    expect(tracker.getStats().estimatedCostUsd).toBeCloseTo(2.2);
-    expect(tracker.getStats().requestCount).toBe(3);
+    expect((await tracker.getStats(ORG_ID)).estimatedCostUsd).toBeCloseTo(2.2);
+    expect((await tracker.getStats(ORG_ID)).requestCount).toBe(3);
   });
 
   test("prices OpenAI image parsing independently of a DeepSeek primary", async () => {
     const db = createInMemoryDatabaseAdapter();
+
     const profile = {
       ...createDefaultProfile(),
       model: "primary::deepseek-v4-flash",
     };
+
     await db.upsertProfile(profile);
-    const tracker = await LlmUsageTracker.create(db);
+    const tracker = new LlmUsageTracker(db);
+
     const service = new AgentService(
       {
         defaultProviderId: "primary",
@@ -631,29 +743,34 @@ describe("AgentService usage pricing context", () => {
       db,
       tracker
     );
+
     using fetchMock = spyOn(globalThis, "fetch").mockImplementation(
-      async (_url: unknown, init?: RequestInit) => {
+      async (...args: Parameters<typeof fetch>) => {
+        const init = args[1];
         const body = JSON.parse(String(init?.body));
+
         if (body.model === "gpt-4o-mini") {
           return Response.json({
             choices: [{ message: { content: "A small image." } }],
             usage: { completion_tokens: 20_000, prompt_tokens: 100_000 },
           });
         }
+
         expect(body.model).toBe("deepseek-v4-flash");
+
         return Response.json({
           choices: [{ message: { content: "ok" } }],
           usage: { completion_tokens: 20_000, prompt_tokens: 100_000 },
         });
       }
     );
+
     const id = await service.createSession(ORG_ID, "web", profile.id);
     const session = await service.resolveSession(id, ORG_ID);
     await session!.send({
       message: [{ data: "aGVsbG8=", mediaType: "image/png", type: "image" }],
     });
-    await tracker.reloadFromDatabase();
-    const byModel = tracker.getStatsByModel();
+    const byModel = await tracker.getStatsByModel(ORG_ID);
     expect(
       byModel.find((row) => row.modelId === "gpt-4o-mini")?.estimatedCostUsd
     ).toBeCloseTo(0.027, 6);
@@ -661,7 +778,10 @@ describe("AgentService usage pricing context", () => {
       byModel.find((row) => row.modelId === "deepseek-v4-flash")
         ?.estimatedCostUsd
     ).toBeCloseTo(0.054, 6);
-    expect(tracker.getStats().estimatedCostUsd).toBeCloseTo(0.081, 6);
+    expect((await tracker.getStats(ORG_ID)).estimatedCostUsd).toBeCloseTo(
+      0.081,
+      6
+    );
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 });
@@ -669,6 +789,7 @@ describe("AgentService usage pricing context", () => {
 describe("AgentService vision settings", () => {
   test("persists vision model in the database", async () => {
     const db = createInMemoryDatabaseAdapter();
+
     const service = new AgentService(
       {
         defaultProviderId: "p-openai-1",
@@ -704,6 +825,7 @@ describe("AgentService vision settings", () => {
 describe("AgentService transcription settings", () => {
   test("persists transcription model in the database", async () => {
     const db = createInMemoryDatabaseAdapter();
+
     const service = new AgentService(
       {
         defaultProviderId: "p-openai-1",
@@ -763,6 +885,7 @@ describe("AgentService transcription settings", () => {
         updatedAt: new Date().toISOString(),
         visionModel: null,
       });
+
       const service = new AgentService(
         {
           defaultProviderId: "p-openai-1",
@@ -805,11 +928,13 @@ describe("AgentService coding delegation context", () => {
 
   afterEach(async () => {
     process.env.PATH = originalPath;
+
     if (originalDisableFixPath === undefined) {
       delete process.env.NAKAMA_DISABLE_FIX_PATH;
     } else {
       process.env.NAKAMA_DISABLE_FIX_PATH = originalDisableFixPath;
     }
+
     if (tempBinDir) {
       await rm(tempBinDir, { force: true, recursive: true });
       tempBinDir = "";
@@ -839,13 +964,10 @@ describe("AgentService coding delegation context", () => {
     });
 
     const service = new AgentService(null, null, db);
-    const context = await (
-      service as unknown as {
-        formatCodingDelegationContext(
-          orgId: string,
-          profileId: string
-        ): Promise<string>;
-      }
+
+    // SAFETY: This test checks output for the configured coding-agent fixture.
+    const context = await privateServiceAccess<AgentServiceCodingContextAccess>(
+      service
     ).formatCodingDelegationContext("org_test", "profile_test");
 
     expect(context).toContain("bash");
@@ -867,13 +989,10 @@ describe("AgentService coding delegation context", () => {
     });
 
     const service = new AgentService(null, null, db);
-    const context = await (
-      service as unknown as {
-        formatCodingDelegationContext(
-          orgId: string,
-          profileId: string
-        ): Promise<string>;
-      }
+
+    // SAFETY: This test checks output for the configured coding-agent fixture.
+    const context = await privateServiceAccess<AgentServiceCodingContextAccess>(
+      service
     ).formatCodingDelegationContext("org_test", "profile_test");
 
     expect(context).toContain("No coding agent CLI is installed");
@@ -888,10 +1007,21 @@ describe("AgentService coding delegation context", () => {
     const db = createInMemoryDatabaseAdapter();
     await installFakeOpenCode(tempBinDir);
     await Bun.write(
-      path.join(tempBinDir, "claude"),
-      "#!/bin/sh\necho claude\n"
+      path.join(
+        tempBinDir,
+        process.platform === "win32" ? "claude.cmd" : "claude"
+      ),
+      process.platform === "win32"
+        ? "@echo off\r\necho claude\r\n"
+        : "#!/bin/sh\necho claude\n"
     );
-    await chmod(path.join(tempBinDir, "claude"), 0o755);
+    await chmod(
+      path.join(
+        tempBinDir,
+        process.platform === "win32" ? "claude.cmd" : "claude"
+      ),
+      0o755
+    );
 
     await db.upsertWorkspaceSettings({
       codingAgentHarnesses: [
@@ -921,13 +1051,10 @@ describe("AgentService coding delegation context", () => {
     });
 
     const service = new AgentService(null, null, db);
-    const context = await (
-      service as unknown as {
-        formatCodingDelegationContext(
-          orgId: string,
-          profileId: string
-        ): Promise<string>;
-      }
+
+    // SAFETY: This test checks output for the configured coding-agent fixture.
+    const context = await privateServiceAccess<AgentServiceCodingContextAccess>(
+      service
     ).formatCodingDelegationContext("org_test", "profile_test");
 
     expect(context).toContain("Multiple coding agent CLIs are installed");
@@ -950,6 +1077,7 @@ describe("AgentService skill_manage injection", () => {
 
   afterEach(async () => {
     delete process.env.NAKAMA_CONFIG_DIR;
+
     if (configDir) {
       await rm(configDir, { force: true, recursive: true });
       configDir = "";
@@ -976,9 +1104,11 @@ describe("AgentService skill_manage injection", () => {
       const skills = new SkillsService(db);
       await ensureBundledSkillFiles();
       await skills.syncDiscoveredSkills();
+
       const manage = (await skills.listSkills()).skills.find(
         (skill) => skill.name === skillName
       );
+
       expect(manage).toBeDefined();
       await db.assignSkillToProfile("profile_default", manage!.id);
 
@@ -995,19 +1125,24 @@ describe("AgentService skill_manage injection", () => {
         ): Promise<Array<{ name: string }>>;
       };
 
-      const resolve = (
-        service as unknown as ResolveTools
-      ).resolveProfileTools.bind(service);
+      // SAFETY: This test checks the profile tool resolver for its fixture.
+      const resolve =
+        privateServiceAccess<AgentServiceProfileToolsAccess>(
+          service
+        ).resolveProfileTools.bind(service);
+
       const profile = createDefaultProfile();
 
       const webTools = await resolve(profile, {
         includeSkillManageTools: true,
       });
+
       expect(webTools.some((tool) => tool.name === "skill_manage")).toBe(true);
 
       const telegramTools = await resolve(profile, {
         includeSkillManageTools: false,
       });
+
       expect(telegramTools.some((tool) => tool.name === "skill_manage")).toBe(
         false
       );
@@ -1015,6 +1150,7 @@ describe("AgentService skill_manage injection", () => {
       const automationTools = await resolve(profile, {
         includeAutomationTools: false,
       });
+
       expect(automationTools.some((tool) => tool.name === "skill_manage")).toBe(
         false
       );
@@ -1038,9 +1174,12 @@ describe("AgentService skill_manage injection", () => {
       ): Promise<Array<{ name: string }>>;
     };
 
-    const resolve = (
-      service as unknown as ResolveTools
-    ).resolveProfileTools.bind(service);
+    // SAFETY: This test checks the profile tool resolver for its fixture.
+    const resolve =
+      privateServiceAccess<AgentServiceProfileToolsAccess>(
+        service
+      ).resolveProfileTools.bind(service);
+
     const profile = createDefaultProfile();
 
     // Profile with zero own tools: no platform groups, no session helpers.
@@ -1050,6 +1189,7 @@ describe("AgentService skill_manage injection", () => {
       includeSkillManageTools: true,
       includeTodoTools: true,
     });
+
     expect(tools).toHaveLength(0);
 
     // Give the profile one own tool; platform groups come back.
@@ -1063,12 +1203,14 @@ describe("AgentService skill_manage injection", () => {
       updatedAt: new Date().toISOString(),
     });
     await db.assignToolToProfile("profile_default", "tool_for_platform_groups");
+
     const withTools = await resolve(profile, {
       includeAutomationTools: true,
       includeQuestionTools: true,
       includeSkillManageTools: true,
       includeTodoTools: true,
     });
+
     expect(withTools.some((tool) => tool.name === "test_tool")).toBe(true);
     expect(withTools.some((tool) => tool.name === "ask_user_question")).toBe(
       true
@@ -1078,10 +1220,12 @@ describe("AgentService skill_manage injection", () => {
 
   test("omits automation tools for a disabled profile", async () => {
     const db = createInMemoryDatabaseAdapter();
+
     const profile = {
       ...createDefaultProfile(),
       automationsEnabled: false,
     };
+
     await db.upsertProfile(profile);
     await db.upsertTool({
       createdAt: new Date().toISOString(),
@@ -1096,6 +1240,7 @@ describe("AgentService skill_manage injection", () => {
 
     const service = new AgentService(null, null, db);
     service.setAutomationTools([
+      // SAFETY: This test controls the fixture shape at this boundary.
       { name: "create_automation" } as ToolDefinition,
     ]);
 
@@ -1105,9 +1250,12 @@ describe("AgentService skill_manage injection", () => {
         options?: { includeAutomationTools?: boolean }
       ): Promise<Array<{ name: string }>>;
     };
-    const resolve = (
-      service as unknown as ResolveTools
-    ).resolveProfileTools.bind(service);
+
+    // SAFETY: This test checks the profile tool resolver for its fixture.
+    const resolve =
+      privateServiceAccess<AgentServiceProfileToolsAccess>(
+        service
+      ).resolveProfileTools.bind(service);
 
     const tools = await resolve(profile, { includeAutomationTools: true });
     expect(tools.some((tool) => tool.name === "create_automation")).toBe(false);
@@ -1119,9 +1267,11 @@ describe("AgentService skill_manage injection", () => {
     const skills = new SkillsService(db);
     await ensureBundledSkillFiles();
     await skills.syncDiscoveredSkills();
+
     const manage = (await skills.listSkills()).skills.find(
       (skill) => skill.name === "manage-skills"
     );
+
     expect(manage).toBeDefined();
     await db.assignSkillToProfile("profile_default", manage!.id);
 
@@ -1135,6 +1285,7 @@ describe("AgentService skill_manage injection", () => {
       null,
       { orgRole: "admin" }
     );
+
     const session = await service.resolveSession(sessionId, ORG_ID);
     expect(session).not.toBeNull();
 
@@ -1142,9 +1293,11 @@ describe("AgentService skill_manage injection", () => {
     await session!.send({ message: typed });
 
     const stored = await service.getSessionMessages(sessionId, ORG_ID);
+
     const userMessage = stored?.messages.find(
       (message) => message.role === "user"
     );
+
     expect(userMessage?.content).toBe(typed);
   });
 
@@ -1154,9 +1307,11 @@ describe("AgentService skill_manage injection", () => {
     const skills = new SkillsService(db);
     await ensureBundledSkillFiles();
     await skills.syncDiscoveredSkills();
+
     const manage = (await skills.listSkills()).skills.find(
       (skill) => skill.name === "manage-skills"
     );
+
     expect(manage).toBeDefined();
     await db.assignSkillToProfile("profile_default", manage!.id);
 
@@ -1170,6 +1325,7 @@ describe("AgentService skill_manage injection", () => {
       null,
       { orgRole: "admin" }
     );
+
     const session = await service.resolveSession(sessionId, ORG_ID);
     expect(session).not.toBeNull();
 
@@ -1178,9 +1334,11 @@ describe("AgentService skill_manage injection", () => {
     });
 
     const stored = await service.getSessionMessages(sessionId, ORG_ID);
+
     const userMessage = stored?.messages.find(
       (message) => message.role === "user"
     );
+
     expect(userMessage?.content).toBe("/learn filing an expense");
   });
 
@@ -1190,9 +1348,11 @@ describe("AgentService skill_manage injection", () => {
     const skills = new SkillsService(db);
     await ensureBundledSkillFiles();
     await skills.syncDiscoveredSkills();
+
     const manage = (await skills.listSkills()).skills.find(
       (skill) => skill.name === "manage-skills"
     );
+
     expect(manage).toBeDefined();
     await db.assignSkillToProfile("profile_default", manage!.id);
 
@@ -1206,15 +1366,18 @@ describe("AgentService skill_manage injection", () => {
       null,
       { orgRole: "admin" }
     );
+
     const session = await service.resolveSession(sessionId, ORG_ID);
     expect(session).not.toBeNull();
 
     await session!.send({ message: "/learn" });
 
     const stored = await service.getSessionMessages(sessionId, ORG_ID);
+
     const userMessage = stored?.messages.find(
       (message) => message.role === "user"
     );
+
     expect(userMessage?.content).toBe("/learn");
   });
 });
@@ -1237,10 +1400,13 @@ describe("AgentService bot token validation", () => {
   test("rejects and does not persist a Telegram token rejected by Telegram", async () => {
     const botToken = "123456:QA-fake-token-xyz";
     let requestCount = 0;
+    // SAFETY: This test controls the fixture shape at this boundary.
     globalThis.fetch = (async () => {
       requestCount += 1;
+
       return new Response(JSON.stringify({ ok: false }), { status: 401 });
     }) as typeof fetch;
+
     const service = new AgentService(
       null,
       null,
@@ -1250,6 +1416,7 @@ describe("AgentService bot token validation", () => {
     const error = await captureError(() =>
       service.setTelegramSettings(TEST_ORG_ID, { botToken })
     );
+
     const configured = (await service.getTelegramSettings(TEST_ORG_ID))
       .configured;
 
@@ -1264,13 +1431,16 @@ describe("AgentService bot token validation", () => {
 
   test("persists a Telegram token accepted by Telegram", async () => {
     let requestUrl = "";
+    // SAFETY: This test controls the fixture shape at this boundary.
     globalThis.fetch = (async (input) => {
       requestUrl = String(input);
+
       return new Response(
         JSON.stringify({ ok: true, result: { id: 123_456, is_bot: true } }),
         { headers: { "Content-Type": "application/json" }, status: 200 }
       );
     }) as typeof fetch;
+
     const service = new AgentService(
       null,
       null,
@@ -1291,10 +1461,13 @@ describe("AgentService bot token validation", () => {
   test("rejects and does not persist a Discord token rejected by Discord", async () => {
     const botToken = "123456:QA-fake-token-xyz";
     let requestCount = 0;
+    // SAFETY: This test controls the fixture shape at this boundary.
     globalThis.fetch = (async () => {
       requestCount += 1;
+
       return new Response(null, { status: 401 });
     }) as typeof fetch;
+
     const service = new AgentService(
       null,
       null,
@@ -1304,6 +1477,7 @@ describe("AgentService bot token validation", () => {
     const error = await captureError(() =>
       service.setDiscordSettings({ botToken })
     );
+
     const configured = (await service.getDiscordSettings()).configured;
 
     expect({ configured, rejected: error !== null, requestCount }).toEqual({
@@ -1318,14 +1492,17 @@ describe("AgentService bot token validation", () => {
   test("persists a Discord token accepted by Discord", async () => {
     let authorization = "";
     let requestCount = 0;
+    // SAFETY: This test controls the fixture shape at this boundary.
     globalThis.fetch = (async (_input, init) => {
       requestCount += 1;
       authorization = new Headers(init?.headers).get("Authorization") ?? "";
+
       return new Response(JSON.stringify({ id: "1525937133096013954" }), {
         headers: { "Content-Type": "application/json" },
         status: 200,
       });
     }) as typeof fetch;
+
     const service = new AgentService(
       null,
       null,
@@ -1343,16 +1520,19 @@ describe("AgentService bot token validation", () => {
   });
 
   test("preserves Telegram config after a rejected replacement and on token-less edits", async () => {
+    // SAFETY: This test controls the fixture shape at this boundary.
     globalThis.fetch = (async () =>
       new Response(
         JSON.stringify({ ok: true, result: { id: 123_456, is_bot: true } }),
         { status: 200 }
       )) as typeof fetch;
+
     const service = new AgentService(
       null,
       null,
       createInMemoryDatabaseAdapter()
     );
+
     await service.setTelegramSettings(TEST_ORG_ID, {
       allowedUserIds: "42",
       botToken: "123456:original-token",
@@ -1360,6 +1540,7 @@ describe("AgentService bot token validation", () => {
     });
     const beforeReplacement = await loadTelegramConfigFile(TEST_ORG_ID);
 
+    // SAFETY: This test controls the fixture shape at this boundary.
     globalThis.fetch = (async () =>
       new Response(null, { status: 401 })) as typeof fetch;
     await expect(
@@ -1373,6 +1554,7 @@ describe("AgentService bot token validation", () => {
       beforeReplacement
     );
 
+    // SAFETY: This test controls the fixture shape at this boundary.
     globalThis.fetch = (async () => {
       throw new Error("Token-less Telegram edits must not call the provider.");
     }) as typeof fetch;
@@ -1388,15 +1570,18 @@ describe("AgentService bot token validation", () => {
   });
 
   test("revalidates a cached Discord token and preserves config when rejected", async () => {
+    // SAFETY: This test controls the fixture shape at this boundary.
     globalThis.fetch = (async () =>
       new Response(JSON.stringify({ id: "1525937133096013954" }), {
         status: 200,
       })) as typeof fetch;
+
     const service = new AgentService(
       null,
       null,
       createInMemoryDatabaseAdapter()
     );
+
     await service.setDiscordSettings({
       allowedUserIds: "123456789012345678",
       botToken: "cached-discord-token",
@@ -1405,8 +1590,10 @@ describe("AgentService bot token validation", () => {
     const beforeReplacement = await loadDiscordConfigFile();
     let rejectedRequestCount = 0;
 
+    // SAFETY: This test controls the fixture shape at this boundary.
     globalThis.fetch = (async () => {
       rejectedRequestCount += 1;
+
       return new Response(null, { status: 401 });
     }) as typeof fetch;
     await expect(
@@ -1435,11 +1622,13 @@ describe("AgentService bot token validation", () => {
     const service = new AgentService(null, null, databaseAdapter);
     const { app } = createMinimalHonoApp({ agent: service, databaseAdapter });
     const session = await setupFreshInstallSession(app, databaseAdapter);
+    // SAFETY: This test controls the fixture shape at this boundary.
     globalThis.fetch = (async () =>
       new Response(null, { status: 401 })) as typeof fetch;
 
     for (const channel of ["telegram", "discord"] as const) {
       const botToken = `rejected-${channel}-token`;
+
       const response = await app.fetch(
         new Request(`http://localhost:4310/v1/settings/${channel}`, {
           body: JSON.stringify({ botToken }),
@@ -1450,6 +1639,8 @@ describe("AgentService bot token validation", () => {
           method: "PUT",
         })
       );
+
+      // SAFETY: This test controls the fixture shape at this boundary.
       const body = (await response.json()) as { error: string };
 
       expect(response.status).toBe(400);
@@ -1480,6 +1671,7 @@ describe("AgentService WhatsApp allowed phones", () => {
       ...createDefaultProfile(),
       id: "well-test-report-validator",
     });
+
     return new AgentService(null, null, db);
   }
 
@@ -1533,6 +1725,23 @@ describe("AgentService WhatsApp allowed phones", () => {
       false
     );
   });
+
+  test("writes allowUnpairedGroupMembers to WhatsApp config", async () => {
+    const service = await createWhatsAppService();
+
+    const saved = await service.setWhatsAppSettings(ORG_ID, {
+      allowUnpairedGroupMembers: true,
+      profileId: "default",
+    });
+
+    expect(saved.allowUnpairedGroupMembers).toBe(true);
+    expect(
+      (await service.getWhatsAppSettings(ORG_ID)).allowUnpairedGroupMembers
+    ).toBe(true);
+    expect(
+      (await loadWhatsAppConfigFile(ORG_ID))?.allowUnpairedGroupMembers
+    ).toBe(true);
+  });
 });
 
 describe("AgentService organization knowledge base", () => {
@@ -1552,6 +1761,7 @@ describe("AgentService organization knowledge base", () => {
         mediaType: "text/plain",
       }
     );
+
     expect(uploaded.outcome).toBe("created");
     expect(uploaded.document.scope).toBe("organization");
 
@@ -1564,22 +1774,23 @@ describe("AgentService organization knowledge base", () => {
       ORG_ID,
       uploaded.document.id
     );
+
     expect(read.filename).toBe("shared.txt");
 
     const deleted = await service.deleteOrganizationKnowledgeBaseDocument(
       ORG_ID,
       uploaded.document.id
     );
+
     expect(deleted.deleted).toBe(true);
     expect(deleted.documentId).toBe(uploaded.document.id);
   });
 });
 
-async function captureError(
-  run: () => Promise<unknown>
-): Promise<Error | null> {
+async function captureError<T>(run: () => Promise<T>): Promise<Error | null> {
   try {
     await run();
+
     return null;
   } catch (error) {
     return error instanceof Error ? error : new Error(String(error));
@@ -1587,6 +1798,15 @@ async function captureError(
 }
 
 async function installFakeOpenCode(binDir: string): Promise<void> {
+  if (process.platform === "win32") {
+    await writeFile(
+      path.join(binDir, "opencode.cmd"),
+      "@echo off\r\necho fake opencode\r\n"
+    );
+
+    return;
+  }
+
   const scriptPath = path.join(binDir, "opencode");
   await writeFile(
     scriptPath,
@@ -1601,3 +1821,177 @@ async function installFakeOpenCode(binDir: string): Promise<void> {
   );
   await chmod(scriptPath, 0o755);
 }
+
+describe("AgentService automation resume", () => {
+  setupTestConfigDir("nakama-automation-resume-");
+
+  async function setup() {
+    const db = createInMemoryDatabaseAdapter();
+    const now = new Date().toISOString();
+    await db.upsertProfile(createDefaultProfile());
+    await db.upsertAutomation({
+      createdAt: now,
+      definition: { trigger: { type: "manual" } },
+      enabled: true,
+      id: "auto_resume",
+      name: "Resume",
+      profileId: "profile_default",
+      updatedAt: now,
+      version: 1,
+    });
+    await db.insertAutomationRun({
+      automationId: "auto_resume",
+      completedAt: null,
+      error: null,
+      id: "run_resume",
+      output: null,
+      startedAt: now,
+      status: "running",
+    });
+    const calls: string[] = [];
+    const received: GenerateChatInput["messages"][] = [];
+
+    const tool = (name: string, parallelSafe: boolean): ToolDefinition => ({
+      description: name,
+      name,
+      parallelSafe,
+      parameters: { properties: {}, type: "object" },
+      run() {
+        calls.push(name);
+
+        return Promise.resolve({ ran: name });
+      },
+    });
+
+    const tools = [
+      tool("read_file", true),
+      tool("writes", false),
+      tool("sub_agent", true),
+      tool("custom_write", true),
+    ];
+
+    const service = new AgentService(null, null, db);
+    Object.assign(service, {
+      _providerConfigured: true,
+      createHarnessForProfile: () => ({
+        provider: {
+          name: "openai",
+          streamChat(input: GenerateChatInput) {
+            received.push(input.messages);
+
+            return Promise.resolve({
+              assistantMessage: { content: "Finished", role: "assistant" },
+              content: "Finished",
+              toolCalls: [],
+            });
+          },
+        },
+      }),
+      resolveProfileSystemPrompt: () =>
+        Promise.resolve({ soulActive: false, systemPrompt: "Test" }),
+      resolveProfileTools: () => Promise.resolve(tools),
+    });
+
+    const step = (
+      position: number,
+      toolCallId: string,
+      toolName: string,
+      done: boolean
+    ) => ({
+      args: "{}",
+      completedAt: done ? now : null,
+      position,
+      result: done ? '{"ran":"earlier"}' : null,
+      runId: "run_resume",
+      startedAt: now,
+      status: done ? ("completed" as const) : ("running" as const),
+      toolCallId,
+      toolGroupId: "group_1",
+      toolName,
+    });
+
+    return { calls, db, received, service, step };
+  }
+
+  test("continues from saved steps and repeats only read-only tools", async () => {
+    const { calls, db, received, service, step } = await setup();
+    await db.insertAutomationRunStep(step(0, "call_done", "writes", true));
+    await db.insertAutomationRunStep(step(1, "call_read", "read_file", false));
+    await db.insertAutomationRunStep(step(2, "call_write", "writes", false));
+    await db.insertAutomationRunStep(step(3, "call_sub", "sub_agent", false));
+    await db.insertAutomationRunStep(
+      step(4, "call_custom", "custom_write", false)
+    );
+
+    const output = await service.runAutomationPrompt(
+      ORG_ID,
+      "profile_default",
+      "Do the job",
+      "auto_resume",
+      "run_resume",
+      undefined,
+      true
+    );
+
+    expect(output).toBe("Finished");
+    // The cut read-only call runs again; neither write runs a second time.
+    expect(calls).toEqual(["read_file"]);
+    const toolMessages = received[0]?.filter((m) => m.role === "tool") ?? [];
+    expect(toolMessages.map((m) => m.toolCallId)).toEqual([
+      "call_done",
+      "call_read",
+      "call_write",
+      "call_sub",
+      "call_custom",
+    ]);
+    expect(toolMessages[1]?.content).toContain("read_file");
+    expect(toolMessages[2]?.content).toContain("error");
+    expect(toolMessages[3]?.content).toContain("error");
+    expect(toolMessages[4]?.content).toContain("error");
+
+    const steps = await db.listAutomationRunSteps("run_resume");
+    expect(steps.every((item) => item.status === "completed")).toBe(true);
+  });
+
+  test("saves each tool call of a fresh run", async () => {
+    const { db, service } = await setup();
+    Object.assign(service, {
+      createHarnessForProfile: () => ({
+        provider: {
+          name: "openai",
+          streamChat(input: GenerateChatInput) {
+            const done = input.messages.at(-1)?.role === "tool";
+
+            const toolCalls = done
+              ? []
+              : [{ arguments: { q: 1 }, id: "call_new", name: "read_file" }];
+
+            return Promise.resolve({
+              assistantMessage: {
+                content: done ? "Done" : "",
+                role: "assistant",
+                toolCalls,
+              },
+              content: done ? "Done" : "",
+              toolCalls,
+            });
+          },
+        },
+      }),
+    });
+
+    await service.runAutomationPrompt(
+      ORG_ID,
+      "profile_default",
+      "Do the job",
+      "auto_resume",
+      "run_resume",
+      { onChunk() {} }
+    );
+
+    const steps = await db.listAutomationRunSteps("run_resume");
+    expect(steps).toHaveLength(1);
+    expect(steps[0]?.status).toBe("completed");
+    expect(steps[0]?.args).toBe('{"q":1}');
+  });
+});

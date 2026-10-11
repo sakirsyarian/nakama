@@ -1,17 +1,10 @@
 import { createRoute, z } from "@hono/zod-openapi";
 import type {
-  AddOrgMemberRequest,
   AddOrgMemberResponse,
-  CreateApiKeyRequest,
-  CreateApiKeyResponse,
-  InviteOrgMemberRequest,
-  ListApiKeysResponse,
   ListOrgMembersResponse,
   OrgInviteCreatedResponse,
   OrgLlmQuotaStatusResponse,
   OrgMemberResponse,
-  RotateApiKeyResponse,
-  UpdateOrgMemberRequest,
 } from "@nakama/core/contract";
 import { OrgUsageQuotaService } from "../../services/org-usage-quota-service";
 import type { ServerOptions } from "../context";
@@ -24,12 +17,15 @@ export function registerOrgMemberRoutes(
   options: ServerOptions
 ): void {
   const { orgService } = options;
+
   const errorSchema = z
     .object({ error: z.string() })
     .openapi("ApiErrorResponse");
+
   const orgIdParam = z.object({
     orgId: z.string().openapi({ param: { in: "path", name: "orgId" } }),
   });
+
   const addOrgMemberSchema = z
     .object({
       email: z.string(),
@@ -38,28 +34,34 @@ export function registerOrgMemberRoutes(
       role: z.enum(["admin", "member", "viewer"]),
     })
     .openapi("AddOrgMemberRequest");
+
   const inviteOrgMemberSchema = z
     .object({
       email: z.string(),
       role: z.enum(["admin", "member", "viewer"]),
     })
     .openapi("InviteOrgMemberRequest");
+
   const addOrgMemberResponseSchema = z
     .object({})
     .passthrough()
     .openapi("AddOrgMemberResponse");
+
   const orgInviteCreatedSchema = z
     .object({})
     .passthrough()
     .openapi("OrgInviteCreatedResponse");
+
   const listOrgMembersResponseSchema = z
     .object({})
     .passthrough()
     .openapi("ListOrgMembersResponse");
+
   const orgMemberResponseSchema = z
     .object({})
     .passthrough()
     .openapi("OrgMemberResponse");
+
   const updateOrgMemberSchema = z
     .object({
       name: z.string().nullable().optional(),
@@ -67,26 +69,26 @@ export function registerOrgMemberRoutes(
       role: z.enum(["admin", "member", "viewer"]).optional(),
     })
     .openapi("UpdateOrgMemberRequest");
+
+  const updateOrganizationSchema = z
+    .object({
+      allowedInviteDomains: z.array(z.string()).optional(),
+      monthlyLlmTokenLimit: z.number().optional(),
+      monthlyLlmTurnLimit: z.number().optional(),
+      monthlyLlmWarningPercent: z.number().optional(),
+      name: z.string().optional(),
+      skillsCuratorArchiveAfterDays: z.number().optional(),
+      skillsCuratorConsolidateEnabled: z.boolean().optional(),
+      skillsCuratorEnabled: z.boolean().optional(),
+      skillsCuratorStaleAfterDays: z.number().optional(),
+      skillsPostTurnReview: z.boolean().optional(),
+      skillsWriteApproval: z.boolean().optional(),
+    })
+    .strict();
+
   const orgMemberParams = orgIdParam.extend({
     userId: z.string().openapi({ param: { in: "path", name: "userId" } }),
   });
-  const apiKeySchema = z
-    .object({
-      name: z.string().trim().min(1).max(120),
-      expiresAt: z.string().datetime().nullable().optional(),
-    })
-    .openapi("CreateApiKeyRequest");
-  const apiKeyParams = orgIdParam.extend({
-    keyId: z.string().openapi({ param: { in: "path", name: "keyId" } }),
-  });
-  const apiKeyResponseSchema = z
-    .object({})
-    .passthrough()
-    .openapi("ApiKeyResponse");
-  const apiKeyListResponseSchema = z
-    .object({})
-    .passthrough()
-    .openapi("ListApiKeysResponse");
 
   app.openAPIRegistry.registerPath(
     createRoute({
@@ -145,7 +147,8 @@ export function registerOrgMemberRoutes(
       return errorResponse("Organization service not configured", 500);
     }
 
-    const body = await readJson<AddOrgMemberRequest>(c.req.raw);
+    const body = await readJson(c.req.raw, addOrgMemberSchema);
+
     const member = await orgService.addMember({
       email: body.email,
       name: body.name,
@@ -212,7 +215,8 @@ export function registerOrgMemberRoutes(
       return errorResponse("Organization service not configured", 500);
     }
 
-    const body = await readJson<InviteOrgMemberRequest>(c.req.raw);
+    const body = await readJson(c.req.raw, inviteOrgMemberSchema);
+
     const invite = await orgService.createInvite({
       email: body.email,
       invitedByUserId: auth.user.id,
@@ -325,8 +329,9 @@ export function registerOrgMemberRoutes(
       return errorResponse("Organization service not configured", 500);
     }
 
-    const body = await readJson<UpdateOrgMemberRequest>(c.req.raw);
+    const body = await readJson(c.req.raw, updateOrgMemberSchema);
     const member = await orgService.updateMember(orgId, userId, body);
+
     return json<OrgMemberResponse>(member);
   });
 
@@ -378,161 +383,14 @@ export function registerOrgMemberRoutes(
     }
 
     await orgService.removeMember(orgId, userId);
-    return new Response(null, { status: 204 });
-  });
 
-  app.openAPIRegistry.registerPath(
-    createRoute({
-      method: "post",
-      operationId: "createOrgApiKey",
-      path: "/v1/orgs/{orgId}/api-keys",
-      request: {
-        body: {
-          content: { "application/json": { schema: apiKeySchema } },
-          required: true,
-        },
-        params: orgIdParam,
-      },
-      responses: {
-        201: {
-          content: { "application/json": { schema: apiKeyResponseSchema } },
-          description: "API key created",
-        },
-        400: {
-          content: { "application/json": { schema: errorSchema } },
-          description: "Error",
-        },
-        403: {
-          content: { "application/json": { schema: errorSchema } },
-          description: "Error",
-        },
-      },
-      summary: "Create an organization backend API key",
-      tags: ["Organizations"],
-    })
-  );
-
-  app.post("/v1/orgs/:orgId/api-keys", async (c) => {
-    const auth = requireOrgAdminFromContext(c);
-    const orgId = decodeURIComponent(c.req.param("orgId"));
-    if (auth.activeOrgId !== orgId || !orgService) {
-      return errorResponse("Not found", 404);
-    }
-    const body = await readJson<CreateApiKeyRequest>(c.req.raw, apiKeySchema);
-    const result = await orgService.createApiKey({
-      orgId,
-      request: body,
-      userId: auth.user.id,
-    });
-    return json<CreateApiKeyResponse>(result, 201);
-  });
-
-  app.openAPIRegistry.registerPath(
-    createRoute({
-      method: "get",
-      operationId: "listOrgApiKeys",
-      path: "/v1/orgs/{orgId}/api-keys",
-      request: { params: orgIdParam },
-      responses: {
-        200: {
-          content: {
-            "application/json": { schema: apiKeyListResponseSchema },
-          },
-          description: "API keys listed",
-        },
-        403: {
-          content: { "application/json": { schema: errorSchema } },
-          description: "Error",
-        },
-      },
-      summary: "List organization backend API keys",
-      tags: ["Organizations"],
-    })
-  );
-
-  app.get("/v1/orgs/:orgId/api-keys", async (c) => {
-    const auth = requireOrgAdminFromContext(c);
-    const orgId = decodeURIComponent(c.req.param("orgId"));
-    if (auth.activeOrgId !== orgId || !orgService) {
-      return errorResponse("Not found", 404);
-    }
-    return json<ListApiKeysResponse>(await orgService.listApiKeys(orgId));
-  });
-
-  app.openAPIRegistry.registerPath(
-    createRoute({
-      method: "post",
-      operationId: "rotateOrgApiKey",
-      path: "/v1/orgs/{orgId}/api-keys/{keyId}/rotate",
-      request: { params: apiKeyParams },
-      responses: {
-        200: {
-          content: { "application/json": { schema: apiKeyResponseSchema } },
-          description: "API key rotated",
-        },
-        403: {
-          content: { "application/json": { schema: errorSchema } },
-          description: "Error",
-        },
-        404: {
-          content: { "application/json": { schema: errorSchema } },
-          description: "Error",
-        },
-      },
-      summary: "Rotate an organization backend API key",
-      tags: ["Organizations"],
-    })
-  );
-
-  app.post("/v1/orgs/:orgId/api-keys/:keyId/rotate", async (c) => {
-    const auth = requireOrgAdminFromContext(c);
-    const orgId = decodeURIComponent(c.req.param("orgId"));
-    if (auth.activeOrgId !== orgId || !orgService) {
-      return errorResponse("Not found", 404);
-    }
-    const result = await orgService.rotateApiKey(
-      orgId,
-      auth.user.id,
-      c.req.param("keyId")
-    );
-    return json<RotateApiKeyResponse>(result);
-  });
-
-  app.openAPIRegistry.registerPath(
-    createRoute({
-      method: "delete",
-      operationId: "deleteOrgApiKey",
-      path: "/v1/orgs/{orgId}/api-keys/{keyId}",
-      request: { params: apiKeyParams },
-      responses: {
-        204: { description: "API key deleted" },
-        403: {
-          content: { "application/json": { schema: errorSchema } },
-          description: "Error",
-        },
-        404: {
-          content: { "application/json": { schema: errorSchema } },
-          description: "Error",
-        },
-      },
-      summary: "Delete an organization backend API key",
-      tags: ["Organizations"],
-    })
-  );
-
-  app.delete("/v1/orgs/:orgId/api-keys/:keyId", async (c) => {
-    const auth = requireOrgAdminFromContext(c);
-    const orgId = decodeURIComponent(c.req.param("orgId"));
-    if (auth.activeOrgId !== orgId || !orgService) {
-      return errorResponse("Not found", 404);
-    }
-    await orgService.deleteApiKey(orgId, auth.user.id, c.req.param("keyId"));
     return new Response(null, { status: 204 });
   });
 
   app.get("/v1/orgs/:orgId/llm-quota", async (c) => {
     const auth = requireOrgAdminFromContext(c);
     const orgId = decodeURIComponent(c.req.param("orgId"));
+
     if (auth.activeOrgId !== orgId) {
       return errorResponse("Not found", 404);
     }
@@ -540,6 +398,7 @@ export function registerOrgMemberRoutes(
     const quota = await new OrgUsageQuotaService(
       options.databaseAdapter
     ).getStatus(orgId);
+
     return json<OrgLlmQuotaStatusResponse>(quota);
   });
 
@@ -554,6 +413,7 @@ export function registerOrgMemberRoutes(
             "application/json": {
               schema: z
                 .object({
+                  allowedInviteDomains: z.array(z.string()).optional(),
                   monthlyLlmTokenLimit: z.number().int().min(0).optional(),
                   monthlyLlmTurnLimit: z.number().int().min(0).optional(),
                   monthlyLlmWarningPercent: z
@@ -617,8 +477,9 @@ export function registerOrgMemberRoutes(
       return errorResponse("Organization service not configured", 500);
     }
 
-    const body = await readJson<UpdateOrganizationRequest>(c.req.raw);
+    const body = await readJson(c.req.raw, updateOrganizationSchema);
     const organization = await orgService.updateOrganization(orgId, body);
+
     return json<OrganizationResponse>({ organization });
   });
 }
