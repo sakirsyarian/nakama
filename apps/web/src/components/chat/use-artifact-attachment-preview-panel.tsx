@@ -186,7 +186,6 @@ export function useArtifactAttachmentPreviewPanel({
     useState<ArtifactPreviewMode>("preview");
 
   const [editMode, setEditMode] = useState<EditMode>(null);
-  const [draft, setDraft] = useState("");
   const [saveError, setSaveError] = useState<string | null>(null);
   const { activeOrg } = useAuth();
   const writeArtifact = useWriteArtifactMutation();
@@ -313,14 +312,13 @@ export function useArtifactAttachmentPreviewPanel({
       return (
         <ArtifactMarkdownEditor
           busy={writeArtifact.isPending}
-          draft={draft}
           error={saveError}
+          initialDraft={content ?? ""}
           onCancel={() => {
             setEditMode(null);
             setSaveError(null);
           }}
-          onChange={setDraft}
-          onSave={() => void saveDraft(draft)}
+          onSave={(nextContent) => void saveDraft(nextContent)}
         />
       );
     }
@@ -458,7 +456,6 @@ export function useArtifactAttachmentPreviewPanel({
               return;
             }
 
-            setDraft(content ?? "");
             setEditMode("markdown");
           }}
           onToggleFullscreen={() => setFullscreen((current) => !current)}
@@ -514,7 +511,6 @@ export function useArtifactAttachmentPreviewPanel({
     previewMode,
     canEdit,
     editMode,
-    draft,
     saveError,
     writeArtifact.isPending,
     showPreviewToggle,
