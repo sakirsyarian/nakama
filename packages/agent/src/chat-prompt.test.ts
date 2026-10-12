@@ -7,6 +7,7 @@ function tool(name: string): ToolDefinition {
     description: name,
     name,
     parameters: { properties: {}, type: "object" },
+    run: async () => ({}),
   };
 }
 
@@ -85,4 +86,28 @@ test("buildChatSystemPrompt gives messaging style to the four chat channels only
 
   const whatsapp = prompt([], { channel: "whatsapp", chatKind: "group" });
   expect(whatsapp).toContain("WhatsApp channel");
+});
+
+test("automation report follows the delivery channel's format rules", () => {
+  const telegram = prompt([], {
+    channel: "automation",
+    deliveryChannel: "telegram",
+  });
+
+  expect(telegram).toContain("Telegram");
+  expect(telegram).toContain("Avoid raw HTML");
+  expect(telegram).not.toContain("share link");
+
+  expect(
+    prompt([], { channel: "automation", deliveryChannel: "whatsapp" })
+  ).toContain("Do not use markdown headings");
+});
+
+test("automation report adds no channel rules for email or no delivery", () => {
+  const plain = prompt([], { channel: "automation" });
+
+  expect(prompt([], { channel: "automation", deliveryChannel: "email" })).toBe(
+    plain
+  );
+  expect(plain).not.toContain("Telegram");
 });

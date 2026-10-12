@@ -130,11 +130,16 @@ export function createOrgContextMiddleware(
       PLUGIN_ACTION_PATH.test(c.req.path) && c.req.method === "POST";
 
     if (!orgId && auth.mode === "local-token" && !actionRequiresHeader) {
+      // One membership leaves no ambiguity. With several, a memberships[0]
+      // pick silently routes the call to the alphabetically first org (see
+      // listUserOrganizations) — a moving target whenever a new org is
+      // created — so leave orgId unset and fail with 400 like cookie
+      // sessions do.
       const memberships = await databaseAdapter.listUserOrganizations(
         auth.user.id
       );
 
-      orgId = memberships[0]?.organization.id ?? null;
+      orgId = memberships.length === 1 ? memberships[0].organization.id : null;
     }
 
     if (!orgId) {
@@ -145,7 +150,7 @@ export function createOrgContextMiddleware(
 
     const organization = await databaseAdapter.getOrganizationById(orgId);
 
-    if (!organization || organization.archivedAt) {
+    if (!organization || organization.archivedAt || organization.setupPending) {
       c.res = errorResponse("Not found", 404);
 
       return;

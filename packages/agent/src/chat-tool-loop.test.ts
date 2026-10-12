@@ -11,6 +11,7 @@ import type {
 } from "@nakama/core";
 import {
   persistInlineAttachmentsInContent,
+  readFileInputSchema,
   rehydrateMessagesForProvider,
   runReadFile,
   toAnthropicUserContent,
@@ -127,6 +128,41 @@ function delayedTool(
 }
 
 describe("agent chat tool loop", () => {
+  test.each([
+    { images: [] },
+    { images: null },
+    { images: [{ data: 123, mediaType: "image/png" }] },
+    { images: [{ data: "aW1hZ2U=" }] },
+    {
+      images: [{ data: "aW1hZ2U=", mediaType: "image/png" }, null],
+    },
+  ])("keeps malformed or empty image results in JSON: %j", async (result) => {
+    const session = createAgentChatSession({
+      provider: createMockProvider([
+        toolTurn([{ arguments: {}, id: "image", name: "sample" }]),
+        textReply("Done"),
+      ]),
+      tools: [{ ...sampleTool, run: async () => result }],
+    });
+
+    expect(await session.send("Inspect")).toBe("Done");
+    const message = session.getHistory().find((item) => item.role === "tool");
+    expect(message?.role).toBe("tool");
+
+    if (message?.role !== "tool") {
+      throw new Error("Missing tool result");
+    }
+
+    expect(JSON.parse(message.content)).toEqual(result);
+    expect(message.attachments).toBeUndefined();
+    expect(session.getHistory().map((item) => item.role)).toEqual([
+      "user",
+      "assistant",
+      "tool",
+      "assistant",
+    ]);
+  });
+
   test("sets current turn image references and clears them on the next turn", async () => {
     const contexts: unknown[] = [];
 
@@ -181,6 +217,7 @@ describe("agent chat tool loop", () => {
                 {
                   attachmentId: "image_1",
                   mediaType: "image/png",
+                  size: 5,
                   type: "image_ref",
                 },
               ];
@@ -251,7 +288,7 @@ describe("agent chat tool loop", () => {
               parallelSafe: stream,
               run: (input) =>
                 runReadFile(
-                  input,
+                  readFileInputSchema.parse(input),
                   { orgId: "org_test", profileId: "profile_test" },
                   { workspaceRoot: dir }
                 ),
@@ -954,15 +991,37 @@ describe("agent chat tool loop", () => {
     });
   });
 
-  test.each(["", "Working"])(
-    "ends with a final message at the tool round limit (text: %s)",
-    async (content) => {
+  test.each([
+    ["send", ""],
+    ["send", "Working"],
+    ["stream", ""],
+    ["stream", "Working"],
+  ] as const)(
+    "terminates cleanly at the tool iteration cap (%s, text: %s)",
+    async (mode, content) => {
       let call = 0;
+      let toolRuns = 0;
+      let streamed = "";
 
       const provider: ProviderClient = {
         ...createMockProvider([]),
-        generateChat() {
+        generateChat(input) {
           call += 1;
+
+          if (call === 101) {
+            expect(input.messages.at(-1)?.role).toBe("user");
+            expect(input.messages.at(-2)?.role).toBe("assistant");
+            expect(input.messages.at(-2)?.toolCalls?.length ?? 0).toBe(0);
+            expect(
+              input.messages
+                .filter((message) => message.role === "tool")
+                .map((message) => message.toolCallId)
+            ).toEqual(
+              Array.from({ length: 100 }, (_, index) => `c${index + 1}`)
+            );
+
+            return Promise.resolve(textReply("Continued"));
+          }
 
           const result = toolTurn([
             { arguments: { message: "x" }, id: `c${call}`, name: "sample" },
@@ -974,18 +1033,59 @@ describe("agent chat tool loop", () => {
             content,
           });
         },
+        async streamChat(input, handlers) {
+          const result = await this.generateChat(input);
+
+          if (result.content) {
+            handlers.onChunk(result.content);
+          }
+
+          return result;
+        },
       };
 
       const session = createAgentChatSession(
         { provider },
-        { tools: [sampleTool] }
+        {
+          tools: [
+            {
+              ...sampleTool,
+              async run(input) {
+                toolRuns += 1;
+
+                return input;
+              },
+            },
+          ],
+        }
       );
 
-      const reply = await session.send("loop forever");
+      const reply =
+        mode === "stream"
+          ? await session.sendStream("loop forever", {
+              onChunk(chunk) {
+                streamed += chunk;
+              },
+            })
+          : await session.send("loop forever");
+
       expect(call).toBe(100);
+      expect(toolRuns).toBe(100);
       expect(reply.length).toBeGreaterThan(0);
       expect(session.getHistory().at(-1)).toEqual({
         content: reply,
+        role: "assistant",
+      });
+
+      if (mode === "stream") {
+        expect(streamed).toBe(content.repeat(100) + reply);
+      }
+
+      expect(await session.send("Continue")).toBe("Continued");
+      expect(call).toBe(101);
+      expect(toolRuns).toBe(100);
+      expect(session.getHistory().at(-1)).toEqual({
+        content: "Continued",
         role: "assistant",
       });
     }

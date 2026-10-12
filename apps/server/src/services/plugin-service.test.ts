@@ -19,6 +19,7 @@ import {
   closePluginPackageRegistry,
   pluginPackage,
   pluginTarball,
+  publishPluginPackageVersion,
 } from "../testing/plugin-package-fixture";
 import { PluginService } from "./plugin-service";
 
@@ -359,19 +360,64 @@ describe("PluginService", () => {
     );
   });
 
+  test("reads a restricted package only with the npm token, and keeps the token on the registry host", async () => {
+    const db = createInMemoryDatabaseAdapter();
+    const service = new PluginService(db, configDir);
+    const source = validBundle({}, { token: "npm_fixture_token" });
+
+    await expect(service.previewPluginPackage(source)).rejects.toMatchObject({
+      code: "package_unavailable",
+    });
+
+    process.env.NAKAMA_PLUGIN_NPM_TOKEN = "npm_fixture_token";
+
+    try {
+      const preview = await service.previewPluginPackage(source);
+
+      const installed = await service.installPluginPackage(source, {
+        expectedDigest: preview.digest,
+      });
+
+      expect(installed.digest).toBe(preview.digest);
+      expect(
+        JSON.stringify(await db.getPluginRelease("notes", "1.0.0"))
+      ).not.toContain("npm_fixture_token");
+
+      publishPluginPackageVersion(source.packageName, "1.1.0");
+
+      expect(await service.listPluginUpdates()).toEqual([
+        {
+          packageName: source.packageName,
+          pluginId: "notes",
+          version: "1.1.0",
+        },
+      ]);
+
+      await expect(
+        service.previewPluginPackage(
+          validBundle({}, { tarball: "https://registry.example/notes.tgz" })
+        )
+      ).rejects.toMatchObject({ code: "invalid_package" });
+    } finally {
+      delete process.env.NAKAMA_PLUGIN_NPM_TOKEN;
+    }
+  });
+
   test("requires bundled dependencies and matching package identity", async () => {
     const service = new PluginService(
       createInMemoryDatabaseAdapter(),
       configDir
     );
 
-    for (const packageJson of [
+    const packageJsons: Record<string, Json>[] = [
       { dependencies: { lodash: "1.0.0" } },
       { optionalDependencies: { lodash: "1.0.0" } },
       { peerDependencies: { lodash: "1.0.0" } },
       { name: "another-package" },
       { version: "2.0.0" },
-    ]) {
+    ];
+
+    for (const packageJson of packageJsons) {
       await expect(
         service.previewPluginPackage(validBundle({}, { packageJson }))
       ).rejects.toMatchObject({ code: "invalid_manifest" });
