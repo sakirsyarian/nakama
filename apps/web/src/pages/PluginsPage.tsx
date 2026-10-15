@@ -1,11 +1,14 @@
 import type {
+  LocalPluginPreviewResponse,
   OrgPluginDetail,
   PluginContributionChangePreview,
   PluginPackagePreviewResponse,
   PluginPackageRequest,
   PluginReleaseSummary,
+  PluginUsageOrg,
 } from "@nakama/core/contract";
 import { Button } from "@nakama/ui/button";
+import { Checkbox } from "@nakama/ui/checkbox";
 import {
   Dialog,
   DialogContent,
@@ -21,10 +24,33 @@ import {
   DropdownMenuTrigger,
 } from "@nakama/ui/dropdown-menu";
 import { Input } from "@nakama/ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@nakama/ui/select";
 import { Spinner } from "@nakama/ui/spinner";
-import { Add01Icon, MoreHorizontalIcon } from "hugeicons-react";
-import { type MouseEvent, useRef, useState } from "react";
+import { cn } from "@nakama/ui/utils";
+import { useQuery } from "@tanstack/react-query";
+import {
+  Add01Icon,
+  ArrowDown01Icon,
+  ArrowRight01Icon,
+  MoreHorizontalIcon,
+  Search01Icon,
+  Tick02Icon,
+} from "hugeicons-react";
+import {
+  type Dispatch,
+  type MouseEvent,
+  type SetStateAction,
+  useRef,
+  useState,
+} from "react";
 import { Link, useParams } from "react-router-dom";
+import { ProfileAvatar } from "@/components/ProfileAvatar";
 import { useAuth } from "@/context/use-auth";
 import {
   formatPluginTrustLines,
@@ -36,6 +62,7 @@ import {
   useDeleteRetainedPluginData,
   useDisableOrgPlugin,
   useEnableOrgPlugin,
+  useInstallLocalPlugin,
   useInstallOfficialPlugin,
   useInstallOrgPlugin,
   useInstallPluginPackage,
@@ -44,16 +71,19 @@ import {
   usePluginAgentAccess,
   usePluginReleases,
   usePluginUpdates,
+  usePluginUsage,
   usePreviewOrgPluginUpdate,
   usePreviewPluginPackage,
   useReinstallOfficialPlugin,
   useRemovePluginRelease,
   useSavePluginAgentAccess,
   useUninstallOrgPlugin,
+  useUnplugPlugin,
   useUpdateOrgPlugin,
 } from "@/hooks/use-plugins";
 import { usePinnedPlugins } from "@/hooks/use-sidebar-collapsed";
-import { formatError } from "@/lib/client";
+import { client, formatError } from "@/lib/client";
+import { formatBytes } from "@/lib/knowledge-base-files";
 import {
   canAccessSystemPage,
   canManagePluginReleases,
@@ -92,7 +122,8 @@ type PluginDialog =
     }
   | { plugin: OrgPluginDetail; type: "uninstall" }
   | { plugin: OrgPluginDetail; type: "purge" }
-  | { pluginId: string; type: "remove-release"; version: string };
+  | { pluginId: string; type: "remove-release"; version: string }
+  | { pluginId: string; type: "remove-plugin"; versions: string[] };
 
 function usePluginCatalog(canInstallPackages: boolean) {
   const { data: plugins = [], isLoading, error } = useOrgPlugins();
@@ -294,6 +325,12 @@ function usePluginManagement(canInstallPackages: boolean, orgId: string) {
           orgId,
           pluginId: dialog.plugin.pluginId,
         });
+      } else if (dialog.type === "remove-plugin") {
+        await Promise.all(
+          dialog.versions.map((version) =>
+            removeRelease.mutateAsync({ pluginId: dialog.pluginId, version })
+          )
+        );
       } else {
         await removeRelease.mutateAsync({
           pluginId: dialog.pluginId,
@@ -322,6 +359,71 @@ function usePluginManagement(canInstallPackages: boolean, orgId: string) {
     setActionError,
     setDialog,
   };
+}
+
+/** Built-in (official catalog), Super Bot drafts (local releases), then the rest. */
+function groupPluginIds(
+  pluginIds: string[],
+  official: Array<{ id: string }>,
+  releases: PluginReleaseSummary[]
+) {
+  const builtIn = new Set(official.map((item) => item.id));
+
+  const createdBySuperBot = new Set(
+    releases.flatMap((item) =>
+      item.source === "local" || item.source === "agent" ? [item.pluginId] : []
+    )
+  );
+
+  const groups = [
+    {
+      ids: pluginIds.filter((id) => builtIn.has(id)),
+      title: "Built-in",
+    },
+    {
+      ids: pluginIds.filter(
+        (id) => !builtIn.has(id) && createdBySuperBot.has(id)
+      ),
+      title: "Created by you",
+    },
+    {
+      ids: pluginIds.filter(
+        (id) => !(builtIn.has(id) || createdBySuperBot.has(id))
+      ),
+      title: "From other sources",
+    },
+  ];
+
+  return groups.filter((group) => group.ids.length > 0);
+}
+
+function pluginMatchesQuery(
+  pluginId: string,
+  needle: string,
+  catalog: {
+    official: Array<{ description: string; id: string; name: string }>;
+    plugins: OrgPluginDetail[];
+    releases: PluginReleaseSummary[];
+  }
+) {
+  if (!needle) {
+    return true;
+  }
+
+  const plugin = catalog.plugins.find((item) => item.pluginId === pluginId);
+  const official = catalog.official.find((item) => item.id === pluginId);
+  const release = catalog.releases.find((item) => item.pluginId === pluginId);
+
+  return [
+    pluginId,
+    plugin?.name,
+    plugin?.description,
+    official?.name,
+    official?.description,
+    release?.manifest.name,
+    release?.manifest.description,
+    PLUGIN_DESCRIPTIONS.get(pluginId),
+  ].some((text) => text?.toLowerCase().includes(needle));
 }
 
 export function PluginsPage() {
@@ -361,6 +463,8 @@ export function PluginsPage() {
 
   const agentAccess = usePluginAgentAccess();
   const accessData = isPlatformAdmin ? agentAccess.data : undefined;
+  const [query, setQuery] = useState("");
+  const [folderOpen, setFolderOpen] = useState(false);
 
   if (isLoading && plugins.length === 0) {
     return <PluginEmptyState detail={Boolean(selectedPluginId)} loading />;
@@ -369,155 +473,193 @@ export function PluginsPage() {
   const errorMessage =
     actionError ?? (queryError ? formatError(queryError) : null);
 
+  const needle = query.trim().toLowerCase();
+  const canInstallHere = canInstallPackages && Boolean(orgId);
+
   const visiblePluginIds = selectedPluginId
     ? pluginIds.filter((id) => id === selectedPluginId)
-    : pluginIds;
+    : pluginIds.filter((id) =>
+        pluginMatchesQuery(id, needle, { official, plugins, releases })
+      );
+
+  const renderRow = (pluginId: string) => {
+    const plugin = plugins.find((item) => item.pluginId === pluginId);
+    const catalog = official.find((item) => item.id === pluginId);
+
+    const pluginReleases = releases.filter(
+      (item) => item.pluginId === pluginId
+    );
+
+    const updatable =
+      plugin?.installed &&
+      ["enabled", "disabled"].includes(plugin.lifecycleState);
+
+    const registryUpdate = updatable
+      ? updates.find(
+          (item) =>
+            item.pluginId === pluginId &&
+            isNewerPluginVersion(item.version, plugin)
+        )
+      : undefined;
+
+    const updateVersion = updatable
+      ? (nextPluginVersions(plugin)[0] ?? registryUpdate?.version)
+      : undefined;
+
+    return (
+      <PluginRow
+        accessCount={accessData?.counts[pluginId]}
+        busy={busy || Boolean(plugin && isPluginLifecycleBusy(plugin))}
+        canManage={canManage}
+        canManageAgentAccess={isPlatformAdmin}
+        catalogDescription={catalog?.description}
+        detail={Boolean(selectedPluginId)}
+        icon={plugin?.icon ?? catalog?.icon ?? pluginReleases[0]?.manifest.icon}
+        key={pluginId}
+        name={
+          plugin?.name ??
+          catalog?.name ??
+          pluginReleases[0]?.manifest.name ??
+          pluginId
+        }
+        official={Boolean(catalog)}
+        onAction={(type, target) => {
+          rememberFocus(target);
+          setActionError(null);
+
+          if (type === "install" && catalog) {
+            setDialog({
+              description: catalog.description,
+              name: catalog.name,
+              pluginId,
+              type: "official-install",
+            });
+
+            return;
+          }
+
+          if (type === "remove-plugin") {
+            setDialog({
+              pluginId,
+              type,
+              versions: pluginReleases.map((item) => item.version),
+            });
+
+            return;
+          }
+
+          if (!plugin) {
+            return;
+          }
+
+          if (type === "access") {
+            setAccessDialog({ orgId, plugin });
+
+            return;
+          }
+
+          if (type === "reinstall") {
+            void reinstallOfficial
+              .mutateAsync({
+                expectedRevision: plugin.revision,
+                pluginId,
+              })
+              .catch((err) => setActionError(formatError(err)));
+
+            return;
+          }
+
+          if (type === "update") {
+            const version = nextPluginVersions(plugin)[0];
+
+            if (version) {
+              void handleUpdate(plugin, version);
+            } else if (registryUpdate) {
+              // Nobody approved this version yet: review it, then update.
+              void previewNpmPackage(
+                {
+                  packageName: registryUpdate.packageName,
+                  version: registryUpdate.version,
+                },
+                plugin
+              );
+            }
+
+            return;
+          }
+
+          setDialog({ plugin, type });
+        }}
+        onRemove={(release, event) => {
+          rememberFocus(event.currentTarget);
+          setDialog({
+            pluginId,
+            type: "remove-release",
+            version: release.version,
+          });
+        }}
+        plugin={plugin}
+        pluginId={pluginId}
+        releases={pluginReleases}
+        updateVersion={canManage ? updateVersion : undefined}
+      />
+    );
+  };
+
+  const groups = selectedPluginId
+    ? [{ ids: visiblePluginIds, title: null }]
+    : groupPluginIds(visiblePluginIds, official, releases);
 
   return (
-    <div className="mx-auto min-w-0 max-w-3xl space-y-6">
+    <div className="mx-auto min-w-0 max-w-4xl space-y-6">
       <PluginPageHeader
         busy={busy}
-        canInstall={canInstallPackages}
+        canInstall={canInstallHere}
         detail={Boolean(selectedPluginId)}
         error={dialog ? null : errorMessage}
-        onInstall={(event) => {
-          rememberFocus(event.currentTarget);
+        onInstall={(target) => {
+          rememberFocus(target);
           setActionError(null);
           setDialog({ type: "package-entry" });
         }}
+        onInstallFromFolder={() => setFolderOpen(true)}
+        onQueryChange={setQuery}
+        query={query}
       />
+      {canInstallHere ? (
+        <LocalPluginInstaller
+          key={orgId}
+          onOpenChange={setFolderOpen}
+          open={folderOpen}
+          orgId={orgId}
+        />
+      ) : null}
 
       {visiblePluginIds.length === 0 ? (
         <PluginEmptyState
           detail={Boolean(selectedPluginId)}
+          filtered={pluginIds.length > 0}
           loading={catalogLoading}
         />
       ) : (
-        <ul
-          className={
-            selectedPluginId
-              ? "min-w-0"
-              : "divide-y divide-border overflow-hidden rounded-xl border border-border bg-card text-card-foreground"
-          }
-        >
-          {visiblePluginIds.map((pluginId) => {
-            const plugin = plugins.find((item) => item.pluginId === pluginId);
-            const catalog = official.find((item) => item.id === pluginId);
-
-            const pluginReleases = releases.filter(
-              (item) => item.pluginId === pluginId
-            );
-
-            const updatable =
-              plugin?.installed &&
-              ["enabled", "disabled"].includes(plugin.lifecycleState);
-
-            const registryUpdate = updatable
-              ? updates.find(
-                  (item) =>
-                    item.pluginId === pluginId &&
-                    isNewerPluginVersion(item.version, plugin)
-                )
-              : undefined;
-
-            const updateVersion = updatable
-              ? (nextPluginVersions(plugin)[0] ?? registryUpdate?.version)
-              : undefined;
-
-            return (
-              <PluginRow
-                accessCount={accessData?.counts[pluginId]}
-                busy={busy || Boolean(plugin && isPluginLifecycleBusy(plugin))}
-                canManage={canManage}
-                canManageAgentAccess={isPlatformAdmin}
-                catalogDescription={catalog?.description}
-                detail={Boolean(selectedPluginId)}
-                icon={
-                  plugin?.icon ??
-                  catalog?.icon ??
-                  pluginReleases[0]?.manifest.icon
-                }
-                key={pluginId}
-                name={
-                  plugin?.name ??
-                  catalog?.name ??
-                  pluginReleases[0]?.manifest.name ??
-                  pluginId
-                }
-                official={Boolean(catalog)}
-                onAction={(type, target) => {
-                  rememberFocus(target);
-                  setActionError(null);
-
-                  if (type === "install" && catalog) {
-                    setDialog({
-                      description: catalog.description,
-                      name: catalog.name,
-                      pluginId,
-                      type: "official-install",
-                    });
-
-                    return;
-                  }
-
-                  if (!plugin) {
-                    return;
-                  }
-
-                  if (type === "access") {
-                    setAccessDialog({ orgId, plugin });
-
-                    return;
-                  }
-
-                  if (type === "reinstall") {
-                    void reinstallOfficial
-                      .mutateAsync({
-                        expectedRevision: plugin.revision,
-                        pluginId,
-                      })
-                      .catch((err) => setActionError(formatError(err)));
-
-                    return;
-                  }
-
-                  if (type === "update") {
-                    const version = nextPluginVersions(plugin)[0];
-
-                    if (version) {
-                      void handleUpdate(plugin, version);
-                    } else if (registryUpdate) {
-                      // Nobody approved this version yet: review it, then update.
-                      void previewNpmPackage(
-                        {
-                          packageName: registryUpdate.packageName,
-                          version: registryUpdate.version,
-                        },
-                        plugin
-                      );
-                    }
-
-                    return;
-                  }
-
-                  setDialog({ plugin, type });
-                }}
-                onRemove={(release, event) => {
-                  rememberFocus(event.currentTarget);
-                  setDialog({
-                    pluginId,
-                    type: "remove-release",
-                    version: release.version,
-                  });
-                }}
-                plugin={plugin}
-                pluginId={pluginId}
-                releases={pluginReleases}
-                updateVersion={canManage ? updateVersion : undefined}
-              />
-            );
-          })}
-        </ul>
+        groups.map((group) => (
+          <section className="space-y-2.5" key={group.title ?? "all"}>
+            {group.title ? (
+              <h2 className="font-medium text-muted-foreground text-xs uppercase tracking-wider">
+                {group.title}
+              </h2>
+            ) : null}
+            <ul
+              className={
+                selectedPluginId
+                  ? "min-w-0"
+                  : "divide-y divide-border overflow-hidden rounded-xl border border-border bg-card text-card-foreground"
+              }
+            >
+              {group.ids.map(renderRow)}
+            </ul>
+          </section>
+        ))
       )}
 
       {isPlatformAdmin && accessDialog?.orgId === orgId ? (
@@ -534,7 +676,6 @@ export function PluginsPage() {
         onClose={closeDialog}
         onConfirm={() => void confirmDialog()}
         onPreview={(source) => void previewNpmPackage(source)}
-        orgId={orgId}
       />
     </div>
   );
@@ -542,12 +683,18 @@ export function PluginsPage() {
 
 function PluginEmptyState({
   detail,
+  filtered = false,
   loading,
 }: {
   detail: boolean;
+  filtered?: boolean;
   loading: boolean;
 }) {
   let message = detail ? "Plugin not found." : "No plugins available.";
+
+  if (filtered && !detail) {
+    message = "No plugins match.";
+  }
 
   if (loading) {
     message = "Loading plugins…";
@@ -564,15 +711,23 @@ function PluginPageHeader({
   detail,
   error,
   onInstall,
+  onInstallFromFolder,
+  onQueryChange,
+  query,
 }: {
   busy: boolean;
   canInstall: boolean;
   detail: boolean;
   error: string | null;
-  onInstall(event: MouseEvent<HTMLButtonElement>): void;
+  onInstall(target: HTMLElement | null): void;
+  onInstallFromFolder(): void;
+  onQueryChange(query: string): void;
+  query: string;
 }) {
+  const installRef = useRef<HTMLButtonElement | null>(null);
+
   return (
-    <div className="flex flex-wrap items-center justify-end gap-3 empty:hidden">
+    <div className="flex flex-wrap items-center gap-3 empty:hidden">
       {detail ? (
         <Link
           className="mr-auto text-muted-foreground text-sm hover:text-foreground"
@@ -580,11 +735,40 @@ function PluginPageHeader({
         >
           ← Back to plugins
         </Link>
-      ) : null}
+      ) : (
+        <div className="relative min-w-60 flex-1">
+          <Search01Icon
+            aria-hidden="true"
+            className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-muted-foreground"
+          />
+          <Input
+            aria-label="Search plugins"
+            className="pl-9"
+            onChange={(event) => onQueryChange(event.target.value)}
+            placeholder="Search plugins"
+            type="search"
+            value={query}
+          />
+        </div>
+      )}
       {canInstall && !detail ? (
-        <Button disabled={busy} onClick={onInstall} size="sm" variant="outline">
-          Install external plugin
-        </Button>
+        <DropdownMenu>
+          <DropdownMenuTrigger
+            render={<Button disabled={busy} ref={installRef} />}
+          >
+            <Add01Icon aria-hidden="true" className="size-4" />
+            Install plugin
+            <ArrowDown01Icon aria-hidden="true" className="size-4" />
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" className="w-52">
+            <DropdownMenuItem onClick={onInstallFromFolder}>
+              Made by Super Bot
+            </DropdownMenuItem>
+            <DropdownMenuItem onClick={() => onInstall(installRef.current)}>
+              From npm package
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
       ) : null}
       {error ? (
         <p
@@ -665,6 +849,478 @@ function PluginPackageForm({
   );
 }
 
+// Code that runs first, so the reviewer reads it first. The last group catches the rest.
+const LOCAL_REVIEW_GROUPS = [
+  ["Runs on the server", /^(actions|workers)\//],
+  ["Runs in the browser", /^ui\//],
+  ["Database migrations", /^migrations\//],
+  ["Source", /^src\//],
+  ["Config and other files", /./],
+] as const;
+
+/** Display only: the install still uses the reviewed bytes and digest. */
+function formatJsonForReview(text: string): string {
+  try {
+    return JSON.stringify(JSON.parse(text), null, 2);
+  } catch {
+    return text;
+  }
+}
+
+function LocalPluginReviewFiles({
+  disabled,
+  file,
+  files,
+  onClose,
+  onRead,
+  reviewed,
+}: {
+  disabled: boolean;
+  file: { path: string; content: string } | null;
+  files: LocalPluginPreviewResponse["files"];
+  onClose(): void;
+  onRead(path: string): Promise<void>;
+  reviewed: Set<string>;
+}) {
+  return (
+    <>
+      {LOCAL_REVIEW_GROUPS.map(([label, pattern], index) => {
+        const groupFiles = files.filter(
+          (item) =>
+            LOCAL_REVIEW_GROUPS.findIndex(([, match]) =>
+              match.test(item.path)
+            ) === index
+        );
+
+        if (groupFiles.length === 0) {
+          return null;
+        }
+
+        const runs = index < 3;
+
+        return (
+          <section className="min-w-0" key={String(pattern)}>
+            <h3
+              className={cn(
+                "mb-1.5 font-semibold text-xs uppercase tracking-wide",
+                runs ? "text-primary" : "text-muted-foreground"
+              )}
+            >
+              {label}
+            </h3>
+            <ul
+              className={cn(
+                "divide-y overflow-hidden rounded-lg border",
+                runs && "border-primary/40"
+              )}
+            >
+              {groupFiles.map((item) => {
+                const open = file?.path === item.path;
+                const read = reviewed.has(item.path);
+
+                return (
+                  <li key={item.path}>
+                    <button
+                      aria-expanded={open}
+                      className={cn(
+                        "flex min-h-11 w-full items-center gap-2.5 px-3 text-left text-sm disabled:opacity-60",
+                        open && "bg-muted/60"
+                      )}
+                      disabled={disabled}
+                      onClick={() => (open ? onClose() : onRead(item.path))}
+                      type="button"
+                    >
+                      {open ? (
+                        <ArrowDown01Icon aria-hidden className="size-4" />
+                      ) : (
+                        <ArrowRight01Icon aria-hidden className="size-4" />
+                      )}
+                      <span className="min-w-0 flex-1 truncate font-mono text-[13px]">
+                        {item.path}
+                      </span>
+                      <span className="text-muted-foreground text-xs">
+                        {formatBytes(item.size)}
+                      </span>
+                      <span
+                        className={cn(
+                          "rounded-full px-2 py-0.5 font-medium text-xs",
+                          read
+                            ? "bg-green-100 text-green-800 dark:bg-green-950 dark:text-green-300"
+                            : "border text-muted-foreground"
+                        )}
+                      >
+                        {read ? "Read" : "Not read"}
+                      </span>
+                    </button>
+                    {open ? (
+                      <pre
+                        aria-label={file.path}
+                        className="max-h-72 overflow-auto whitespace-pre-wrap break-all border-t bg-background p-3 font-mono text-xs leading-relaxed"
+                      >
+                        {file.content}
+                      </pre>
+                    ) : null}
+                  </li>
+                );
+              })}
+            </ul>
+          </section>
+        );
+      })}
+    </>
+  );
+}
+
+function LocalPluginDraftPicker({
+  disabled,
+  draftId,
+  error,
+  open,
+  orgId,
+  profileId,
+  onDraftChange,
+  onProfileChange,
+  onPreview,
+}: {
+  disabled: boolean;
+  draftId: string;
+  error: string | null;
+  open: boolean;
+  orgId: string;
+  profileId: string;
+  onDraftChange(value: string): void;
+  onProfileChange(value: string): void;
+  onPreview(): Promise<void>;
+}) {
+  const profiles = useQuery({
+    enabled: open,
+    queryFn: () => client.listProfiles(orgId),
+    queryKey: ["plugin-draft-profiles", orgId],
+  });
+
+  return (
+    <>
+      <Select
+        disabled={disabled}
+        onValueChange={(value) => {
+          onProfileChange(value ?? "");
+        }}
+        value={profileId}
+      >
+        <SelectTrigger aria-label="Super Bot">
+          <SelectValue placeholder="Super Bot" />
+        </SelectTrigger>
+        <SelectContent>
+          {(profiles.data?.profiles ?? [])
+            .filter((profile) => profile.isSuper)
+            .map((profile) => (
+              <SelectItem key={profile.id} value={profile.id}>
+                {profile.name}
+              </SelectItem>
+            ))}
+        </SelectContent>
+      </Select>
+      <Input
+        aria-label="Draft ID"
+        disabled={disabled}
+        onChange={(event) => {
+          onDraftChange(event.target.value);
+        }}
+        placeholder="Draft ID"
+        value={draftId}
+      />
+      {profiles.error ? (
+        <p role="alert">{formatError(profiles.error)}</p>
+      ) : null}
+      {error ? <p role="alert">{error}</p> : null}
+      <Button
+        disabled={!(profileId && draftId) || disabled}
+        onClick={onPreview}
+      >
+        Preview draft
+      </Button>
+    </>
+  );
+}
+
+/** Reads a draft file in chunks. Returns null when a newer request took over. */
+async function readLocalPluginText(
+  preview: LocalPluginPreviewResponse,
+  path: string,
+  isCurrent: () => boolean
+): Promise<string | null> {
+  const chunks: Uint8Array[] = [];
+  let offset: number | null = 0;
+
+  while (offset !== null && isCurrent()) {
+    const value = await client.readLocalPluginFile({
+      ...preview.draft,
+      expectedDigest: preview.digest,
+      offset,
+      path,
+    });
+
+    chunks.push(
+      Uint8Array.from(atob(value.content), (character) =>
+        character.charCodeAt(0)
+      )
+    );
+    offset = value.nextOffset;
+  }
+
+  if (!isCurrent()) {
+    return null;
+  }
+
+  const data = new Uint8Array(
+    chunks.reduce((size, chunk) => size + chunk.length, 0)
+  );
+
+  let position = 0;
+
+  for (const chunk of chunks) {
+    data.set(chunk, position);
+    position += chunk.length;
+  }
+
+  const text = new TextDecoder().decode(data);
+
+  return path.endsWith(".json") ? formatJsonForReview(text) : text;
+}
+
+function LocalPluginInstallButton({
+  draft,
+  onClick,
+}: {
+  draft: boolean;
+  onClick(): void;
+}) {
+  return (
+    <Button
+      onClick={onClick}
+      size={draft ? "sm" : "default"}
+      variant={draft ? "default" : "outline"}
+    >
+      {draft ? "Review and install" : "Install from folder"}
+    </Button>
+  );
+}
+
+export function LocalPluginInstaller({
+  draft,
+  orgId,
+  open: openProp,
+  onOpenChange,
+}: {
+  draft?: { draftId: string; profileId: string };
+  orgId: string;
+  /** Set both to open the dialog from another control; no trigger button renders. */
+  open?: boolean;
+  onOpenChange?(open: boolean): void;
+}) {
+  const [localOpen, setLocalOpen] = useState(false);
+  const open = openProp ?? localOpen;
+  const setOpen = onOpenChange ?? setLocalOpen;
+  const [profileId, setProfileId] = useState(draft?.profileId ?? "");
+  const [draftId, setDraftId] = useState(draft?.draftId ?? "");
+
+  const [preview, setPreview] = useState<LocalPluginPreviewResponse | null>(
+    null
+  );
+
+  const [file, setFile] = useState<{ path: string; content: string } | null>(
+    null
+  );
+
+  const [reviewed, setReviewed] = useState<Set<string>>(new Set());
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const generation = useRef(0);
+
+  const install = useInstallLocalPlugin();
+  const busy = pending || install.isPending;
+
+  function reset() {
+    generation.current += 1;
+    setPreview(null);
+    setFile(null);
+    setReviewed(new Set());
+    setPending(false);
+    setError(null);
+  }
+
+  async function loadPreview() {
+    reset();
+    const turn = generation.current;
+    setPending(true);
+
+    try {
+      const value = await client.previewLocalPlugin({
+        draftId,
+        orgId,
+        profileId,
+      });
+
+      if (turn === generation.current) {
+        setPreview(value);
+      }
+    } catch (failure) {
+      if (turn === generation.current) {
+        setError(formatError(failure));
+      }
+    } finally {
+      setPending((previous) =>
+        turn === generation.current ? false : previous
+      );
+    }
+  }
+
+  async function readFile(path: string) {
+    if (!preview) {
+      return;
+    }
+
+    const turn = ++generation.current;
+    setFile(null);
+    setPending(true);
+    setError(null);
+
+    try {
+      const content = await readLocalPluginText(
+        preview,
+        path,
+        () => turn === generation.current
+      );
+
+      if (content !== null) {
+        setFile({ content, path });
+        setReviewed((previous) => new Set([...previous, path]));
+      }
+    } catch (failure) {
+      if (turn === generation.current) {
+        setError(formatError(failure));
+        setPreview(null);
+        setReviewed(new Set());
+      }
+    } finally {
+      setPending((previous) =>
+        turn === generation.current ? false : previous
+      );
+    }
+  }
+
+  async function confirm() {
+    if (!preview || pending || install.isPending) {
+      return;
+    }
+
+    setError(null);
+
+    try {
+      await install.mutateAsync({
+        ...preview.draft,
+        expectedDigest: preview.digest,
+        expectedRevision: preview.expectedRevision,
+      });
+      setOpen(false);
+      reset();
+    } catch (failure) {
+      setError(formatError(failure));
+      setPreview(null);
+      setReviewed(new Set());
+    }
+  }
+
+  return (
+    <Dialog
+      onOpenChange={(next) => {
+        setOpen(next);
+        reset();
+      }}
+      open={open}
+    >
+      {onOpenChange ? null : (
+        <LocalPluginInstallButton
+          draft={Boolean(draft)}
+          onClick={() => {
+            reset();
+            setOpen(true);
+
+            if (draft) {
+              void loadPreview();
+            }
+          }}
+        />
+      )}
+      <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-3xl">
+        <DialogHeader>
+          <DialogTitle>Install a plugin made by Super Bot</DialogTitle>
+        </DialogHeader>
+        {draft ? (
+          error ? (
+            <p role="alert">{error}</p>
+          ) : null
+        ) : (
+          <LocalPluginDraftPicker
+            disabled={busy}
+            draftId={draftId}
+            error={error}
+            onDraftChange={(value) => {
+              reset();
+              setDraftId(value);
+            }}
+            onPreview={loadPreview}
+            onProfileChange={(value) => {
+              reset();
+              setProfileId(value);
+            }}
+            open={open}
+            orgId={orgId}
+            profileId={profileId}
+          />
+        )}
+        {preview ? (
+          <>
+            <div>
+              <p className="font-medium">
+                {preview.manifest.name}{" "}
+                <span className="font-normal text-muted-foreground">
+                  {preview.manifest.version}
+                </span>
+              </p>
+              <p className="text-muted-foreground text-sm">
+                Install only plugins you trust. A plugin can see and change all
+                data on this server.
+              </p>
+            </div>
+            <LocalPluginReviewFiles
+              disabled={busy}
+              file={file}
+              files={preview.files}
+              onClose={() => setFile(null)}
+              onRead={readFile}
+              reviewed={reviewed}
+            />
+            <DialogFooter className="sticky -bottom-4 z-10 items-center gap-3 bg-muted sm:justify-between">
+              <span className="min-w-0 truncate font-mono text-muted-foreground text-xs">
+                sha256 {preview.digest}
+              </span>
+              <div className="flex shrink-0 items-center gap-3">
+                <span className="text-muted-foreground text-sm tabular-nums">
+                  {reviewed.size} of {preview.files.length} read
+                </span>
+                <Button disabled={busy} onClick={confirm}>
+                  {install.isPending ? "Installing…" : "Confirm installation"}
+                </Button>
+              </div>
+            </DialogFooter>
+          </>
+        ) : null}
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 function PluginReleasesList({
   busy,
   plugins,
@@ -697,6 +1353,13 @@ function PluginReleasesList({
           >
             <div className="min-w-0">
               <p className="break-all font-mono text-xs">{release.version}</p>
+              {release.source === "local" || release.source === "agent" ? (
+                <span className="text-xs">
+                  {release.source === "agent"
+                    ? "Made by Super Bot"
+                    : "From a folder"}
+                </span>
+              ) : null}
               <p className="text-muted-foreground text-xs">
                 {inUse ? "In use" : "Available"}
               </p>
@@ -710,7 +1373,7 @@ function PluginReleasesList({
               type="button"
               variant="ghost"
             >
-              Remove release
+              Remove version
             </Button>
           </li>
         );
@@ -736,7 +1399,8 @@ interface PluginRowProps {
           "package" | "package-entry" | "remove-release" | "official-install"
         >
       | "reinstall"
-      | "access",
+      | "access"
+      | "remove-plugin",
     target: HTMLElement | null
   ): void;
   onRemove(release: PluginReleaseSummary, event: MouseEvent<HTMLElement>): void;
@@ -765,7 +1429,7 @@ function PluginRow({
   updateVersion,
 }: PluginRowProps) {
   return (
-    <li className={detail ? "min-w-0" : "min-w-0 px-4 py-3"}>
+    <li className={detail ? "min-w-0" : "min-w-0 px-4 py-3.5"}>
       <div className="flex flex-wrap items-center gap-3">
         <PluginIdentity
           catalogDescription={catalogDescription}
@@ -788,6 +1452,7 @@ function PluginRow({
           onAction={onAction}
           plugin={plugin}
           pluginId={pluginId}
+          releases={releases}
           updateVersion={updateVersion}
         />
       </div>
@@ -858,8 +1523,8 @@ function PluginIdentity({
         >
           {name}
           {!detail && plugin?.selectedVersion ? (
-            <span className="ml-2 font-normal text-muted-foreground text-xs">
-              {plugin.selectedVersion}
+            <span className="ml-2 font-mono font-normal text-[11px] text-muted-foreground">
+              {plugin.selectedVersion.split("+")[0]}
             </span>
           ) : null}
           {updateVersion ? (
@@ -869,22 +1534,9 @@ function PluginIdentity({
           ) : null}
         </h2>
         {detail ? (
-          <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-muted-foreground text-xs">
-            <span className="inline-flex items-center gap-1.5 capitalize">
-              <span
-                className="size-1.5 rounded-full bg-muted-foreground/40 data-[state=enabled]:bg-emerald-500"
-                data-state={plugin?.lifecycleState}
-              />
-              {plugin?.lifecycleState ?? "Available"}
-            </span>
-            {official ? (
-              <span className="rounded bg-muted px-1.5 py-0.5 text-[10px]">
-                Official
-              </span>
-            ) : null}
-          </div>
+          <PluginStatusLine official={official} plugin={plugin} />
         ) : (
-          <p className="mt-1 break-words text-muted-foreground text-sm">
+          <p className="mt-0.5 line-clamp-1 break-words text-muted-foreground text-sm">
             {PLUGIN_DESCRIPTIONS.get(pluginId) ||
               plugin?.description ||
               catalogDescription ||
@@ -892,6 +1544,36 @@ function PluginIdentity({
           </p>
         )}
       </div>
+    </div>
+  );
+}
+
+function PluginStatusLine({
+  official,
+  plugin,
+}: Pick<PluginRowProps, "official" | "plugin">) {
+  let status = "Not added";
+
+  if (plugin?.lifecycleState === "enabled") {
+    status = "On";
+  } else if (plugin?.installed) {
+    status = "Off";
+  }
+
+  return (
+    <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-muted-foreground text-xs">
+      <span className="inline-flex items-center gap-1.5">
+        <span
+          className="size-1.5 rounded-full bg-muted-foreground/40 data-[state=enabled]:bg-emerald-500"
+          data-state={plugin?.lifecycleState}
+        />
+        {status}
+      </span>
+      {official ? (
+        <span className="rounded bg-muted px-1.5 py-0.5 text-[10px]">
+          Built-in
+        </span>
+      ) : null}
     </div>
   );
 }
@@ -906,6 +1588,7 @@ function PluginRowControls({
   canManage,
   canManageAgentAccess,
   onAction,
+  releases,
   updateVersion,
 }: Pick<
   PluginRowProps,
@@ -918,6 +1601,7 @@ function PluginRowControls({
   | "canManage"
   | "canManageAgentAccess"
   | "onAction"
+  | "releases"
   | "updateVersion"
 >) {
   const actions = plugin ? pluginRowActions(plugin) : null;
@@ -935,6 +1619,12 @@ function PluginRowControls({
         >
           Open
         </Button>
+      ) : null}
+      {plugin?.lifecycleState === "enabled" && !detail ? (
+        <span className="inline-flex h-8 items-center gap-1.5 rounded-full bg-emerald-500/10 px-3 font-medium text-emerald-700 text-sm dark:text-emerald-400">
+          <Tick02Icon aria-hidden="true" className="size-4" />
+          Added
+        </span>
       ) : null}
       {canManage && (canInstall || actions?.enable) ? (
         <PluginInstallButton
@@ -955,6 +1645,7 @@ function PluginRowControls({
         onAction={onAction}
         plugin={plugin}
         pluginId={pluginId}
+        releases={releases}
         updateVersion={updateVersion}
       />
     </div>
@@ -972,23 +1663,51 @@ function PluginInstallButton({
 }) {
   return (
     <Button
-      aria-label={canInstall ? `Install ${name}` : undefined}
+      aria-label={canInstall ? `Add ${name}` : undefined}
+      className={canInstall && !detail ? "rounded-full" : undefined}
       disabled={busy}
       onClick={(event) =>
         onAction(canInstall ? "install" : "enable", event.currentTarget)
       }
-      size={canInstall && !detail ? "icon-sm" : "sm"}
-      variant={canInstall && !detail ? "ghost" : "default"}
+      size="sm"
+      variant={canInstall && !detail ? "outline" : "default"}
     >
       {canInstall && !detail ? (
-        <Add01Icon aria-hidden="true" className="size-5" />
+        <>
+          <Add01Icon aria-hidden="true" className="size-4" />
+          Add
+        </>
       ) : canInstall ? (
-        "Install"
+        "Add"
       ) : (
-        "Enable"
+        "Turn on"
       )}
     </Button>
   );
+}
+
+function pluginMenuActions({
+  official,
+  plugin,
+  releases,
+  updateVersion,
+}: Pick<PluginRowProps, "official" | "plugin" | "releases" | "updateVersion">) {
+  const actions = plugin ? pluginRowActions(plugin) : null;
+
+  const all = [
+    ["disable", "Turn off", actions?.disable],
+    ["update", "Update", actions?.update || Boolean(updateVersion)],
+    ["reinstall", "Reinstall", official && plugin?.installed],
+    ["uninstall", "Remove", actions?.uninstall],
+    ["purge", "Delete saved data", actions?.purge],
+    [
+      "remove-plugin",
+      "Delete plugin",
+      !(official || plugin?.installed) && releases.length > 0,
+    ],
+  ] as const;
+
+  return all.filter(([, , visible]) => visible);
 }
 
 function PluginRowMenu({
@@ -1001,6 +1720,7 @@ function PluginRowMenu({
   canManage,
   canManageAgentAccess,
   onAction,
+  releases,
   updateVersion,
 }: Pick<
   PluginRowProps,
@@ -1013,18 +1733,10 @@ function PluginRowMenu({
   | "canManage"
   | "canManageAgentAccess"
   | "onAction"
+  | "releases"
   | "updateVersion"
 >) {
   const menuRef = useRef<HTMLButtonElement | null>(null);
-  const actions = plugin ? pluginRowActions(plugin) : null;
-
-  const secondaryActions = [
-    ["disable", "Disable", actions?.disable],
-    ["update", "Update", actions?.update || Boolean(updateVersion)],
-    ["reinstall", "Reinstall", official && plugin?.installed],
-    ["uninstall", "Uninstall", actions?.uninstall],
-    ["purge", "Delete data", actions?.purge],
-  ] as const;
 
   const { pinned, toggle: togglePin } = usePinnedPlugins();
   const canPin = plugin?.lifecycleState === "enabled" && plugin.ui !== null;
@@ -1033,7 +1745,7 @@ function PluginRowMenu({
     canManageAgentAccess && plugin?.lifecycleState === "enabled";
 
   const visibleSecondaryActions = canManage
-    ? secondaryActions.filter(([, , visible]) => visible)
+    ? pluginMenuActions({ official, plugin, releases, updateVersion })
     : [];
 
   const hasMenu =
@@ -1065,7 +1777,7 @@ function PluginRowMenu({
               <Link to={`/customize/plugins/${encodeURIComponent(pluginId)}`} />
             }
           >
-            Details
+            View details
           </DropdownMenuItem>
         )}
         {canPin ? (
@@ -1080,7 +1792,7 @@ function PluginRowMenu({
             disabled={busy}
             onClick={() => onAction("access", menuRef.current)}
           >
-            Manage agent access
+            Choose agents
           </DropdownMenuItem>
         ) : null}
         {visibleSecondaryActions.map(([type, label]) => (
@@ -1089,7 +1801,9 @@ function PluginRowMenu({
             key={type}
             onClick={() => onAction(type, menuRef.current)}
             variant={
-              type === "purge" || type === "uninstall"
+              type === "purge" ||
+              type === "uninstall" ||
+              type === "remove-plugin"
                 ? "destructive"
                 : "default"
             }
@@ -1122,7 +1836,7 @@ function PluginRowDetails({
         </p>
         {accessCount !== undefined && plugin?.lifecycleState === "enabled" ? (
           <p className="mt-2">
-            Available to {accessCount} {accessCount === 1 ? "agent" : "agents"}
+            Used by {accessCount} {accessCount === 1 ? "agent" : "agents"}
           </p>
         ) : null}
         {plugin?.description ? (
@@ -1139,7 +1853,7 @@ function PluginRowDetails({
   );
 }
 
-function PluginAgentAccessDialog({
+export function PluginAgentAccessDialog({
   plugin,
   onClose,
 }: {
@@ -1196,7 +1910,7 @@ function PluginAgentAccessDialog({
     >
       <DialogContent className="sm:max-w-md">
         <DialogHeader>
-          <DialogTitle>Manage agent access</DialogTitle>
+          <DialogTitle>Choose agents that can use this plugin</DialogTitle>
           <DialogDescription>
             {plugin.name} — selected agents receive all of this plugin’s tools
             and skills.
@@ -1222,66 +1936,21 @@ function PluginAgentAccessDialog({
             </Button>
           </div>
         ) : null}
-        {data && !access.error ? (
-          hasResources ? (
-            <div className="max-h-80 space-y-1 overflow-y-auto">
-              {data.profiles.length === 0 ? (
-                <p className="py-4 text-muted-foreground text-sm">
-                  No agents in this organization.
-                </p>
-              ) : null}
-              {data.profiles.map((profile) => {
-                const state = pluginAgentAccessState(
-                  profile,
-                  plugin.pluginId,
-                  data
-                );
-
-                const partial =
-                  changes[profile.id] === undefined &&
-                  state.assigned > 0 &&
-                  !state.full;
-
-                return (
-                  <label
-                    className="flex cursor-pointer items-center gap-3 rounded-md px-2 py-2.5 hover:bg-muted/50"
-                    key={profile.id}
-                  >
-                    <input
-                      checked={changes[profile.id] ?? state.full}
-                      className="size-4 shrink-0 accent-primary"
-                      disabled={busy}
-                      onChange={(event) =>
-                        setChanges((current) => ({
-                          ...current,
-                          [profile.id]: event.target.checked,
-                        }))
-                      }
-                      ref={(element) => {
-                        if (element) {
-                          element.indeterminate = partial;
-                        }
-                      }}
-                      type="checkbox"
-                    />
-                    <span className="min-w-0 flex-1 break-words text-sm">
-                      {profile.name}
-                    </span>
-                    {partial ? (
-                      <span className="text-muted-foreground text-xs">
-                        Partial access
-                      </span>
-                    ) : null}
-                  </label>
-                );
-              })}
-            </div>
+        {data &&
+          !access.error &&
+          (hasResources ? (
+            <PluginAgentAccessList
+              busy={busy}
+              changes={changes}
+              data={data}
+              pluginId={plugin.pluginId}
+              setChanges={setChanges}
+            />
           ) : (
             <p className="text-muted-foreground text-sm">
-              This plugin has no tools or skills to assign.
+              This plugin has nothing for agents to use.
             </p>
-          )
-        ) : null}
+          ))}
         {save.error ? (
           <p className="text-destructive text-sm" role="alert">
             {formatError(save.error)} Some changes may have been saved. Review
@@ -1307,6 +1976,129 @@ function PluginAgentAccessDialog({
         </DialogFooter>
       </DialogContent>
     </Dialog>
+  );
+}
+
+function PluginAgentAccessList({
+  busy,
+  changes,
+  data,
+  pluginId,
+  setChanges,
+}: {
+  busy: boolean;
+  changes: Record<string, boolean>;
+  data: NonNullable<ReturnType<typeof usePluginAgentAccess>["data"]>;
+  pluginId: string;
+  setChanges: Dispatch<SetStateAction<Record<string, boolean>>>;
+}) {
+  const [query, setQuery] = useState("");
+
+  const profiles = data.profiles;
+
+  const isSelected = (profile: (typeof profiles)[number]) =>
+    changes[profile.id] ?? pluginAgentAccessState(profile, pluginId, data).full;
+
+  const needle = query.trim().toLowerCase();
+
+  const shown = profiles.filter((profile) =>
+    profile.name.toLowerCase().includes(needle)
+  );
+
+  const selectedCount = profiles.filter(isSelected).length;
+
+  const allShownSelected = shown.length > 0 && shown.every(isSelected);
+  const someShownSelected = shown.some(isSelected);
+
+  function selectShown(selected: boolean) {
+    setChanges((current) => ({
+      ...current,
+      ...Object.fromEntries(shown.map((profile) => [profile.id, selected])),
+    }));
+  }
+
+  return (
+    <div className="space-y-3">
+      {profiles.length > 0 ? (
+        <>
+          <div className="relative">
+            <Search01Icon
+              aria-hidden="true"
+              className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-muted-foreground"
+            />
+            <Input
+              aria-label="Search agents"
+              className="pl-9"
+              onChange={(event) => setQuery(event.target.value)}
+              placeholder="Search agents"
+              value={query}
+            />
+          </div>
+          <div className="flex items-center justify-between gap-3 border-border border-y px-2 py-1.5">
+            <label className="flex cursor-pointer items-center gap-3 font-medium text-sm">
+              <Checkbox
+                checked={allShownSelected}
+                disabled={busy || shown.length === 0}
+                indeterminate={someShownSelected && !allShownSelected}
+                onCheckedChange={selectShown}
+              />
+              Select all
+            </label>
+            <span className="text-muted-foreground text-xs">
+              {selectedCount} of {profiles.length} selected
+            </span>
+          </div>
+        </>
+      ) : null}
+      <div className="max-h-80 space-y-1 overflow-y-auto">
+        {profiles.length === 0 ? (
+          <p className="py-4 text-muted-foreground text-sm">
+            No agents in this organization.
+          </p>
+        ) : null}
+        {profiles.length > 0 && shown.length === 0 ? (
+          <p className="py-4 text-center text-muted-foreground text-sm">
+            No agents match.
+          </p>
+        ) : null}
+        {shown.map((profile) => {
+          const state = pluginAgentAccessState(profile, pluginId, data);
+
+          const partial =
+            changes[profile.id] === undefined &&
+            state.assigned > 0 &&
+            !state.full;
+
+          return (
+            <label
+              className="flex cursor-pointer items-center gap-3 rounded-md px-2 py-2.5 hover:bg-muted/50"
+              key={profile.id}
+            >
+              <Checkbox
+                checked={changes[profile.id] ?? state.full}
+                disabled={busy}
+                indeterminate={partial}
+                onCheckedChange={(checked) =>
+                  setChanges((current) => ({
+                    ...current,
+                    [profile.id]: checked,
+                  }))
+                }
+              />
+              <ProfileAvatar profile={profile} size="sm" />
+              <span className="min-w-0 flex-1 break-words text-sm">
+                {profile.name}
+              </span>
+              {partial ? (
+                <span className="text-muted-foreground text-xs">
+                  Partial access
+                </span>
+              ) : null}
+            </label>
+          );
+        })}
+      </div>
+    </div>
   );
 }
 
@@ -1337,7 +2129,6 @@ function PluginConfirmDialog({
   dialog,
   busy,
   error,
-  orgId,
   onClose,
   onConfirm,
   onPreview,
@@ -1345,12 +2136,12 @@ function PluginConfirmDialog({
   dialog: PluginDialog | null;
   busy: boolean;
   error: string | null;
-  orgId: string;
   onClose: () => void;
   onConfirm: () => void;
   onPreview(source: PluginPackageRequest): void;
 }) {
   const title = dialogTitle(dialog);
+  const { blocked, inUse } = useRemovalBlockers(dialog);
 
   return (
     <Dialog
@@ -1366,9 +2157,8 @@ function PluginConfirmDialog({
           <DialogTitle>{title}</DialogTitle>
           {dialog?.type === "package" ? (
             <DialogDescription>
-              Trust this author with the Nakama server and your signed-in
-              browser. Plugin code is not sandboxed and can access data across
-              organizations.
+              Install only plugins from people you trust. A plugin can see and
+              change all data on this server, in every organization.
             </DialogDescription>
           ) : (
             <DialogDescription className="sr-only">{title}</DialogDescription>
@@ -1387,7 +2177,8 @@ function PluginConfirmDialog({
           />
         ) : (
           <>
-            {dialog ? <DialogBody dialog={dialog} orgId={orgId} /> : null}
+            {inUse ? <PluginUsageList {...inUse} /> : null}
+            {dialog && !blocked ? <DialogBody dialog={dialog} /> : null}
             <DialogFooter>
               <Button
                 disabled={busy}
@@ -1397,7 +2188,11 @@ function PluginConfirmDialog({
               >
                 Cancel
               </Button>
-              <Button disabled={busy} onClick={onConfirm} type="button">
+              <Button
+                disabled={busy || blocked}
+                onClick={onConfirm}
+                type="button"
+              >
                 {busy ? <Spinner className="size-4" /> : null}
                 {confirmLabel(dialog)}
               </Button>
@@ -1409,12 +2204,85 @@ function PluginConfirmDialog({
   );
 }
 
+/** Organizations that still hold the plugin a delete dialog would remove. */
+function useRemovalBlockers(dialog: PluginDialog | null) {
+  const pluginId = dialog?.type === "remove-plugin" ? dialog.pluginId : null;
+  const usage = usePluginUsage(pluginId);
+  const orgs = usage.data?.orgs ?? [];
+
+  return {
+    blocked: Boolean(pluginId) && (usage.isPending || orgs.length > 0),
+    inUse: pluginId && orgs.length > 0 ? { orgs, pluginId } : null,
+  };
+}
+
+function PluginUsageList({
+  orgs,
+  pluginId,
+}: {
+  orgs: PluginUsageOrg[];
+  pluginId: string;
+}) {
+  const unplug = useUnplugPlugin();
+
+  return (
+    <div className="min-w-0 space-y-3">
+      <p className="rounded-lg bg-amber-500/10 px-3 py-2 text-amber-900 text-sm dark:text-amber-200">
+        Still in use. Unplug it from each organization below, then delete.
+      </p>
+      {unplug.error ? (
+        <p className="break-words text-destructive text-sm" role="alert">
+          {formatError(unplug.error)}
+        </p>
+      ) : null}
+      <ul className="divide-y divide-border rounded-xl border border-border">
+        {orgs.map((org) => (
+          <li className="flex flex-wrap items-center gap-3 p-3" key={org.orgId}>
+            <div className="min-w-0 flex-1 space-y-1.5">
+              <p className="break-words font-medium text-sm">{org.name}</p>
+              {org.agents.length > 0 ? (
+                <ul
+                  aria-label="Agents using it"
+                  className="flex flex-wrap gap-1.5"
+                >
+                  {org.agents.map((agent) => (
+                    <li
+                      className="rounded-full bg-muted px-2 py-0.5 text-xs"
+                      key={agent.id}
+                    >
+                      {agent.name}
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <p className="text-muted-foreground text-xs">
+                  No agents use it
+                </p>
+              )}
+            </div>
+            <Button
+              disabled={unplug.isPending}
+              onClick={() => unplug.mutate({ org, pluginId })}
+              size="sm"
+              type="button"
+              variant="outline"
+            >
+              {unplug.isPending && unplug.variables?.org.orgId === org.orgId ? (
+                <Spinner className="size-4" />
+              ) : null}
+              Unplug and delete data
+            </Button>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
 function DialogBody({
   dialog,
-  orgId,
 }: {
   dialog: Exclude<PluginDialog, { type: "package-entry" }>;
-  orgId: string;
 }) {
   if (dialog.type === "official-install") {
     return <p className="text-sm">{dialog.description}</p>;
@@ -1440,10 +2308,14 @@ function DialogBody({
           {dialog.plugin.name} → {dialog.targetVersion}
         </p>
         {dialog.preview.removedSkillKeys.length > 0 ? (
-          <p>Removes skills {dialog.preview.removedSkillKeys.join(", ")}</p>
+          <p>
+            These skills go away: {dialog.preview.removedSkillKeys.join(", ")}
+          </p>
         ) : null}
         {dialog.preview.removedActionKeys.length > 0 ? (
-          <p>Removes actions {dialog.preview.removedActionKeys.join(", ")}</p>
+          <p>
+            These actions go away: {dialog.preview.removedActionKeys.join(", ")}
+          </p>
         ) : null}
       </div>
     );
@@ -1452,7 +2324,20 @@ function DialogBody({
   if (dialog.type === "purge") {
     return (
       <p className="text-sm">
-        {dialog.plugin.pluginId} in {orgId}, revision {dialog.plugin.revision}
+        This deletes all data that {dialog.plugin.name} saved. You cannot undo
+        this.
+      </p>
+    );
+  }
+
+  if (dialog.type === "remove-plugin") {
+    return (
+      <p className="text-sm">
+        This deletes {dialog.pluginId} and{" "}
+        {dialog.versions.length === 1
+          ? "its only version"
+          : `all ${dialog.versions.length} versions`}
+        .
       </p>
     );
   }
@@ -1460,15 +2345,16 @@ function DialogBody({
   if (dialog.type === "remove-release") {
     return (
       <p className="text-sm">
-        {dialog.pluginId} {dialog.version}
+        {dialog.pluginId}, version {dialog.version}
       </p>
     );
   }
 
   return (
     <p className="text-sm">
-      {dialog.plugin.name} ({dialog.plugin.pluginId}), revision{" "}
-      {dialog.plugin.revision}
+      {dialog.type === "uninstall"
+        ? `${dialog.plugin.name} stops working for everyone. Its saved data is kept.`
+        : dialog.plugin.name}
     </p>
   );
 }
@@ -1479,27 +2365,27 @@ function dialogTitle(dialog: PluginDialog | null): string {
   }
 
   if (dialog.type === "package-entry") {
-    return "Install external plugin";
+    return "Install from npm package";
   }
 
   if (dialog.type === "official-install") {
-    return `Install ${dialog.name}?`;
+    return `Add ${dialog.name}?`;
   }
 
   if (dialog.type === "package") {
-    return "Install this package?";
+    return "Install this plugin?";
   }
 
   if (dialog.type === "install") {
-    return "Install in this org?";
+    return "Add to your organization?";
   }
 
   if (dialog.type === "enable") {
-    return "Enable this plugin?";
+    return "Turn on this plugin?";
   }
 
   if (dialog.type === "disable") {
-    return "Disable this plugin?";
+    return "Turn off this plugin?";
   }
 
   if (dialog.type === "update") {
@@ -1507,14 +2393,18 @@ function dialogTitle(dialog: PluginDialog | null): string {
   }
 
   if (dialog.type === "uninstall") {
-    return "Uninstall this plugin?";
+    return "Remove this plugin?";
   }
 
   if (dialog.type === "purge") {
-    return "Delete retained plugin data?";
+    return "Delete saved data?";
   }
 
-  return "Remove this release?";
+  if (dialog.type === "remove-plugin") {
+    return "Delete this plugin?";
+  }
+
+  return "Remove this version?";
 }
 
 function confirmLabel(dialog: PluginDialog | null): string {
@@ -1527,15 +2417,15 @@ function confirmLabel(dialog: PluginDialog | null): string {
     dialog.type === "install" ||
     dialog.type === "official-install"
   ) {
-    return "Install";
+    return dialog.type === "package" ? "Install" : "Add";
   }
 
   if (dialog.type === "enable") {
-    return "Enable";
+    return "Turn on";
   }
 
   if (dialog.type === "disable") {
-    return "Disable";
+    return "Turn off";
   }
 
   if (dialog.type === "update") {
@@ -1543,11 +2433,15 @@ function confirmLabel(dialog: PluginDialog | null): string {
   }
 
   if (dialog.type === "uninstall") {
-    return "Uninstall";
+    return "Remove";
   }
 
   if (dialog.type === "purge") {
-    return "Delete data";
+    return "Delete saved data";
+  }
+
+  if (dialog.type === "remove-plugin") {
+    return "Delete";
   }
 
   return "Remove";

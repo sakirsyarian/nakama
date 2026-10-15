@@ -53,6 +53,7 @@ import type {
   CreateOrganizationRequest,
   CreateOrganizationResponse,
   CreateProfileRequest,
+  CreateProfileWithSuperBotRequest,
   CreateProviderRequest,
   CreateProviderResponse,
   CreateSessionRequest,
@@ -83,6 +84,7 @@ import type {
   ImportKnowledgeBaseZipResponse,
   InitSoulResponse,
   InitUserContextResponse,
+  InstallLocalPluginRequest,
   InstallOrgPluginRequest,
   InstallPluginPackageRequest,
   InstallPluginPackageResponse,
@@ -123,6 +125,8 @@ import type {
   ListWorkflowRunsResponse,
   ListWorkflowsResponse,
   ListWorkspaceFilesResponse,
+  LocalPluginDraftRequest,
+  LocalPluginPreviewResponse,
   MarkAutomationRunsReadResponse,
   McpServerResponse,
   MfaBackupCodesResponse,
@@ -146,6 +150,7 @@ import type {
   OrgPluginDetail,
   OrgPluginSummary,
   OrgSharedResourceResponse,
+  OrgUsageSummaryResponse,
   PasskeyAuthenticationOptionsResponse,
   PasskeyCredentialResponse,
   PasskeyRegistrationOptionsResponse,
@@ -156,6 +161,7 @@ import type {
   PluginPackagePreviewResponse,
   PluginPackageRequest,
   PluginRevisionRequest,
+  PluginUsageResponse,
   PluginWorkerStatus,
   PreviewDataImportRequest,
   ProfilePackImportRequest,
@@ -166,6 +172,7 @@ import type {
   PublishArtifactShareResponse,
   PublishedSkillResponse,
   PublishOrgSharedResourceRequest,
+  ReadLocalPluginFileRequest,
   RegenerateNotificationDestinationKeyResponse,
   RenameWorkspaceEntryRequest,
   RequestPasswordResetRequest,
@@ -1041,6 +1048,15 @@ export class NakamaClient {
 
   async createProfile(request: CreateProfileRequest): Promise<ProfileResponse> {
     return this.request<ProfileResponse>("/v1/profiles", {
+      body: JSON.stringify(request),
+      method: "POST",
+    });
+  }
+
+  async createProfileWithSuperBot(
+    request: CreateProfileWithSuperBotRequest
+  ): Promise<ProfileResponse> {
+    return this.request<ProfileResponse>("/v1/profiles/with-super-bot", {
       body: JSON.stringify(request),
       method: "POST",
     });
@@ -3135,6 +3151,15 @@ export class NakamaClient {
     );
   }
 
+  async getOrganizationUsageSummary(
+    orgId: string
+  ): Promise<OrgUsageSummaryResponse> {
+    return this.request<OrgUsageSummaryResponse>(
+      `/v1/orgs/${encodeURIComponent(orgId)}/usage-summary`,
+      { headers: { "X-Org-Id": orgId } }
+    );
+  }
+
   async getOrganizationLlmQuotaStatus(
     orgId: string
   ): Promise<OrgLlmQuotaStatusResponse> {
@@ -3149,6 +3174,36 @@ export class NakamaClient {
   ): Promise<PluginPackagePreviewResponse> {
     return this.request("/v1/platform/plugins/releases/preview", {
       body: JSON.stringify(request),
+      method: "POST",
+    });
+  }
+
+  async previewLocalPlugin(
+    input: LocalPluginDraftRequest
+  ): Promise<LocalPluginPreviewResponse> {
+    return this.request("/v1/platform/plugins/preview-local", {
+      body: JSON.stringify(input),
+      method: "POST",
+    });
+  }
+
+  async readLocalPluginFile(input: ReadLocalPluginFileRequest): Promise<{
+    path: string;
+    content: string;
+    encoding: "base64";
+    nextOffset: number | null;
+  }> {
+    return this.request("/v1/platform/plugins/local-file", {
+      body: JSON.stringify(input),
+      method: "POST",
+    });
+  }
+
+  async installLocalPlugin(
+    input: InstallLocalPluginRequest
+  ): Promise<{ install: OrgPluginSummary }> {
+    return this.request("/v1/platform/plugins/install-local", {
+      body: JSON.stringify(input),
       method: "POST",
     });
   }
@@ -3171,6 +3226,12 @@ export class NakamaClient {
   async listPluginUpdates(): Promise<ListPluginUpdatesResponse> {
     return this.request<ListPluginUpdatesResponse>(
       "/v1/platform/plugins/updates"
+    );
+  }
+
+  async getPluginUsage(pluginId: string): Promise<PluginUsageResponse> {
+    return this.request<PluginUsageResponse>(
+      `/v1/platform/plugins/${encodeURIComponent(pluginId)}/usage`
     );
   }
 
@@ -3405,7 +3466,8 @@ export class NakamaClient {
 
   async listOrgMembers(orgId: string): Promise<ListOrgMembersResponse> {
     return this.request<ListOrgMembersResponse>(
-      `/v1/orgs/${encodeURIComponent(orgId)}/members`
+      `/v1/orgs/${encodeURIComponent(orgId)}/members`,
+      { headers: { "X-Org-Id": orgId } }
     );
   }
 
