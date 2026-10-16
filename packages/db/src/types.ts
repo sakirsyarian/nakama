@@ -929,6 +929,13 @@ export interface DatabaseAdapter {
 
   /** Append-only insert. Adapters must not expose update/delete for this table. */
   createProfileChangeEvent(record: StoredProfileChangeEvent): Promise<void>;
+
+  /**
+   * Inserts a profile only when its id is still free. Resolves to `false`,
+   * leaving the existing row untouched, when the id is already taken, so
+   * allocation and insertion stay atomic for concurrent callers.
+   */
+  createProfileIfAbsent(record: StoredProfileRecord): Promise<boolean>;
   createSharedAgentInstance(
     teamOrgId: string,
     publicationId: string,
@@ -964,6 +971,8 @@ export interface DatabaseAdapter {
   deletePasskeys(userId: string): Promise<void>;
   deletePluginRelease(pluginId: string, version: string): Promise<boolean>;
   deleteProfile(id: string): Promise<boolean>;
+  /** Org-scoped delete: resolves to `false` when the profile belongs elsewhere. */
+  deleteProfileForOrg(id: string, orgId: string): Promise<boolean>;
   deleteSession(id: string): Promise<boolean>;
   deleteSkill(id: string): Promise<boolean>;
   deleteTool(id: string): Promise<boolean>;
@@ -1317,7 +1326,8 @@ export interface DatabaseAdapter {
   listProfilesForOrg(orgId: string): Promise<StoredProfileRecord[]>;
   /**
    * Newest first, pinned ahead. `after` is the last row of the previous page;
-   * `sessionId` narrows the list to that one session.
+   * `sessionId` narrows the list to that one session. `userId` keeps the
+   * sessions that user owns, plus every session on a `sharedChannels` channel.
    */
   listSessionSummaries(
     profileId: string,
@@ -1331,6 +1341,8 @@ export interface DatabaseAdapter {
       /** Keeps the sessions whose title or user/assistant text contains it. */
       query?: string;
       sessionId?: string;
+      sharedChannels?: readonly string[];
+      userId?: string;
     }
   ): Promise<StoredSessionSummaryRecord[]>;
 

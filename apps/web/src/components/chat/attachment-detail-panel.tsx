@@ -37,10 +37,8 @@ interface AttachmentDetailPanelProps {
 
 export function AttachmentDetailPanel({
   title,
-  titleContent,
   typeLabel,
   subtitle,
-  subtitleClassName,
   leading,
   children,
   headerActions,
@@ -209,42 +207,30 @@ export function AttachmentDetailPanel({
           role="separator"
         />
       ) : null}
-      <div className="relative flex min-h-0 flex-1 flex-col">
-        <div className="flex items-center justify-between gap-3 border-border border-b px-4 py-3">
-          <div className="flex min-w-0 flex-1 items-center gap-2.5">
-            {leading}
-            {titleContent ? (
-              <div className="min-w-0 flex-1">
-                <h2 className="sr-only">{title}</h2>
-                {titleContent}
-              </div>
-            ) : title || typeLabel || (leading ? null : subtitle) ? (
-              <div className="min-w-0 flex-1">
-                {title || typeLabel ? (
-                  <h2 className="truncate font-medium text-sm">
-                    {title}
-                    {typeLabel ? (
-                      <span className="font-normal text-muted-foreground">
-                        {" · "}
-                        {typeLabel}
-                      </span>
-                    ) : null}
-                  </h2>
-                ) : null}
-                {leading ? null : subtitle ? (
-                  <p
-                    className={cn(
-                      "mt-0.5 truncate text-xs",
-                      subtitleClassName ?? "text-muted-foreground"
-                    )}
-                  >
-                    {subtitle}
-                  </p>
-                ) : null}
-              </div>
+      <div className="@container relative flex min-h-0 flex-1 flex-col">
+        <div
+          className={cn(
+            "items-center gap-3 border-border border-b px-4 py-3",
+            leading ? "grid grid-cols-[1fr_auto_1fr]" : "flex justify-between"
+          )}
+        >
+          <div className="flex min-w-0 flex-1 items-center gap-2">
+            <div className="min-w-0">
+              <h2 className="truncate font-semibold text-sm">{title}</h2>
+              {leading ? null : subtitle ? (
+                <p className="mt-0.5 truncate text-muted-foreground text-xs">
+                  {subtitle}
+                </p>
+              ) : null}
+            </div>
+            {typeLabel ? (
+              <span className="@lg:inline hidden shrink-0 rounded border border-border px-1.5 font-medium text-[11px] text-muted-foreground uppercase tracking-wide">
+                {typeLabel}
+              </span>
             ) : null}
           </div>
-          <div className="flex shrink-0 items-center gap-1">
+          {leading}
+          <div className="flex shrink-0 items-center justify-end gap-1">
             {headerActions}
             <Button
               aria-label="Close attachment panel"

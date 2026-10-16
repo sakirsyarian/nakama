@@ -250,6 +250,7 @@ import {
 } from "../providers";
 import {
   acpMcpServerFor,
+  clearAcpToolAccess,
   setAcpToolAccess,
 } from "../providers/acp/acp-mcp-tools";
 import {
@@ -258,6 +259,7 @@ import {
   createAcpProvider,
   getAcpConfigOptions,
   setAcpConfigOption,
+  stopAcpSession,
 } from "../providers/acp/acp-provider";
 import { toAcpSessionSettings } from "../providers/acp/acp-session-settings";
 import {
@@ -422,6 +424,37 @@ type ChatProfileAccess = Pick<
   CreateSessionOptions,
   "excludeSuperBot" | "isPlatformAdmin" | "orgRole"
 > & { user?: { id: string } };
+
+/**
+ * Messaging-app chats are started by the channel worker's service user, not by
+ * a person in the org, so they stay visible to everyone who can use the agent.
+ */
+const SHARED_HISTORY_CHANNELS: readonly AgentChannel[] = [
+  "discord",
+  "slack",
+  "telegram",
+  "whatsapp",
+];
+
+/**
+ * Any other chat belongs to the user who started it. Platform admins may open
+ * any chat for support; everyone else gets the same 404 as a missing session,
+ * so holding another user's session id reveals nothing.
+ */
+function assertSessionOwner(
+  record: StoredSessionRecord,
+  access: ChatProfileAccess
+): void {
+  if (
+    access.isPlatformAdmin ||
+    SHARED_HISTORY_CHANNELS.some((channel) => channel === record.channel) ||
+    (access.user && record.userId === access.user.id)
+  ) {
+    return;
+  }
+
+  throw new NakamaApiError("Session not found", 404);
+}
 
 export class AgentService {
   private userConfig: UserConfig | null;
@@ -1790,7 +1823,6 @@ export class AgentService {
 
     const userTimezone = await this.getUserTimezone();
     const userContext = await this.loadUserContextForUser(orgId, undefined);
-    const harness = this.createHarnessForProfile(profile);
 
     const toolContext = buildToolExecutionContext({
       assertCanStartLlmTurn: this.llmTurnQuotaCheckerFor(orgId),
@@ -1803,6 +1835,16 @@ export class AgentService {
       recordToolOutputSavings: this.savingsRecorderFor(orgId),
       recordTurnUsage: this.turnUsageRecorderFor(orgId),
     });
+
+    const acpKey = oneShotAcpKey(profile);
+
+    const harness = this.createHarnessForProfile(
+      profile,
+      profile.model,
+      undefined,
+      acpKey,
+      { context: toolContext, tools }
+    );
 
     const savedSteps = automationRunId
       ? await this.db.listAutomationRunSteps(automationRunId)
@@ -1872,10 +1914,14 @@ export class AgentService {
       userTimezone,
     });
 
-    return session.sendStream(
-      replay.length ? RESUME_AUTOMATION_PROMPT : prompt,
-      stepHandlers ?? { onChunk() {} }
-    );
+    try {
+      return await session.sendStream(
+        replay.length ? RESUME_AUTOMATION_PROMPT : prompt,
+        stepHandlers ?? { onChunk() {} }
+      );
+    } finally {
+      endOneShotAcp(acpKey);
+    }
   }
 
   /**
@@ -2035,7 +2081,15 @@ export class AgentService {
 
     const userTimezone = await this.getUserTimezone();
     const userContext = await this.loadUserContextForUser(orgId, undefined);
-    const harness = this.createHarnessForProfile(profile);
+    const acpKey = oneShotAcpKey(profile);
+
+    const harness = this.createHarnessForProfile(
+      profile,
+      profile.model,
+      undefined,
+      acpKey,
+      { context: {}, tools: [] }
+    );
 
     const userMessage = [
       "Workflow receipts (only source of truth — do not invent values):",
@@ -2064,7 +2118,15 @@ export class AgentService {
       userTimezone,
     });
 
-    return session.sendStream(userMessage, { onChunk() {} }, { signal });
+    try {
+      return await session.sendStream(
+        userMessage,
+        { onChunk() {} },
+        { signal }
+      );
+    } finally {
+      endOneShotAcp(acpKey);
+    }
   }
 
   async runSubAgentPrompt(input: SubAgentRunInput): Promise<SubAgentRunResult> {
@@ -2117,10 +2179,28 @@ export class AgentService {
       input.userId
     );
 
+    const toolContext = buildToolExecutionContext({
+      agentDepth: input.agentDepth,
+      ...this.knowledgeToolContext(input.orgId, input.profileId),
+      assertCanStartLlmTurn: this.llmTurnQuotaCheckerFor(input.orgId),
+      clientOrigin: input.clientOrigin,
+      orgId: input.orgId,
+      orgRole: input.orgRole,
+      profileId: input.profileId,
+      recordToolOutputSavings: this.savingsRecorderFor(input.orgId),
+      recordTurnUsage: this.turnUsageRecorderFor(input.orgId),
+      sessionId: input.sessionId,
+      userId: input.userId,
+    });
+
+    const acpKey = oneShotAcpKey(profile);
+
     const harness = this.createHarnessForProfile(
       profile,
       profile.model,
-      input.userId
+      input.userId,
+      acpKey,
+      { context: toolContext, tools }
     );
 
     const prompt = buildSubAgentPrompt(task, input.context);
@@ -2130,19 +2210,7 @@ export class AgentService {
       enableToolLoop: true,
       soul: soulActive,
       systemPrompt: childSystemPrompt,
-      toolContext: buildToolExecutionContext({
-        agentDepth: input.agentDepth,
-        ...this.knowledgeToolContext(input.orgId, input.profileId),
-        assertCanStartLlmTurn: this.llmTurnQuotaCheckerFor(input.orgId),
-        clientOrigin: input.clientOrigin,
-        orgId: input.orgId,
-        orgRole: input.orgRole,
-        profileId: input.profileId,
-        recordToolOutputSavings: this.savingsRecorderFor(input.orgId),
-        recordTurnUsage: this.turnUsageRecorderFor(input.orgId),
-        sessionId: input.sessionId,
-        userId: input.userId,
-      }),
+      toolContext,
       tools,
       userContext,
       userTimezone,
@@ -2188,7 +2256,11 @@ export class AgentService {
       setTimeout(() => resolve({ kind: "timeout" }), timeoutMs);
     });
 
-    const outcome = await Promise.race([sendPromise, timeoutPromise]);
+    // A timed-out sub-agent's ACP process is stopped here too, not left running.
+    const outcome = await Promise.race([sendPromise, timeoutPromise]).finally(
+      () => endOneShotAcp(acpKey)
+    );
+
     const durationMs = Date.now() - startedAt;
 
     if (outcome.kind === "timeout") {
@@ -2337,6 +2409,7 @@ export class AgentService {
         await this.requireProfile(orgId, record.profileId),
         access
       );
+      assertSessionOwner(record, access);
     }
   }
 
@@ -2355,6 +2428,16 @@ export class AgentService {
       await this.requireProfile(orgId, record.profileId),
       access
     );
+
+    const sessionRecord = record.sessionId
+      ? await this.getSessionRecordForOrg(record.sessionId, orgId)
+      : this.ephemeralSessions.findByAttachmentId(attachmentId)?.record;
+
+    if (!sessionRecord) {
+      return null;
+    }
+
+    assertSessionOwner(sessionRecord, access);
 
     return createAttachmentLoader(this.db, {
       orgId,
@@ -2700,6 +2783,10 @@ export class AgentService {
         // One row past the page tells whether another page follows.
         limit: page ? page.limit + 1 : undefined,
         query,
+        sharedChannels: SHARED_HISTORY_CHANNELS,
+        // Everyone, admins included, lists only their own chats. A caller
+        // with no user has none.
+        userId: access.user?.id ?? "",
       }
     );
 
@@ -4339,6 +4426,13 @@ export class AgentService {
     );
   }
 
+  async installSkillPythonPackages(orgId: string, skillId: string) {
+    return this.requireSkillsService().installSkillPythonPackages(
+      orgId,
+      skillId
+    );
+  }
+
   async readSkillFile(orgId: string, skillId: string, filePath: string) {
     return this.requireSkillsService().readSkillFile(orgId, skillId, filePath);
   }
@@ -5065,6 +5159,7 @@ export class AgentService {
       includeSkillManageTools?: boolean;
       /** False in a cognito session: proposing org memory is a write-back. */
       includeMemoryWriteTools?: boolean;
+      mcpDiscovery?: boolean;
       userId?: string | null;
     } = {}
   ): Promise<ToolDefinition[]> {
@@ -5236,6 +5331,32 @@ export class AgentService {
         throw new Error("Profile organization is missing.");
       }
 
+      const discoveryAccess = options.mcpDiscovery
+        ? async (serverId: string, toolName: string, context: ToolContext) => {
+            requireToolOrgMember(context);
+
+            if (
+              context.orgId !== orgId ||
+              context.profileId !== profile.id ||
+              !(await this.db.getProfileForOrg(profile.id, orgId))
+            ) {
+              return false;
+            }
+
+            const current = shared
+              ? ((await this.resolveSharedAgentProfile(orgId, profile.id))
+                  ?.assignedMcpServers ?? [])
+              : await this.db.listMcpServersForProfile(profile.id);
+
+            return current.some(
+              (server) =>
+                server.id === serverId &&
+                server.enabled &&
+                server.cachedTools.some((tool) => tool.name === toolName)
+            );
+          }
+        : undefined;
+
       const mcpTools = shared
         ? mcpServers.flatMap((server) =>
             buildMcpToolDefinitions(
@@ -5243,7 +5364,8 @@ export class AgentService {
               this.mcpService!,
               this.db,
               orgId,
-              profile.id
+              profile.id,
+              discoveryAccess
             ).map<ToolDefinition>((tool) => ({
               ...tool,
               run: async (input, context) => {
@@ -5273,7 +5395,8 @@ export class AgentService {
                     this.mcpService!,
                     this.db,
                     orgId,
-                    profile.id
+                    profile.id,
+                    discoveryAccess
                   ).find((item) => item.name === tool.name);
 
                 if (!definition) {
@@ -5295,7 +5418,8 @@ export class AgentService {
             this.mcpService,
             this.db,
             orgId,
-            profile.id
+            profile.id,
+            discoveryAccess
           );
 
       resolved = [...resolved, ...mcpTools];
@@ -5448,6 +5572,8 @@ export class AgentService {
           : undefined,
       includeMemoryWriteTools: !cognito,
       includeSkillManageTools,
+      mcpDiscovery:
+        process.env.NAKAMA_MCP_TOOL_DISCOVERY === "1" && !profile.acpAgent,
       userId,
     });
 
@@ -5998,15 +6124,22 @@ export class AgentService {
     profile: StoredProfileRecord,
     selectedModel: string | null = profile.model,
     userId?: string | null,
-    acpSessionKey?: string
+    acpSessionKey?: string,
+    acpTools?: { context: ToolContext; tools: ToolDefinition[] }
   ): AgentDependencies {
     if (profile.acpAgent && profile.orgId) {
+      const sessionKey = acpSessionKey ?? `${profile.id}:${randomUUID()}`;
+
+      // A chat registers its tools under its own key later. A one-shot run
+      // passes them here: an unregistered key leaves the agent's MCP connect
+      // hanging for 30s.
+      if (acpTools) {
+        setAcpToolAccess(sessionKey, acpTools.tools, acpTools.context);
+      }
+
       // ACP agents run their own model loop, so the profile's LLM provider is unused.
       const provider = createAcpProvider(
-        acpOptionsForProfile(
-          profile,
-          acpSessionKey ?? `${profile.id}:${randomUUID()}`
-        )
+        acpOptionsForProfile(profile, sessionKey)
       );
 
       return this.createHarness({
@@ -6189,6 +6322,22 @@ function acpOptionsForProfile(
     mcpServers: [acpMcpServerFor(sessionKey)],
     sessionKey,
   };
+}
+
+/**
+ * A one-shot run (automation, sub-agent, plugin summary) gets its own ACP
+ * agent. Its key is never reused, so the agent is stopped when the run ends
+ * instead of idling for ten minutes.
+ */
+function oneShotAcpKey(profile: StoredProfileRecord): string | undefined {
+  return profile.acpAgent ? `${profile.id}:${randomUUID()}` : undefined;
+}
+
+function endOneShotAcp(sessionKey: string | undefined): void {
+  if (sessionKey) {
+    stopAcpSession(sessionKey);
+    clearAcpToolAccess(sessionKey);
+  }
 }
 
 /** Key for the agent that holds a profile's draft settings until its first chat starts. */

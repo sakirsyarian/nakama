@@ -224,14 +224,14 @@ Search uploaded knowledge base documents for relevant facts. **Browse Files → 
 
 | Parameter | Type | Required | Notes |
 |-----------|------|----------|-------|
-| `query` | string | Yes | Keyword or regex pattern |
+| `query` | string | Yes | Keywords, or a regex pattern when `regex` is true |
 | `filename` | string | No | Filter to one source document (e.g. `report.pdf`) |
-| `regex` | boolean | No | Default true |
+| `regex` | boolean | No | Default false |
 | `maxResults` | number | No | Default 50, max 200 |
 
 **Returns:** `{ query, root, matches, matchCount, truncated }` — empty matches when no ready document matches the filter.
 
-**Scope:** Extracted text files stored under `~/.nakama/orgs/{orgId}/profiles/{profileId}/knowledge-base/`.
+**Scope:** Extracted text files stored under `~/.nakama/orgs/{orgId}/profiles/{profileId}/knowledge-base/`, plus the `wiki/*.md` pages the `knowledge-base-wiki` skill writes there.
 
 **Availability:** When assigned **and** at least one uploaded document has `status: "ready"`. Inherited URL sources do not require `knowledge_base_search`; they require `web_fetch` or `web_search`.
 
@@ -327,6 +327,8 @@ Run a one-off shell command starting in the profile workspace and return stdout,
 **Returns:** `{ exitCode, stdout, stderr, timedOut }`
 
 **Execution backend:** By default bash runs on the Nakama **host** (`NAKAMA_BASH_BACKEND=host`). Set `NAKAMA_BASH_BACKEND=microsandbox` to run each profile in its own warm MicroSandbox microVM (1 profile → 1 sandbox) with the profile workspace bind-mounted. Defaults: public network **off** (`NAKAMA_BASH_SANDBOX_NETWORK=off|public`), image `alpine` (`NAKAMA_BASH_SANDBOX_IMAGE`). If MicroSandbox is selected but unavailable, the tool **fails closed** — it does not fall back to host. `codingAgent: true` / harness CLI runs are **unsupported** under `microsandbox` (use `host` for coding-agent). Stock Docker without `/dev/kvm` cannot enable MicroSandbox — see [Docker](/docker).
+
+**Turning bash off:** bash is on by default, and Super Bot gets it. When the people who are org admins are not the operator, set `NAKAMA_TENANT_BASH=0`. On the next start Super Bot loses `bash`, assigning it to a profile returns 403, and any profile that still holds it gets a refusal instead of a shell. The CLI is not affected.
 
 #### Choose a MicroSandbox image
 

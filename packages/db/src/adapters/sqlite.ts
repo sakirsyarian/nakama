@@ -996,40 +996,68 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
       updated_at = excluded.updated_at
   `);
 
+  const insertProfileIfAbsentStmt = db.prepare(`
+    INSERT INTO profiles (
+      id,
+      name,
+      system_prompt,
+      model,
+      thinking_enabled,
+      thinking_effort,
+      is_super,
+      org_id,
+      is_default,
+      automations_enabled,
+      skills_write_approval,
+      skills_post_turn_review,
+      skills_curator_consolidate_enabled,
+      acp_agent,
+      acp_settings,
+      owner_user_id,
+      shared_with_team,
+      created_at,
+      updated_at
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(id) DO NOTHING
+  `);
+
+  const profileInsertArgs = (record: StoredProfileRecord) => [
+    record.id,
+    record.name,
+    record.systemPrompt,
+    record.model,
+    record.thinkingEnabled == null ? null : record.thinkingEnabled ? 1 : 0,
+    record.thinkingEffort ?? null,
+    record.isSuper ? 1 : 0,
+    record.orgId ?? null,
+    record.isDefault ? 1 : 0,
+    record.automationsEnabled === false ? 0 : 1,
+    record.skillsWriteApproval == null
+      ? null
+      : record.skillsWriteApproval
+        ? 1
+        : 0,
+    record.skillsPostTurnReview == null
+      ? null
+      : record.skillsPostTurnReview
+        ? 1
+        : 0,
+    record.skillsCuratorConsolidateEnabled == null
+      ? null
+      : record.skillsCuratorConsolidateEnabled
+        ? 1
+        : 0,
+    record.acpAgent ? JSON.stringify(record.acpAgent) : null,
+    record.acpSettings ? JSON.stringify(record.acpSettings) : null,
+    record.ownerUserId ?? null,
+    record.sharedWithTeam === false ? 0 : 1,
+    record.createdAt,
+    record.updatedAt ?? record.createdAt,
+  ];
+
   const runUpsertProfileStmt = (record: StoredProfileRecord) => {
-    upsertProfileStmt.run(
-      record.id,
-      record.name,
-      record.systemPrompt,
-      record.model,
-      record.thinkingEnabled == null ? null : record.thinkingEnabled ? 1 : 0,
-      record.thinkingEffort ?? null,
-      record.isSuper ? 1 : 0,
-      record.orgId ?? null,
-      record.isDefault ? 1 : 0,
-      record.automationsEnabled === false ? 0 : 1,
-      record.skillsWriteApproval == null
-        ? null
-        : record.skillsWriteApproval
-          ? 1
-          : 0,
-      record.skillsPostTurnReview == null
-        ? null
-        : record.skillsPostTurnReview
-          ? 1
-          : 0,
-      record.skillsCuratorConsolidateEnabled == null
-        ? null
-        : record.skillsCuratorConsolidateEnabled
-          ? 1
-          : 0,
-      record.acpAgent ? JSON.stringify(record.acpAgent) : null,
-      record.acpSettings ? JSON.stringify(record.acpSettings) : null,
-      record.ownerUserId ?? null,
-      record.sharedWithTeam === false ? 0 : 1,
-      record.createdAt,
-      record.updatedAt ?? record.createdAt
-    );
+    upsertProfileStmt.run(...profileInsertArgs(record));
   };
 
   const upsertDefaultProfileTransaction = db.transaction(
@@ -1194,6 +1222,10 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
   );
 
   const deleteProfileStmt = db.prepare("DELETE FROM profiles WHERE id = ?");
+
+  const deleteProfileForOrgStmt = db.prepare(
+    "DELETE FROM profiles WHERE id = ? AND org_id = ?"
+  );
 
   const listToolsStmt = db.prepare<ToolRow, SQLQueryBindings[]>(
     "SELECT * FROM tools"
@@ -1479,6 +1511,11 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
       WHERE s.profile_id = ?1
         AND s.channel IN (SELECT value FROM json_each(?2))
         AND (?8 IS NULL OR s.id = ?8)
+        AND (
+          ?10 IS NULL
+          OR s.user_id = ?10
+          OR s.channel IN (SELECT value FROM json_each(?11))
+        )
         AND s.app_user_id IS NULL
         -- Only message text is searched: content is a string or an array of
         -- parts, and matching the raw JSON would let "role" hit every chat.
@@ -4474,6 +4511,14 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
       );
     },
 
+    async createProfileIfAbsent(record) {
+      const result = insertProfileIfAbsentStmt.run(
+        ...profileInsertArgs(record)
+      );
+
+      return result.changes > 0;
+    },
+
     async createSharedAgentInstance(
       teamOrgId,
       publicationId,
@@ -4628,6 +4673,12 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
 
     async deleteProfile(id) {
       const result = deleteProfileStmt.run(id);
+
+      return result.changes > 0;
+    },
+
+    async deleteProfileForOrg(id, orgId) {
+      const result = deleteProfileForOrgStmt.run(id, orgId);
 
       return result.changes > 0;
     },
@@ -5536,7 +5587,8 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
     },
 
     async listSessionSummaries(profileId, channels, options = {}) {
-      const { after, limit, query, sessionId } = options;
+      const { after, limit, query, sessionId, sharedChannels, userId } =
+        options;
 
       return listSessionSummariesStmt
         .all(
@@ -5549,7 +5601,9 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
           // SQLite reads a negative LIMIT as no limit.
           limit ?? -1,
           sessionId ?? null,
-          query ? likeContains(query) : null
+          query ? likeContains(query) : null,
+          userId ?? null,
+          JSON.stringify(sharedChannels ?? [])
         )
         .map((row) => toSessionSummaryRecord(row));
     },

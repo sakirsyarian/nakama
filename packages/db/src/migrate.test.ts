@@ -580,6 +580,115 @@ describe("legacy profile id migration", () => {
       db.close();
     }
   });
+
+  test("legacy profile rename keeps every profile column and reference", () => {
+    const db = new Database(":memory:");
+
+    try {
+      migrateDatabase(db);
+
+      // org_a sorts first, so the org-default reset does not touch org_b.
+      db.exec(`
+        INSERT INTO organizations (id, name, slug, created_at, updated_at)
+        VALUES
+          ('org_a', 'A', 'a', '2026-06-19T00:00:00.000Z', '2026-06-19T00:00:00.000Z'),
+          ('org_b', 'B', 'b', '2026-06-19T00:00:00.000Z', '2026-06-19T00:00:00.000Z');
+
+        INSERT INTO profiles (
+          id, name, system_prompt, is_super, org_id, is_default,
+          automations_enabled, skills_write_approval, skills_post_turn_review,
+          skills_curator_consolidate_enabled, acp_agent, acp_settings,
+          owner_user_id, shared_with_team, created_at, updated_at
+        ) VALUES (
+          'profile_super_bot', 'Super', 'prompt', 1, 'org_b', 1,
+          0, 1, 0, 1, 'claude', '{"mode":"plan"}',
+          'user_1', 0, '2026-06-19T00:00:00.000Z', '2026-06-19T00:00:00.000Z'
+        );
+
+        INSERT INTO composio_toolkits (
+          id, org_id, toolkit_slug, display_name, status, created_at, updated_at
+        ) VALUES (
+          'tk_1', 'org_b', 'gmail', 'Gmail', 'active',
+          '2026-06-19T00:00:00.000Z', '2026-06-19T00:00:00.000Z'
+        );
+        INSERT INTO profile_composio_toolkits (profile_id, toolkit_id)
+        VALUES ('profile_super_bot', 'tk_1');
+
+        INSERT INTO org_shared_resources (
+          id, org_id, resource_kind, resource_id, created_at, updated_at
+        ) VALUES (
+          'pub_1', 'org_b', 'agent', 'profile_super_bot',
+          '2026-06-19T00:00:00.000Z', '2026-06-19T00:00:00.000Z'
+        );
+      `);
+
+      const columns = db
+        .prepare<{ name: string }, SQLQueryBindings[]>(
+          "PRAGMA table_info(profiles)"
+        )
+        .all()
+        .map((column) => column.name)
+        .filter((name) => name !== "id");
+
+      const selectProfile = db.prepare(
+        `SELECT ${columns.join(", ")} FROM profiles WHERE id = ?`
+      );
+
+      const expected = selectProfile.get("profile_super_bot");
+
+      migrateDatabase(db);
+      migrateDatabase(db);
+
+      expect(selectProfile.get("super_bot")).toEqual(expected);
+      expect(selectProfile.get("profile_super_bot")).toBeNull();
+      expect(
+        db.prepare("SELECT profile_id FROM profile_composio_toolkits").all()
+      ).toEqual([{ profile_id: "super_bot" }]);
+      expect(
+        db.prepare("SELECT resource_id FROM org_shared_resources").all()
+      ).toEqual([{ resource_id: "super_bot" }]);
+      expect(db.prepare("PRAGMA foreign_key_check").all()).toHaveLength(0);
+    } finally {
+      db.close();
+    }
+  });
+
+  test("legacy profile is kept when another org owns the canonical id", () => {
+    const db = new Database(":memory:");
+
+    try {
+      migrateDatabase(db);
+
+      db.exec(`
+        INSERT INTO organizations (id, name, slug, created_at, updated_at)
+        VALUES
+          ('org_a', 'A', 'a', '2026-06-19T00:00:00.000Z', '2026-06-19T00:00:00.000Z'),
+          ('org_b', 'B', 'b', '2026-06-19T00:00:00.000Z', '2026-06-19T00:00:00.000Z');
+
+        INSERT INTO profiles (id, name, org_id, created_at, updated_at)
+        VALUES
+          ('default', 'A default', 'org_a', '2026-06-19T00:00:00.000Z', '2026-06-19T00:00:00.000Z'),
+          ('profile_default', 'B default', 'org_b', '2026-06-19T00:00:00.000Z', '2026-06-19T00:00:00.000Z');
+
+        INSERT INTO sessions (id, profile_id, channel, created_at, updated_at)
+        VALUES ('s_b', 'profile_default', 'web', '2026-06-19T00:00:00.000Z', '2026-06-19T00:00:00.000Z');
+      `);
+
+      migrateDatabase(db);
+
+      expect(
+        db.prepare("SELECT id, org_id FROM profiles ORDER BY id").all()
+      ).toEqual([
+        { id: "default", org_id: "org_a" },
+        { id: "profile_default", org_id: "org_b" },
+      ]);
+      expect(db.prepare("SELECT profile_id FROM sessions").all()).toEqual([
+        { profile_id: "profile_default" },
+      ]);
+    } finally {
+      db.close();
+    }
+  });
 });
 
 describe("coding-delegation skill rename migration", () => {
@@ -971,6 +1080,91 @@ describe("chat session schema", () => {
       db.close();
     }
   });
+
+  test("gives chats without a live owner to the first platform admin", () => {
+    const db = new Database(":memory:");
+
+    try {
+      migrateDatabase(db);
+      db.exec(`
+        PRAGMA foreign_keys = OFF;
+        INSERT INTO profiles (id, name, created_at, updated_at)
+          VALUES ('p', 'Agent', 'now', 'now');
+        INSERT INTO users (id, email, password_hash, created_at, updated_at)
+          VALUES ('member', 'm@example.com', 'x', '2026-01-01', 'now');
+        INSERT INTO sessions (id, profile_id, channel, user_id, created_at, updated_at)
+          VALUES ('no_owner', 'p', 'web', NULL, 'now', 'now'),
+                 ('deleted_owner', 'p', 'web', 'gone', 'now', 'now'),
+                 ('owned', 'p', 'web', 'member', 'now', 'now');
+      `);
+
+      const owners = () =>
+        db
+          .prepare<{ id: string; user_id: string | null }, SQLQueryBindings[]>(
+            "SELECT id, user_id FROM sessions ORDER BY id"
+          )
+          .all();
+
+      // Before setup there is no platform admin to hand the chats to.
+      migrateDatabase(db);
+      expect(owners()).toEqual([
+        { id: "deleted_owner", user_id: "gone" },
+        { id: "no_owner", user_id: null },
+        { id: "owned", user_id: "member" },
+      ]);
+
+      db.exec(`
+        INSERT INTO users (id, email, password_hash, is_platform_admin, created_at, updated_at)
+          VALUES ('admin_new', 'new@example.com', 'x', 1, '2026-03-01', 'now'),
+                 ('admin_first', 'first@example.com', 'x', 1, '2026-02-01', 'now');
+      `);
+      migrateDatabase(db);
+      migrateDatabase(db);
+
+      expect(owners()).toEqual([
+        { id: "deleted_owner", user_id: "admin_first" },
+        { id: "no_owner", user_id: "admin_first" },
+        { id: "owned", user_id: "member" },
+      ]);
+    } finally {
+      db.close();
+    }
+  });
+
+  test("does not assign shared messaging chats to a platform admin", () => {
+    const db = new Database(":memory:");
+
+    try {
+      migrateDatabase(db);
+      db.exec(`
+        PRAGMA foreign_keys = OFF;
+        INSERT INTO profiles (id, name, created_at, updated_at)
+          VALUES ('p', 'Agent', 'now', 'now');
+        INSERT INTO users (id, email, password_hash, is_platform_admin, created_at, updated_at)
+          VALUES ('admin', 'admin@example.com', 'x', 1, 'now', 'now');
+      `);
+
+      for (const channel of ["discord", "slack", "telegram", "whatsapp"]) {
+        for (const owner of [null, "deleted_user"]) {
+          const id = `${channel}-${owner}`;
+          db.prepare(
+            "INSERT INTO sessions (id, profile_id, channel, user_id, created_at, updated_at) VALUES (?, 'p', ?, ?, 'now', 'now')"
+          ).run(id, channel, owner);
+        }
+      }
+
+      const owners = () =>
+        db.prepare("SELECT id, user_id FROM sessions ORDER BY id").all();
+
+      const before = owners();
+
+      migrateDatabase(db);
+      migrateDatabase(db);
+      expect(owners()).toEqual(before);
+    } finally {
+      db.close();
+    }
+  });
 });
 
 describe("browser session schema", () => {
@@ -1059,6 +1253,38 @@ describe("password reset schema", () => {
 });
 
 describe("organization schema migration", () => {
+  test("keeps the default profile a user chose in the first org", () => {
+    const db = new Database(":memory:");
+
+    try {
+      migrateDatabase(db);
+
+      db.exec(`
+        INSERT INTO organizations (id, name, slug, created_at, updated_at)
+        VALUES ('org_a', 'A', 'a', '2026-06-21', '2026-06-21');
+
+        INSERT INTO profiles (id, name, org_id, is_default, created_at, updated_at)
+        VALUES
+          ('default', 'Buddy', 'org_a', 0, '2026-06-21', '2026-06-21'),
+          ('custom', 'Custom', 'org_a', 1, '2026-06-22', '2026-06-22'),
+          ('other', 'Other', 'org_a', 1, '2026-06-23', '2026-06-23');
+      `);
+
+      migrateDatabase(db);
+      migrateDatabase(db);
+
+      expect(
+        db.prepare("SELECT id, is_default FROM profiles ORDER BY id").all()
+      ).toEqual([
+        { id: "custom", is_default: 1 },
+        { id: "default", is_default: 0 },
+        { id: "other", is_default: 0 },
+      ]);
+    } finally {
+      db.close();
+    }
+  });
+
   test("creates org tables and allows org with admin member", () => {
     const db = new Database(":memory:");
 
