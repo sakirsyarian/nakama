@@ -25,6 +25,7 @@ describe("omitStaleArtifactWriteBodies", () => {
     ];
 
     const result = omitStaleArtifactWriteBodies(messages);
+
     const call =
       result[0] && result[0].role === "assistant"
         ? result[0].toolCalls?.[0]
@@ -103,6 +104,7 @@ describe("omitStaleArtifactWriteBodies", () => {
     ];
 
     const result = omitStaleArtifactWriteBodies(messages);
+
     const block =
       result[0] && result[0].role === "assistant"
         ? (result[0].providerContent?.[0] as {

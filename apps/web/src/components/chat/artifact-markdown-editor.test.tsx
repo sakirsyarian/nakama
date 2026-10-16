@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { act } from "react";
 
 const { createRoot } = await import("react-dom/client");
+
 const { ArtifactMarkdownEditor } = await import("./artifact-markdown-editor");
 
 function setValue(textarea: Element, value: string) {
@@ -9,6 +10,7 @@ function setValue(textarea: Element, value: string) {
     Object.getPrototypeOf(textarea),
     "value"
   )?.set;
+
   setter?.call(textarea, value);
   // `Event` on the test global is Bun's, not happy-dom's — dispatch needs the
   // window's own constructor for the instanceof check inside dispatchEvent.
@@ -19,9 +21,11 @@ function button(label: string): HTMLButtonElement {
   const element = [...document.querySelectorAll("button")].find(
     (entry) => entry.textContent === label
   );
+
   if (!element) {
     throw new Error(`Missing button: ${label}`);
   }
+
   return element as HTMLButtonElement;
 }
 
@@ -30,6 +34,7 @@ test("artifact editor keeps the draft across parent re-renders and saves the edi
   document.body.append(container);
   const root = createRoot(container);
   let saved: string | null = null;
+
   const baseProps = {
     busy: false,
     error: null,

@@ -12,6 +12,7 @@ describe("artifact markdown editor scroll position", () => {
 
   test("does not write when the offset is already correct", () => {
     let writes = 0;
+
     const editor = {
       get scrollTop() {
         return 240;

@@ -1,6 +1,7 @@
 import type { ChatMessage, ToolCall } from "@nakama/core";
 
 const ARTIFACT_WRITE_TOOLS = new Set(["write_file", "write_docx"]);
+
 const BODY_KEYS = ["content", "markdown"] as const;
 
 export const OMITTED_ARTIFACT_WRITE_BODY =
@@ -28,6 +29,7 @@ function sanitizeToolCall(call: ToolCall): ToolCall {
   }
 
   const arguments_ = sanitizeWriteArgs(call.arguments);
+
   if (arguments_ === call.arguments) {
     return call;
   }
@@ -50,6 +52,7 @@ function sanitizeProviderBlock(block: unknown): unknown {
     typeof record.input === "object"
   ) {
     const input = sanitizeWriteArgs(record.input as Record<string, unknown>);
+
     if (input === record.input) {
       return block;
     }
@@ -64,8 +67,10 @@ function sanitizeProviderBlock(block: unknown): unknown {
   ) {
     try {
       const parsed: unknown = JSON.parse(record.arguments);
+
       if (parsed && typeof parsed === "object") {
         const input = sanitizeWriteArgs(parsed as Record<string, unknown>);
+
         if (input !== parsed) {
           return { ...record, arguments: JSON.stringify(input) };
         }
@@ -87,6 +92,7 @@ export function omitStaleArtifactWriteBodies(
     }
 
     const toolCalls = message.toolCalls?.map(sanitizeToolCall);
+
     const providerContent = Array.isArray(message.providerContent)
       ? message.providerContent.map(sanitizeProviderBlock)
       : message.providerContent;
@@ -95,6 +101,7 @@ export function omitStaleArtifactWriteBodies(
       toolCalls !== undefined &&
       message.toolCalls !== undefined &&
       toolCalls.some((call, index) => call !== message.toolCalls?.[index]);
+
     const providerChanged =
       Array.isArray(providerContent) &&
       Array.isArray(message.providerContent) &&

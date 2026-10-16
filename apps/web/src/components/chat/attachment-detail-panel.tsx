@@ -82,6 +82,7 @@ export function AttachmentDetailPanel({
 
   useLayoutEffect(() => {
     const root = bodyRef.current;
+
     if (!root) {
       return;
     }
@@ -90,6 +91,7 @@ export function AttachmentDetailPanel({
       scrollKeyRef.current = scrollKey;
       scrollRatioRef.current = 0;
       writeArtifactPanelScrollRatio(root, 0);
+
       return;
     }
 
@@ -98,13 +100,16 @@ export function AttachmentDetailPanel({
 
     function apply() {
       const panel = bodyRef.current;
+
       if (cancelled || !panel) {
         return;
       }
+
       writeArtifactPanelScrollRatio(panel, ratio);
     }
 
     apply();
+
     const frame = requestAnimationFrame(() => {
       apply();
       requestAnimationFrame(apply);
@@ -118,6 +123,7 @@ export function AttachmentDetailPanel({
 
   useEffect(() => {
     const root = bodyRef.current;
+
     if (!root) {
       return;
     }
@@ -126,13 +132,16 @@ export function AttachmentDetailPanel({
 
     function capture() {
       const panel = bodyRef.current;
+
       if (!panel) {
         return;
       }
+
       scrollRatioRef.current = readArtifactPanelScrollRatio(panel);
     }
 
     target.addEventListener("scroll", capture, { passive: true });
+
     return () => target.removeEventListener("scroll", capture);
   }, [bodyClassName, children, fullscreen]);
 

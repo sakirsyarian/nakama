@@ -6,6 +6,7 @@ export function artifactPanelScrollRatio(
   clientHeight: number
 ): number {
   const max = scrollHeight - clientHeight;
+
   if (max <= 0) {
     return 0;
   }
@@ -19,6 +20,7 @@ export function artifactPanelScrollTop(
   ratio: number
 ): number {
   const max = Math.max(0, scrollHeight - clientHeight);
+
   return max * Math.min(1, Math.max(0, ratio));
 }
 
@@ -26,11 +28,13 @@ export function getArtifactPanelScroller(root: HTMLElement): HTMLElement {
   const nested = root.querySelector<HTMLElement>(
     `[${ARTIFACT_INNER_SCROLL_ATTR}]`
   );
+
   return nested ?? root;
 }
 
 export function readArtifactPanelScrollRatio(root: HTMLElement): number {
   const scroller = getArtifactPanelScroller(root);
+
   return artifactPanelScrollRatio(
     scroller.scrollTop,
     scroller.scrollHeight,
