@@ -260,8 +260,6 @@ export interface StoredWorkspaceSettingsRecord {
   id: string;
   imageModel: string | null;
   selectedCodingAgentHarness: string | null;
-  /** null = inherit the NAKAMA_OMNI env var; true/false = set explicitly here. */
-  tokenOptimizerEnabled?: boolean | null;
   transcriptionModel: string | null;
   updatedAt: string;
   visionModel: string | null;
@@ -365,45 +363,20 @@ export interface LlmUsageStatsDelta {
   requestCount: number;
 }
 
-/** Bytes one optimiser removed from one tool result before it was inserted. */
-export interface ToolOutputSavingsDelta {
-  bytesIn: number;
-  bytesOut: number;
-  optimizer: string;
-  tool: string;
-}
-
-/** One request's provider tokens, tagged with the arm it belongs to. */
+/** One request's provider tokens. */
 export interface LlmTurnUsageDelta {
   estimated: boolean;
   inputTokens: number;
-  optimized: boolean;
   outputTokens: number;
 }
 
 export interface StoredLlmTurnUsageRecord {
-  arm: string;
   bucket: string;
   estimatedTurns: number;
   inputTokens: number;
   orgId: string;
   outputTokens: number;
   turns: number;
-}
-
-export interface StoredToolOutputSavingsRecord {
-  /** Day the bytes were removed, `YYYY-MM-DD`. Day resolution because the panel
-   * plots days and an hour column would be 24x the rows for a chart nobody asked
-   * for at that grain. */
-  bucket: string;
-  bytesIn: number;
-  bytesOut: number;
-  calls: number;
-  optimizer: string;
-  orgId: string;
-  tool: string;
-  trackedSince: string;
-  updatedAt: string;
 }
 
 export type McpServerStatus =
@@ -658,7 +631,7 @@ export type OrgMemoryProposalStatus = "pending" | "approved" | "rejected";
 
 export type ProfileChangeSource =
   | "dashboard"
-  | "super_bot"
+  | "super_nakama"
   | "skill_manage"
   | "pack_import";
 
@@ -766,6 +739,23 @@ export interface StoredSkillSuggestion {
   source: "post_turn_review";
   status: SkillSuggestionStatus;
   warnings: string[] | null;
+}
+
+/** Owner of a file under a profile's artifacts/ folder. */
+export interface StoredArtifactRecord {
+  channel: string | null;
+  createdAt: string;
+  /** Relative to the profile's artifacts/ folder, with `/` separators. */
+  filename: string;
+  orgId: string;
+  profileId: string;
+  sessionId: string | null;
+  userId: string | null;
+}
+
+export interface StoredArtifactOwnerRecord extends StoredArtifactRecord {
+  /** The owner's name, or email when the name is empty. Null for channel users. */
+  userName: string | null;
 }
 
 export interface StoredArtifactShareRecord {
@@ -952,6 +942,11 @@ export interface DatabaseAdapter {
     record: Omit<StoredSkillVersion, "version">
   ): Promise<StoredSkillVersion>;
   createUser(record: StoredUserRecord): Promise<void>;
+  deleteArtifactRecord(
+    orgId: string,
+    profileId: string,
+    filename: string
+  ): Promise<void>;
   deleteAttachment(id: string): Promise<boolean>;
   deleteAutomation(id: string): Promise<boolean>;
   deleteComposioToolkit(id: string): Promise<boolean>;
@@ -971,6 +966,11 @@ export interface DatabaseAdapter {
   deletePasskeys(userId: string): Promise<void>;
   deletePluginRelease(pluginId: string, version: string): Promise<boolean>;
   deleteProfile(id: string): Promise<boolean>;
+  deleteProfileAndPromoteDefault(
+    id: string,
+    orgId: string,
+    successorId?: string
+  ): Promise<boolean>;
   /** Org-scoped delete: resolves to `false` when the profile belongs elsewhere. */
   deleteProfileForOrg(id: string, orgId: string): Promise<boolean>;
   deleteSession(id: string): Promise<boolean>;
@@ -1213,18 +1213,16 @@ export interface DatabaseAdapter {
     usedAt?: string;
     patchedAt?: string;
   }): Promise<void>;
-  incrementToolOutputSavings(
-    orgId: string,
-    delta: ToolOutputSavingsDelta,
-    trackedSince: string
-  ): Promise<void>;
-
   insertAttachment(record: StoredAttachmentRecord): Promise<void>;
   insertAutomationRun(record: StoredAutomationRunRecord): Promise<void>;
   insertAutomationRunStep(step: StoredAutomationRunStepRecord): Promise<void>;
   insertWorkflowRun(record: StoredWorkflowRunRecord): Promise<void>;
   insertWorkflowRunStep(record: StoredWorkflowRunStepRecord): Promise<void>;
 
+  listArtifactRecords(
+    orgId: string,
+    profileId: string
+  ): Promise<StoredArtifactOwnerRecord[]>;
   listArtifactSharesForProfile(
     orgId: string,
     profileId: string
@@ -1379,10 +1377,6 @@ export interface DatabaseAdapter {
     skillId: string,
     options?: { limit?: number }
   ): Promise<StoredSkillVersion[]>;
-
-  listToolOutputSavings(
-    orgId: string
-  ): Promise<StoredToolOutputSavingsRecord[]>;
 
   listTools(): Promise<StoredToolRecord[]>;
 
@@ -1573,6 +1567,8 @@ export interface DatabaseAdapter {
   ): Promise<void>;
   updateWorkflowRun(record: StoredWorkflowRunRecord): Promise<void>;
   updateWorkflowRunStep(record: StoredWorkflowRunStepRecord): Promise<void>;
+  /** A new file at a path whose old row survived (e.g. removed by a shell) replaces that row. */
+  upsertArtifactRecord(record: StoredArtifactRecord): Promise<void>;
   upsertAutomation(record: StoredAutomationRecord): Promise<void>;
   upsertAutomationRunReadThrough(
     userId: string,

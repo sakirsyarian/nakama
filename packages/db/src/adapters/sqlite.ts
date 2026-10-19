@@ -7,7 +7,9 @@ import type {
   ChatMessage,
 } from "@nakama/core";
 import {
+  decryptCredential,
   derivePluginToolName,
+  encryptCredential,
   getUserMessageText,
   NakamaApiError,
   PRIVATE_FILE_MODE,
@@ -23,6 +25,7 @@ import type {
   OrgMemoryProposalStatus,
   PluginPublishResult,
   PublishOrgPluginReleaseInput,
+  StoredArtifactOwnerRecord,
   StoredArtifactShareRecord,
   StoredAttachmentRecord,
   StoredAuditEvent,
@@ -295,7 +298,6 @@ interface WorkspaceSettingsRow {
   id: string;
   image_model: string | null;
   selected_coding_agent_harness: string | null;
-  token_optimizer_enabled: number | null;
   transcription_model: string | null;
   updated_at: string;
   vision_model: string | null;
@@ -542,6 +544,17 @@ interface SkillSuggestionRow {
   warnings: string | null;
 }
 
+interface ArtifactOwnerRow {
+  channel: string | null;
+  created_at: string;
+  filename: string;
+  org_id: string;
+  profile_id: string;
+  session_id: string | null;
+  user_id: string | null;
+  user_name: string | null;
+}
+
 interface ArtifactShareRow {
   created_at: string;
   created_by_user_id: string;
@@ -568,8 +581,12 @@ export function openPrivateDatabase(databasePath: string): Database {
 
   if (databasePath !== ":memory:") {
     chmodSync(databasePath, PRIVATE_FILE_MODE);
-    // DELETE journal removal must sync its directory before a commit is acknowledged.
-    db.exec("PRAGMA synchronous = EXTRA");
+    // WAL lets readers run beside the writer. FULL syncs the log on every commit,
+    // so an acknowledged write still survives power loss; EXTRA only added a
+    // directory sync for the DELETE journal, which WAL never unlinks.
+    db.exec(
+      "PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL; PRAGMA busy_timeout = 5000;"
+    );
   }
 
   return db;
@@ -1086,7 +1103,7 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
       }
 
       if (profile.is_super) {
-        throw new NakamaApiError("Super Bot cannot be moved.", 400);
+        throw new NakamaApiError("Super Nakama cannot be moved.", 400);
       }
 
       const target = db
@@ -1223,6 +1240,32 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
 
   const deleteProfileStmt = db.prepare("DELETE FROM profiles WHERE id = ?");
 
+  const promoteProfileStmt = db.prepare(
+    "UPDATE profiles SET is_default = 1, updated_at = ? WHERE id = ? AND org_id = ?"
+  );
+
+  const deleteProfileAndPromoteDefaultTx = db.transaction(
+    (id: string, orgId: string, successorId?: string) => {
+      if (getProfileForOrgStmt.get(id, orgId)?.is_default && !successorId) {
+        throw new Error("Default profile changed during deletion.");
+      }
+
+      const deleted = deleteProfileForOrgStmt.run(id, orgId).changes > 0;
+
+      if (
+        deleted &&
+        successorId &&
+        !getDefaultProfileForOrgStmt.get(orgId) &&
+        promoteProfileStmt.run(new Date().toISOString(), successorId, orgId)
+          .changes !== 1
+      ) {
+        throw new Error("Successor profile not found.");
+      }
+
+      return deleted;
+    }
+  );
+
   const deleteProfileForOrgStmt = db.prepare(
     "DELETE FROM profiles WHERE id = ? AND org_id = ?"
   );
@@ -1307,14 +1350,16 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
     "SELECT * FROM sessions WHERE id = ? AND app_user_id IS NULL"
   );
 
+  // org_id follows the profile's org. The profile move path keeps it in sync.
   const upsertSessionStmt = db.prepare(`
-    INSERT INTO sessions (id, profile_id, channel, created_at, updated_at, app_user_id, user_id, model, pinned)
-    VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?)
+    INSERT INTO sessions (id, profile_id, channel, created_at, updated_at, app_user_id, user_id, model, org_id, pinned)
+    VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?, ?)
     ON CONFLICT(id) DO UPDATE SET
       profile_id = excluded.profile_id,
       channel = excluded.channel,
       user_id = COALESCE(excluded.user_id, sessions.user_id),
-      model = excluded.model
+      model = excluded.model,
+      org_id = excluded.org_id
     WHERE sessions.app_user_id IS NULL
   `);
 
@@ -1883,6 +1928,25 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
     WHERE org_id = ? AND plugin_id = ?
   `);
 
+  const listProfilesWithPluginAssignmentCountStmt = db.prepare<
+    { profile_id: string },
+    SQLQueryBindings[]
+  >(`
+    SELECT profile_id FROM (
+      SELECT profile_tools.profile_id AS profile_id
+      FROM profile_tools
+      INNER JOIN tools ON tools.id = profile_tools.tool_id
+      WHERE tools.org_id = ? AND tools.plugin_id = ?
+      UNION ALL
+      SELECT profile_skills.profile_id AS profile_id
+      FROM profile_skills
+      INNER JOIN skills ON skills.id = profile_skills.skill_id
+      WHERE skills.org_id = ? AND skills.plugin_id = ?
+    )
+    GROUP BY profile_id
+    HAVING COUNT(*) = ?
+  `);
+
   const findToolNameCollisionStmt = db.prepare(`
     SELECT id FROM tools
     WHERE name = ? AND org_id = ?
@@ -2032,35 +2096,6 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
       updated_at = excluded.updated_at
   `);
 
-  const incrementToolOutputSavingsStmt = db.prepare(`
-    INSERT INTO tool_output_savings (
-      org_id, bucket, optimizer, tool, calls, bytes_in, bytes_out, tracked_since, updated_at
-    )
-    VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?)
-    ON CONFLICT(org_id, bucket, optimizer, tool) DO UPDATE SET
-      calls = tool_output_savings.calls + 1,
-      bytes_in = tool_output_savings.bytes_in + excluded.bytes_in,
-      bytes_out = tool_output_savings.bytes_out + excluded.bytes_out,
-      updated_at = excluded.updated_at
-  `);
-
-  const listToolOutputSavingsStmt = db.prepare<
-    {
-      bucket: string;
-      bytes_in: number;
-      bytes_out: number;
-      calls: number;
-      optimizer: string;
-      org_id: string;
-      tool: string;
-      tracked_since: string;
-      updated_at: string;
-    },
-    SQLQueryBindings[]
-  >(
-    "SELECT * FROM tool_output_savings WHERE org_id = ? ORDER BY bucket ASC, (bytes_in - bytes_out) DESC"
-  );
-
   const incrementLlmTurnUsageStmt = db.prepare(`
     INSERT INTO llm_turn_usage (
       org_id, bucket, arm, turns, input_tokens, output_tokens, estimated_turns, updated_at
@@ -2076,7 +2111,6 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
 
   const listLlmTurnUsageStmt = db.prepare<
     {
-      arm: string;
       bucket: string;
       estimated_turns: number;
       input_tokens: number;
@@ -2100,19 +2134,17 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
       image_model,
       coding_agent_harnesses,
       selected_coding_agent_harness,
-      token_optimizer_enabled,
       coding_agent_provider_passthrough,
       automation_worker_poll_interval_ms,
       updated_at
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(id) DO UPDATE SET
       vision_model = excluded.vision_model,
       transcription_model = excluded.transcription_model,
       image_model = excluded.image_model,
       coding_agent_harnesses = excluded.coding_agent_harnesses,
       selected_coding_agent_harness = excluded.selected_coding_agent_harness,
-      token_optimizer_enabled = excluded.token_optimizer_enabled,
       coding_agent_provider_passthrough = excluded.coding_agent_provider_passthrough,
       automation_worker_poll_interval_ms = excluded.automation_worker_poll_interval_ms,
       updated_at = excluded.updated_at
@@ -2965,7 +2997,6 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
         "llm_usage_model_stats",
         "mcp_servers",
         "skills",
-        "tool_output_savings",
         "tools",
         "workspace_settings",
       ]) {
@@ -3405,6 +3436,34 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
       AND (? IS NULL OR status = ?)
       AND (? IS NULL OR profile_id = ?)
     ORDER BY created_at DESC
+  `);
+
+  const upsertArtifactRecordStmt = db.prepare(`
+    INSERT INTO artifacts (
+      org_id, profile_id, filename, session_id, user_id, channel, created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT (org_id, profile_id, filename) DO UPDATE SET
+      session_id = excluded.session_id,
+      user_id = excluded.user_id,
+      channel = excluded.channel,
+      created_at = excluded.created_at
+  `);
+
+  const listArtifactRecordsStmt = db.prepare<
+    ArtifactOwnerRow,
+    SQLQueryBindings[]
+  >(`
+    SELECT
+      a.org_id, a.profile_id, a.filename, a.session_id, a.user_id,
+      a.channel, a.created_at,
+      COALESCE(NULLIF(u.name, ''), u.email) AS user_name
+    FROM artifacts a
+    LEFT JOIN users u ON u.id = a.user_id
+    WHERE a.org_id = ? AND a.profile_id = ?
+  `);
+
+  const deleteArtifactRecordStmt = db.prepare(`
+    DELETE FROM artifacts WHERE org_id = ? AND profile_id = ? AND filename = ?
   `);
 
   const createArtifactShareStmt = db.prepare(`
@@ -4051,14 +4110,34 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
         );
       }
 
+      const ownedSkills = listOwnedSkillIdsStmt.all(
+        input.orgId,
+        input.pluginId
+      );
+
+      const ownedTools = listOwnedToolIdsStmt.all(input.orgId, input.pluginId);
+      const ownedCount = ownedSkills.length + ownedTools.length;
+
+      // Profiles that held every tool and skill of the previous release keep
+      // full access when the new release adds tools or skills.
+      const fullAccessProfileIds =
+        ownedCount === 0
+          ? []
+          : listProfilesWithPluginAssignmentCountStmt
+              .all(
+                input.orgId,
+                input.pluginId,
+                input.orgId,
+                input.pluginId,
+                ownedCount
+              )
+              .map((row) => row.profile_id);
+
       const incomingSkillKeys = new Set(
         input.contributions.skills.map((skill) => skill.pluginKey)
       );
 
-      for (const row of listOwnedSkillIdsStmt.all(
-        input.orgId,
-        input.pluginId
-      )) {
+      for (const row of ownedSkills) {
         if (!incomingSkillKeys.has(row.plugin_key)) {
           unassignSkillFromAllProfilesStmt.run(row.id);
           deleteSkillStmt.run(row.id);
@@ -4088,13 +4167,19 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
           skill.createdAt,
           skill.updatedAt
         );
+
+        if (!owned) {
+          for (const profileId of fullAccessProfileIds) {
+            assignSkillStmt.run(profileId, id);
+          }
+        }
       }
 
       const incomingToolKeys = new Set(
         input.contributions.tools.map((tool) => tool.pluginKey)
       );
 
-      for (const row of listOwnedToolIdsStmt.all(input.orgId, input.pluginId)) {
+      for (const row of ownedTools) {
         if (!incomingToolKeys.has(row.plugin_key)) {
           unassignToolFromAllProfilesStmt.run(row.id);
           deleteToolStmt.run(row.id);
@@ -4121,6 +4206,12 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
           tool.createdAt,
           tool.updatedAt
         );
+
+        if (!owned) {
+          for (const profileId of fullAccessProfileIds) {
+            assignToolStmt.run(profileId, id);
+          }
+        }
       }
 
       const published = getOrgPluginStmt.get(input.orgId, input.pluginId);
@@ -4600,6 +4691,9 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
     async createUser(record) {
       runCreateUserStmt(record);
     },
+    async deleteArtifactRecord(orgId, profileId, filename) {
+      deleteArtifactRecordStmt.run(orgId, profileId, filename);
+    },
 
     async deleteAttachment(id) {
       const result = deleteAttachmentStmt.run(id);
@@ -4675,6 +4769,10 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
       const result = deleteProfileStmt.run(id);
 
       return result.changes > 0;
+    },
+
+    async deleteProfileAndPromoteDefault(id, orgId, successorId) {
+      return deleteProfileAndPromoteDefaultTx.immediate(id, orgId, successorId);
     },
 
     async deleteProfileForOrg(id, orgId) {
@@ -4848,13 +4946,13 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
     async getMcpServer(id) {
       const row = getMcpServerStmt.get(id);
 
-      return row ? toMcpServerRecord(row) : null;
+      return row ? await toMcpServerRecord(row) : null;
     },
 
     async getMcpServerByName(name) {
       const row = getMcpServerByNameStmt.get(name);
 
-      return row ? toMcpServerRecord(row) : null;
+      return row ? await toMcpServerRecord(row) : null;
     },
 
     async getNotificationDestination(id) {
@@ -5156,7 +5254,8 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
       incrementLlmTurnUsageStmt.run(
         orgId,
         updatedAt.slice(0, 10),
-        delta.optimized ? "omni" : "none",
+        // Legacy arm column, see migrateLlmTurnUsageTable.
+        "none",
         delta.inputTokens,
         delta.outputTokens,
         delta.estimated ? 1 : 0,
@@ -5238,20 +5337,6 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
       );
     },
 
-    async incrementToolOutputSavings(orgId, delta, trackedSince) {
-      const updatedAt = new Date().toISOString();
-      incrementToolOutputSavingsStmt.run(
-        orgId,
-        updatedAt.slice(0, 10),
-        delta.optimizer,
-        delta.tool,
-        delta.bytesIn,
-        delta.bytesOut,
-        trackedSince,
-        updatedAt
-      );
-    },
-
     async insertAttachment(record) {
       if (record.sessionId) {
         requireWritableSession(record.sessionId);
@@ -5330,6 +5415,11 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
         record.completedAt,
         record.position
       );
+    },
+    async listArtifactRecords(orgId, profileId) {
+      return listArtifactRecordsStmt
+        .all(orgId, profileId)
+        .map((row) => toArtifactOwnerRecord(row));
     },
 
     async listArtifactSharesForProfile(orgId, profileId) {
@@ -5426,7 +5516,6 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
 
     async listLlmTurnUsage(orgId) {
       return listLlmTurnUsageStmt.all(orgId).map((row) => ({
-        arm: row.arm,
         bucket: row.bucket,
         estimatedTurns: row.estimated_turns,
         inputTokens: row.input_tokens,
@@ -5465,13 +5554,17 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
     },
 
     async listMcpServers() {
-      return listMcpServersStmt.all().map((row) => toMcpServerRecord(row));
+      return Promise.all(
+        listMcpServersStmt.all().map((row) => toMcpServerRecord(row))
+      );
     },
 
     async listMcpServersForProfile(profileId) {
-      return listMcpServersForProfileStmt
-        .all(profileId)
-        .map((row) => toMcpServerRecord(row));
+      return Promise.all(
+        listMcpServersForProfileStmt
+          .all(profileId)
+          .map((row) => toMcpServerRecord(row))
+      );
     },
 
     async listMessagesForSession(sessionId) {
@@ -5684,20 +5777,6 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
       const rows = listSkillVersionsStmt.all(skillId, options.limit ?? 50);
 
       return rows.map(toSkillVersionRecord);
-    },
-
-    async listToolOutputSavings(orgId) {
-      return listToolOutputSavingsStmt.all(orgId).map((row) => ({
-        bucket: row.bucket,
-        bytesIn: row.bytes_in,
-        bytesOut: row.bytes_out,
-        calls: row.calls,
-        optimizer: row.optimizer,
-        orgId: row.org_id,
-        tool: row.tool,
-        trackedSince: row.tracked_since,
-        updatedAt: row.updated_at,
-      }));
     },
 
     async listTools() {
@@ -6068,6 +6147,17 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
         record.id
       );
     },
+    async upsertArtifactRecord(record) {
+      upsertArtifactRecordStmt.run(
+        record.orgId,
+        record.profileId,
+        record.filename,
+        record.sessionId,
+        record.userId,
+        record.channel,
+        record.createdAt
+      );
+    },
 
     async upsertAutomation(record) {
       const existing = await this.getAutomation(record.id);
@@ -6137,7 +6227,7 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
         record.id,
         record.name,
         record.transport,
-        JSON.stringify(record.config ?? {}),
+        await encryptMcpConfig(record.id, record.config),
         record.enabled ? 1 : 0,
         record.status,
         record.lastError,
@@ -6183,6 +6273,11 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
     },
     async upsertSession(record) {
       requireWritableSession(record.id);
+
+      // org_id comes from the session's current profile on every upsert;
+      // callers do not pass one, so it cannot drift from that profile.
+      const orgId = getProfileStmt.get(record.profileId)?.org_id ?? null;
+
       upsertSessionStmt.run(
         record.id,
         record.profileId,
@@ -6191,6 +6286,7 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
         record.createdAt,
         record.userId ?? null,
         record.model,
+        orgId,
         record.pinned ? 1 : 0
       );
     },
@@ -6251,10 +6347,6 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
         record.imageModel,
         JSON.stringify(record.codingAgentHarnesses),
         record.selectedCodingAgentHarness,
-        record.tokenOptimizerEnabled === null ||
-          record.tokenOptimizerEnabled === undefined
-          ? null
-          : Number(record.tokenOptimizerEnabled),
         record.codingAgentProviderPassthrough === false ? 0 : 1,
         record.automationWorkerPollIntervalMs ?? 5 * 60 * 1000,
         record.updatedAt
@@ -6432,13 +6524,48 @@ function normalizeSkillCreatedBy(
   return "bundled";
 }
 
-function toMcpServerRecord(row: McpServerRow): StoredMcpServerRecord {
+/**
+ * MCP config holds headers, env and OAuth tokens, so it is stored encrypted.
+ * Rows saved before encryption stay readable until the next save.
+ */
+const ENCRYPTED_MCP_CONFIG_PREFIX = "enc:";
+
+function mcpConfigScope(serverId: string): string {
+  return `mcp-server:${serverId}`;
+}
+
+async function encryptMcpConfig(
+  serverId: string,
+  config: StoredMcpServerRecord["config"]
+): Promise<string> {
+  return `${ENCRYPTED_MCP_CONFIG_PREFIX}${await encryptCredential(
+    mcpConfigScope(serverId),
+    JSON.stringify(config ?? {})
+  )}`;
+}
+
+async function decryptMcpConfig(row: McpServerRow): Promise<JsonValue> {
+  if (!row.config.startsWith(ENCRYPTED_MCP_CONFIG_PREFIX)) {
+    return parseJson(row.config);
+  }
+
+  return parseJson(
+    await decryptCredential(
+      mcpConfigScope(row.id),
+      row.config.slice(ENCRYPTED_MCP_CONFIG_PREFIX.length)
+    )
+  );
+}
+
+async function toMcpServerRecord(
+  row: McpServerRow
+): Promise<StoredMcpServerRecord> {
   return {
     // SAFETY: The adapter writes this row value through its typed contract.
     cachedTools: JSON.parse(
       row.cached_tools
     ) as StoredMcpServerRecord["cachedTools"],
-    config: parseJson(row.config),
+    config: await decryptMcpConfig(row),
     createdAt: row.created_at,
     enabled: row.enabled !== 0,
     id: row.id,
@@ -6816,11 +6943,6 @@ function toWorkspaceSettingsRecord(
     imageModel: row.image_model?.trim() || null,
     selectedCodingAgentHarness:
       row.selected_coding_agent_harness?.trim() || null,
-    tokenOptimizerEnabled:
-      row.token_optimizer_enabled === null ||
-      row.token_optimizer_enabled === undefined
-        ? null
-        : row.token_optimizer_enabled === 1,
     transcriptionModel: row.transcription_model?.trim() || null,
     updatedAt: row.updated_at,
     visionModel: row.vision_model?.trim() || null,
@@ -7278,6 +7400,21 @@ function toSkillSuggestionRecord(
     status: row.status as StoredSkillSuggestion["status"],
     // SAFETY: The adapter writes this row value through its typed contract.
     warnings: row.warnings ? (JSON.parse(row.warnings) as string[]) : null,
+  };
+}
+
+function toArtifactOwnerRecord(
+  row: ArtifactOwnerRow
+): StoredArtifactOwnerRecord {
+  return {
+    channel: row.channel,
+    createdAt: row.created_at,
+    filename: row.filename,
+    orgId: row.org_id,
+    profileId: row.profile_id,
+    sessionId: row.session_id,
+    userId: row.user_id,
+    userName: row.user_name,
   };
 }
 

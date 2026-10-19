@@ -17,6 +17,7 @@ import { emailTool } from "@nakama/core/tools/email";
 import { loadWebSearchConfig } from "@nakama/core/web-search-config";
 import type { DatabaseAdapter, StoredToolRecord } from "@nakama/db";
 import { type BashInput, bashTool, runBash } from "../tools/bash";
+import { enrichAgentBrowserBashInput } from "./agent-browser-service";
 import { enrichCodingAgentBashInput } from "./coding-agent-bash-env";
 import { getCustomToolHandler } from "./custom-tool-handlers";
 import type { CustomToolRecord } from "./custom-tool-shared";
@@ -27,6 +28,7 @@ import { actorMayInvoke, PluginHostError } from "./plugin-service";
 export type ServerToolOverrides = {
   googleMeet?: ToolDefinition[];
   generateImage?: ToolDefinition | null;
+  saveArtifact?: ToolDefinition | null;
   session?: ToolDefinition[];
   subAgent?: ToolDefinition | null;
 };
@@ -133,6 +135,7 @@ async function resolveStoredTool(
     record.handlerType === "bash" ||
     record.handlerType === "sub_agent" ||
     record.handlerType === "generate_image" ||
+    record.handlerType === "save_artifact" ||
     record.handlerType === "session"
   ) {
     return serverTools.get(record.name) ?? null;
@@ -171,6 +174,10 @@ function buildServerTools(
     map.set(overrides.generateImage.name, overrides.generateImage);
   }
 
+  if (overrides.saveArtifact) {
+    map.set(overrides.saveArtifact.name, overrides.saveArtifact);
+  }
+
   for (const tool of overrides.session ?? []) {
     map.set(tool.name, tool);
   }
@@ -194,7 +201,10 @@ function createCodingAgentAwareBashTool(
         orgService
       );
 
-      return runBash(enriched, context);
+      return runBash(
+        await enrichAgentBrowserBashInput(enriched, context),
+        context
+      );
     },
   };
 }

@@ -5,22 +5,26 @@ Agent platform built to work with your team — not replace them. Multi-tenant m
 ## Rules
 
 **Before code**
+
 - Read [CONTRIBUTING.md, "Before you start building"](./CONTRIBUTING.md#before-you-start-building) first. Four questions, and a closed PR here usually failed one of them. You can produce a working change faster than anyone can decide it was the right one, so check the shape before the diff
 - Read the rest of [CONTRIBUTING.md](./CONTRIBUTING.md) before you pick work or open a PR: how to claim an issue, the checks to run, the PR body format, and [what happens to work that goes quiet](./CONTRIBUTING.md#when-work-goes-quiet). An issue assigned to someone else is not yours to build. A PR labelled `stale` is, with `Co-authored-by` for its author
 
 **Code**
+
 - Prefer edit over extract; no new package/file unless an existing module cannot hold the change. CI fails a new workspace unless the PR carries the `new-package` label
 - No new abstractions for a single call site
 - Tests assert behavior (status, data, side effects), not prompt/description/error copy
 - React UI: one self-explanatory heading/label; no subtitles or helper copy unless the user asks or misunderstanding would cause errors
 
 **Replies**
+
 - ADHD-shaped: lead with the action; numbered steps; no preamble/recap
 - Use [ASD-STE100 Simplified Technical English](https://www.asd-ste100.org/) in every reply to the user, including progress updates. Keep code names, commands, and paths exact.
 - Human voice — short, concrete, plain words, no corporate filler
 - If ambiguous, give 3 options numbered — the user will reply with a number
 
 **Process**
+
 - PRs: ready for review by default; drafts only on explicit user request. Overrides skills.
 - Browser checks only when explicitly requested (`agent-browser`); otherwise tests, type checks, builds. Do not add Playwright.
 
@@ -104,27 +108,27 @@ Orgs isolate profiles, sessions, automations, tools, MCP, skills, usage (`org_id
 
 **Org context:** every authed call except `/v1/auth/*` and `/v1/platform/*` needs `X-Org-Id` (`@nakama/client`) or the active org stored on the browser session (`active_org_id`, set by `POST /v1/auth/active-org`). Middleware: `org-middleware.ts`; guards: `org-guards.ts`.
 
-| Change | Where |
-|---|---|
-| Org CRUD / invites / members | `apps/server/src/services/org-service.ts` |
-| Platform org routes | `apps/server/src/http/routes/platform-orgs.ts` |
-| Member routes | `…/routes/org-members.ts` |
-| Auth / active-org | `…/routes/auth.ts` |
-| DB types / SQLite | `packages/db/src/{types.ts,adapters/sqlite.ts}` |
-| Contracts | `packages/core/src/contract.ts` |
-| Client `X-Org-Id` | `packages/client/src/client.ts` |
-| Web auth / switcher | `apps/web/src/context/auth-context.tsx`, `OrgSwitcher.tsx` |
+| Change                       | Where                                                      |
+| ---------------------------- | ---------------------------------------------------------- |
+| Org CRUD / invites / members | `apps/server/src/services/org-service.ts`                  |
+| Platform org routes          | `apps/server/src/http/routes/platform-orgs.ts`             |
+| Member routes                | `…/routes/org-members.ts`                                  |
+| Auth / active-org            | `…/routes/auth.ts`                                         |
+| DB types / SQLite            | `packages/db/src/{types.ts,adapters/sqlite.ts}`            |
+| Contracts                    | `packages/core/src/contract.ts`                            |
+| Client `X-Org-Id`            | `packages/client/src/client.ts`                            |
+| Web auth / switcher          | `apps/web/src/context/auth-context.tsx`, `OrgSwitcher.tsx` |
 
 ## System prompt
 
 Merged in `agent-service` `resolveProfileSystemPrompt` → `generateReply` (`provider.generateChat` / `streamChat`):
 
-| Change | File | Fn |
-|---|---|---|
-| Chat structure (USER.md, tools, timezone, channels) | `packages/agent/src/chat-prompt.ts` | `buildChatSystemPrompt` |
-| Soul content | `packages/core/src/soul/compose.ts` | `composeSoulSystemPrompt` |
-| Skills catalog / matched / agent-browser | `packages/core/src/skills/compose.ts` | `composeSkillsCatalog`, `composeMatchedSkillsPrompt`, `composeAgentBrowserCapabilityPrompt` |
-| Per-turn context (date, etc.) | `packages/agent/src/chat.ts` | `generateReply` |
+| Change                                              | File                                  | Fn                                                                                          |
+| --------------------------------------------------- | ------------------------------------- | ------------------------------------------------------------------------------------------- |
+| Chat structure (USER.md, tools, timezone, channels) | `packages/agent/src/chat-prompt.ts`   | `buildChatSystemPrompt`                                                                     |
+| Soul content                                        | `packages/core/src/soul/compose.ts`   | `composeSoulSystemPrompt`                                                                   |
+| Skills catalog / matched / agent-browser            | `packages/core/src/skills/compose.ts` | `composeSkillsCatalog`, `composeMatchedSkillsPrompt`, `composeAgentBrowserCapabilityPrompt` |
+| Per-turn context (date, etc.)                       | `packages/agent/src/chat.ts`          | `generateReply`                                                                             |
 
 ## Soul (`packages/core/src/soul/`)
 
@@ -132,19 +136,19 @@ Profile workspace / soul dir: `~/.nakama/orgs/{orgId}/profiles/{profileId}/` (`g
 
 ## Tools (`packages/core/src/tools/`)
 
-| Tool / skill | Notes |
-|---|---|
-| `update-profile-memory` / `archive-profile-memory` | MEMORY.md ↔ memory-archive/ |
-| `save-artifact` | Persist under `artifacts/`. Text/Markdown/HTML/JSON can also be edited in the chat preview panel (`PUT /v1/profiles/:profileId/artifacts/content`). |
-| `knowledge_base_search` / `web_search` / `email` | KB, web, mailbox |
-| `search_files` / `ripgrep` | File/content search |
-| `bash` | Profile workspace shell — assign per profile; Super Bot by default |
-| `sub_agent` | Opt-in same-profile delegate (not repo coding) |
-| `coding-agent` | Repo coding via Codex / Claude Code / OpenCode / pi / Cursor Agent (`agent`) through `bash` — use instead of `sub_agent` for coding |
-| `agent-browser` | Opt-in browser CLI; needs host install — `docs/website/agent-browser.md` |
-| `create-profile` | Super Bot only, confirm-first — `apps/server/src/tools/super-bot-tools.ts` |
-| `skill_manage` | Web/cli skill CRUD + auto-assign — `apps/server/src/tools/skill-manage-tool.ts` (approval, curator, post-turn review live there) |
-| Composio | Org toolkits + per-user OAuth — `docs/website/composio.md` |
+| Tool / skill                                       | Notes                                                                                                                               |
+| -------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| `update-profile-memory` / `archive-profile-memory` | MEMORY.md ↔ memory-archive/                                                                                                         |
+| `save_artifact` / `artifact-design`                | Persist under `artifacts/`; skill holds design rules                                                                                |
+| `knowledge_base_search` / `web_search` / `email`   | KB, web, mailbox                                                                                                                    |
+| `search_files` / `ripgrep`                         | File/content search                                                                                                                 |
+| `bash`                                             | Profile workspace shell — assign per profile; Super Nakama by default                                                               |
+| `sub_agent`                                        | Opt-in same-profile delegate (not repo coding)                                                                                      |
+| `coding-agent`                                     | Repo coding via Codex / Claude Code / OpenCode / pi / Cursor Agent (`agent`) through `bash` — use instead of `sub_agent` for coding |
+| `agent-browser`                                    | Opt-in browser CLI; needs host install — `docs/website/agent-browser.md`                                                            |
+| `create-profile`                                   | Super Nakama only, confirm-first — `apps/server/src/tools/super-nakama-tools.ts`                                                    |
+| `skill_manage`                                     | Web/cli skill CRUD + auto-assign — `apps/server/src/tools/skill-manage-tool.ts` (approval, curator, post-turn review live there)    |
+| Composio                                           | Org toolkits + per-user OAuth — `docs/website/composio.md`                                                                          |
 
 **Channel artifacts (Telegram/Discord/WhatsApp):** `packages/core/src/channel-artifacts.ts`, `channel-artifact-delivery.ts`; handlers in `apps/platform/{telegram,discord,whatsapp}/src/channel-artifact-flow.ts`.
 
@@ -152,29 +156,29 @@ Profile workspace / soul dir: `~/.nakama/orgs/{orgId}/profiles/{profileId}/` (`g
 
 Path bugs (tool resolves under repo instead of `~/.nakama`) → start here.
 
-| Path | Purpose |
-|---|---|
+| Path                                           | Purpose                                          |
+| ---------------------------------------------- | ------------------------------------------------ |
 | `~/.nakama/orgs/{orgId}/profiles/{profileId}/` | Profile workspace / soul — `getProfileSoulDir()` |
-| `~/.nakama/tools/*.js`, `*.py` | Custom JS / Python tools — `getCustomToolsDir()` |
+| `~/.nakama/tools/*.js`, `*.py`                 | Custom JS / Python tools — `getCustomToolsDir()` |
 
 Always build context with `buildToolExecutionContext()` (`packages/core/src/tools/context.ts`) so `workspaceRoot` = soul dir. Custom JS: `context.workspaceRoot`, **not** `process.cwd()`. Custom Python: `NAKAMA_WORKSPACE_ROOT` env.
 
-| | Built-in | Custom JS | Custom Python |
-|---|---|---|---|
-| Code | `packages/core/src/tools/`, `apps/server/src/tools/` | `~/.nakama/tools/*.js` | `~/.nakama/tools/*.py` |
-| Workspace | `getProfileSoulDir` inside handler | `context.workspaceRoot` | `NAKAMA_WORKSPACE_ROOT` env |
-| Loader | builtins map | `javascript-tool-loader.ts` | `python-tool-loader.ts` |
+|           | Built-in                                             | Custom JS                   | Custom Python               |
+| --------- | ---------------------------------------------------- | --------------------------- | --------------------------- |
+| Code      | `packages/core/src/tools/`, `apps/server/src/tools/` | `~/.nakama/tools/*.js`      | `~/.nakama/tools/*.py`      |
+| Workspace | `getProfileSoulDir` inside handler                   | `context.workspaceRoot`     | `NAKAMA_WORKSPACE_ROOT` env |
+| Loader    | builtins map                                         | `javascript-tool-loader.ts` | `python-tool-loader.ts`     |
 
-| Flow | Entry |
-|---|---|
-| Chat | `agent-service` → `buildChatSession()` → `buildToolExecutionContext(...)` |
-| Tool loop | `packages/agent/src/tool-loop.ts` → `executeToolCall()`; parallel batching in `packages/agent/src/chat.ts` when every call is `parallelSafe` |
-| Playground | `POST /v1/tools/:toolId/run` → `runToolPlayground()` |
-| Param suggest | `POST /v1/tools/:toolId/params/suggest` |
+| Flow          | Entry                                                                                                                                        |
+| ------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| Chat          | `agent-service` → `buildChatSession()` → `buildToolExecutionContext(...)`                                                                    |
+| Tool loop     | `packages/agent/src/tool-loop.ts` → `executeToolCall()`; parallel batching in `packages/agent/src/chat.ts` when every call is `parallelSafe` |
+| Playground    | `POST /v1/tools/:toolId/run` → `runToolPlayground()`                                                                                         |
+| Param suggest | `POST /v1/tools/:toolId/params/suggest`                                                                                                      |
 
 **Parallel tool calls:** `parallelSafe: true` on read/search/fetch builtins (`read_file`, `search_files`, `knowledge_base_search`, `web_search`, `web_fetch`). Mutating / shell / delegation stay sequential. Custom JS opts in via `handlerConfig.parallelSafe`; Python always sequential. Mixed turn → whole turn sequential.
 
-**Debug:** (1) path under `~/.nakama/tools/`, (2) `buildToolExecutionContext` + real `profileId`, (3) monorepo-root paths ⇒ missing `workspaceRoot`, (4) test files in the assigned profile workspace. Super Bot rules: `SUPER_BOT_SYSTEM_PROMPT` in `packages/db/src/constants.ts`.
+**Debug:** (1) path under `~/.nakama/tools/`, (2) `buildToolExecutionContext` + real `profileId`, (3) monorepo-root paths ⇒ missing `workspaceRoot`, (4) test files in the assigned profile workspace. Super Nakama rules: `SUPER_NAKAMA_SYSTEM_PROMPT` in `packages/db/src/constants.ts`.
 
 **Playground UI:** `/system/playground/:toolId` — `ToolPlaygroundPage.tsx`, `ToolPlaygroundPanel.tsx`; admin-only via `canUseToolPlayground()`.
 

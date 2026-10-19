@@ -79,6 +79,7 @@ import {
   BASH_TOOL_ID,
   BUILTIN_TOOL_IDS,
   isProtectedToolId,
+  SAVE_ARTIFACT_TOOL_ID,
 } from "@nakama/core/tools/protected";
 import type {
   DatabaseAdapter,
@@ -222,6 +223,7 @@ const BASIC_PROFILE_TOOL_IDS = [
   BUILTIN_TOOL_IDS.search_files,
   BUILTIN_TOOL_IDS.knowledge_base_search,
   BUILTIN_TOOL_IDS.web_fetch,
+  SAVE_ARTIFACT_TOOL_ID,
 ] as const;
 
 const SOUL_FILE_KEY_BY_NAME = {
@@ -413,7 +415,7 @@ export class ProfileService {
     const source = await this.requireMutableProfile(orgId, sourceId);
 
     if (source.isSuper) {
-      throw new NakamaApiError("Super Bot cannot be cloned.", 400);
+      throw new NakamaApiError("Super Nakama cannot be cloned.", 400);
     }
 
     const name = request.name?.trim() || `${source.name} (copy)`;
@@ -745,6 +747,8 @@ export class ProfileService {
   async deleteProfile(orgId: string, profileId: string): Promise<void> {
     const profile = await this.requireProfile(orgId, profileId);
 
+    let successorId: string | undefined;
+
     if (profile.isDefault) {
       const orgProfiles = await this.db.listProfilesForOrg(orgId);
 
@@ -769,22 +773,16 @@ export class ProfileService {
         );
       }
 
-      await this.beforeChannelOwnerDelete?.(orgId, profileId);
-      await this.db.upsertProfile({
-        ...successor,
-        isDefault: true,
-        updatedAt: new Date().toISOString(),
-      });
+      successorId = successor.id;
     }
 
-    if (!profile.isDefault) {
-      await this.beforeChannelOwnerDelete?.(orgId, profileId);
-    }
+    await this.beforeChannelOwnerDelete?.(orgId, profileId);
 
     const deleted = await deleteProfileWithHistoryArchives(
       this.db,
       orgId,
-      profileId
+      profileId,
+      successorId
     );
 
     if (!deleted) {

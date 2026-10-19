@@ -6,8 +6,10 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   addOrgIdColumnIfMissing,
+  migrateArtifactDesignSkillName,
   migrateCodingDelegationSkillName,
   migrateDatabase,
+  migrateSuperNakamaNaming,
   moveProfileJoinReferences,
   resolveSchemaPath,
 } from "./migrate";
@@ -388,6 +390,28 @@ test("adds automation transcripts to existing databases idempotently", () => {
   }
 });
 
+test("adds the artifacts owner table to existing databases", () => {
+  const db = new Database(":memory:");
+
+  try {
+    migrateDatabase(db);
+    db.exec("DROP TABLE artifacts");
+    migrateDatabase(db);
+    migrateDatabase(db);
+
+    const columns = db
+      .query<{ name: string }, SQLQueryBindings[]>(
+        "PRAGMA table_info(artifacts)"
+      )
+      .all()
+      .map((column) => column.name);
+
+    expect(columns).toContain("user_id");
+  } finally {
+    db.close();
+  }
+});
+
 describe("legacy profile id migration", () => {
   test("renames legacy default and super bot profiles and preserves references", () => {
     const db = new Database(":memory:");
@@ -691,6 +715,120 @@ describe("legacy profile id migration", () => {
   });
 });
 
+describe("super nakama naming migration", () => {
+  test("renames the stock super profile and its change events only", () => {
+    const db = new Database(":memory:");
+
+    try {
+      migrateDatabase(db);
+      db.exec(`
+        INSERT INTO organizations (id, name, slug, created_at, updated_at)
+        VALUES ('org_a', 'A', 'a', '2026-10-16T00:00:00.000Z', '2026-10-16T00:00:00.000Z');
+        INSERT INTO profiles (id, name, system_prompt, model, is_super, org_id, created_at, updated_at)
+        VALUES
+          ('p_stock', 'Super Bot', '', NULL, 1, 'org_a', '2026-10-16T00:00:00.000Z', '2026-10-16T00:00:00.000Z'),
+          ('p_custom', 'Atlas', '', NULL, 1, 'org_a', '2026-10-16T00:00:00.000Z', '2026-10-16T00:00:00.000Z'),
+          ('p_regular', 'Super Bot', '', NULL, 0, 'org_a', '2026-10-16T00:00:00.000Z', '2026-10-16T00:00:00.000Z');
+        INSERT INTO profile_change_events (id, org_id, profile_id, source, field, created_at)
+        VALUES ('e1', 'org_a', 'p_stock', 'super_bot', 'system_prompt', '2026-10-16T00:00:00.000Z');
+      `);
+
+      migrateSuperNakamaNaming(db);
+
+      expect(
+        db.prepare("SELECT id, name FROM profiles ORDER BY id").all()
+      ).toEqual([
+        { id: "p_custom", name: "Atlas" },
+        { id: "p_regular", name: "Super Bot" },
+        { id: "p_stock", name: "Super Nakama" },
+      ]);
+      expect(
+        db.prepare("SELECT source FROM profile_change_events").get()
+      ).toEqual({ source: "super_nakama" });
+    } finally {
+      db.close();
+    }
+  });
+});
+
+describe("save-artifact skill rename migration", () => {
+  const insertSkill = (db: Database, id: string, name: string) =>
+    db
+      .prepare(
+        `INSERT INTO skills (
+          id, name, description, source_path, has_tool,
+          disable_model_invocation, enabled, created_at, updated_at
+        ) VALUES (?, ?, '', ?, 0, 0, 1, '2026-10-16T00:00:00.000Z', '2026-10-16T00:00:00.000Z')`
+      )
+      .run(id, name, `/tmp/.nakama/agent/skills/${name}/SKILL.md`);
+
+  const insertProfile = (db: Database, id: string) =>
+    db
+      .prepare(
+        `INSERT INTO profiles (id, name, system_prompt, model, is_super, created_at, updated_at)
+        VALUES (?, ?, '', NULL, 0, '2026-10-16T00:00:00.000Z', '2026-10-16T00:00:00.000Z')`
+      )
+      .run(id, id);
+
+  test("renames save-artifact skill records to artifact-design", () => {
+    const db = new Database(":memory:");
+
+    try {
+      migrateDatabase(db);
+      insertSkill(db, "skill_artifact", "save-artifact");
+
+      migrateArtifactDesignSkillName(db);
+
+      expect(
+        db
+          .prepare("SELECT name, source_path FROM skills WHERE id = ?")
+          .get("skill_artifact")
+      ).toEqual({
+        name: "artifact-design",
+        source_path: "/tmp/.nakama/agent/skills/artifact-design/SKILL.md",
+      });
+    } finally {
+      db.close();
+    }
+  });
+
+  test("moves profile assignments to artifact-design without duplicates", () => {
+    const db = new Database(":memory:");
+
+    try {
+      migrateDatabase(db);
+      insertProfile(db, "ops");
+      insertProfile(db, "both");
+      insertSkill(db, "skill_legacy", "save-artifact");
+      insertSkill(db, "skill_canonical", "artifact-design");
+      db.exec(`
+        INSERT INTO profile_skills (profile_id, skill_id) VALUES
+          ('ops', 'skill_legacy'),
+          ('both', 'skill_legacy'),
+          ('both', 'skill_canonical');
+      `);
+
+      migrateArtifactDesignSkillName(db);
+
+      expect(
+        db.prepare("SELECT id FROM skills WHERE name LIKE '%artifact%'").all()
+      ).toEqual([{ id: "skill_canonical" }]);
+      expect(
+        db
+          .prepare(
+            "SELECT profile_id, skill_id FROM profile_skills ORDER BY profile_id"
+          )
+          .all()
+      ).toEqual([
+        { profile_id: "both", skill_id: "skill_canonical" },
+        { profile_id: "ops", skill_id: "skill_canonical" },
+      ]);
+    } finally {
+      db.close();
+    }
+  });
+});
+
 describe("coding-delegation skill rename migration", () => {
   test("renames coding-delegation skill records to coding-agent", () => {
     const db = new Database(":memory:");
@@ -980,6 +1118,42 @@ describe("skill org id backfill", () => {
       } else {
         process.env.NAKAMA_CONFIG_DIR = originalConfigDir;
       }
+    }
+  });
+});
+
+describe("session org id backfill", () => {
+  test("recovers the owning org from the profile and leaves orphan sessions alone", () => {
+    const db = new Database(":memory:");
+
+    try {
+      migrateDatabase(db);
+
+      // Rows as every pre-fix install has them: org_id never written.
+      db.exec(`
+        INSERT INTO organizations (id, name, slug, created_at, updated_at)
+          VALUES ('org_a', 'Org A', 'org-a', 'now', 'now');
+        INSERT INTO profiles (id, name, org_id, created_at, updated_at)
+          VALUES ('profile_a', 'Agent A', 'org_a', 'now', 'now');
+      `);
+      db.exec("PRAGMA foreign_keys = OFF");
+      db.exec(`
+        INSERT INTO sessions (id, profile_id, channel, created_at, updated_at)
+          VALUES ('session_a', 'profile_a', 'web', 'now', 'now'),
+                 ('session_orphan', 'profile_gone', 'web', 'now', 'now');
+      `);
+      db.exec("PRAGMA foreign_keys = ON");
+
+      migrateDatabase(db);
+
+      expect(
+        db.query("SELECT id, org_id FROM sessions ORDER BY id").all()
+      ).toEqual([
+        { id: "session_a", org_id: "org_a" },
+        { id: "session_orphan", org_id: null },
+      ]);
+    } finally {
+      db.close();
     }
   });
 });
@@ -2105,6 +2279,36 @@ test("llm quota reservations: an upgrade drops the old counter table and its fal
     expect(
       db.query("SELECT COUNT(*) AS held FROM org_llm_quota_reservations").get()
     ).toEqual({ held: 0 });
+  } finally {
+    db.close();
+  }
+});
+
+test("upgrades drop the removed token optimiser table and column", () => {
+  const db = new Database(":memory:");
+
+  try {
+    migrateDatabase(db);
+    db.exec(
+      "CREATE TABLE tool_output_savings (org_id TEXT); ALTER TABLE workspace_settings ADD COLUMN token_optimizer_enabled INTEGER"
+    );
+    migrateDatabase(db);
+    migrateDatabase(db);
+    expect(
+      db
+        .query(
+          "SELECT name FROM sqlite_master WHERE name = 'tool_output_savings'"
+        )
+        .get()
+    ).toBeNull();
+    expect(
+      db
+        .query<{ name: string }, SQLQueryBindings[]>(
+          "PRAGMA table_info(workspace_settings)"
+        )
+        .all()
+        .map((column) => column.name)
+    ).not.toContain("token_optimizer_enabled");
   } finally {
     db.close();
   }

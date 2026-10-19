@@ -12,9 +12,10 @@ import { ensureLocalClientAccess } from "./local-client";
 import {
   ensureBashToolDefinition,
   ensureGenerateImageToolDefinition,
-  ensureOrgSuperBotProfiles,
+  ensureOrgSuperNakamaProfiles,
+  ensureSaveArtifactToolDefinition,
   ensureSessionToolDefinitions,
-  type SuperBotSeedOptions,
+  type SuperNakamaSeedOptions,
 } from "./org-profiles";
 import type { DatabaseAdapter } from "./types";
 
@@ -41,13 +42,14 @@ const SUPPORTED_TOOL_HANDLER_TYPES = new Set([
   "python",
   "sub_agent",
   "generate_image",
+  "save_artifact",
   "session",
   "plugin",
 ]);
 
 export async function seedDatabase(
   db: DatabaseAdapter,
-  options: SuperBotSeedOptions = {}
+  options: SuperNakamaSeedOptions = {}
 ): Promise<void> {
   await removeLegacyBuiltinTools(db);
   await removeDeprecatedBuiltinTools(db);
@@ -58,9 +60,10 @@ export async function seedDatabase(
   await ensureSessionToolDefinitions(db);
   await ensureBashToolDefinition(db);
   await ensureGenerateImageToolDefinition(db);
+  await ensureSaveArtifactToolDefinition(db);
   await ensurePreinstalledMcpServers(db);
   await ensureLocalClientAccess(db);
-  await ensureOrgSuperBotProfiles(db, options);
+  await ensureOrgSuperNakamaProfiles(db, options);
 }
 
 async function removeToolsMatching(
