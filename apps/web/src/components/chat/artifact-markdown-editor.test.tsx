@@ -1,9 +1,7 @@
 import { expect, test } from "bun:test";
 import { act } from "react";
-
-const { createRoot } = await import("react-dom/client");
-
-const { ArtifactMarkdownEditor } = await import("./artifact-markdown-editor");
+import { createRoot } from "react-dom/client";
+import { ArtifactMarkdownEditor } from "./artifact-markdown-editor";
 
 function setValue(textarea: Element, value: string) {
   const setter = Object.getOwnPropertyDescriptor(
@@ -18,15 +16,15 @@ function setValue(textarea: Element, value: string) {
 }
 
 function button(label: string): HTMLButtonElement {
-  const element = [...document.querySelectorAll("button")].find(
-    (entry) => entry.textContent === label
-  );
+  const element = [
+    ...document.querySelectorAll<HTMLButtonElement>("button"),
+  ].find((entry) => entry.textContent === label);
 
   if (!element) {
     throw new Error(`Missing button: ${label}`);
   }
 
-  return element as HTMLButtonElement;
+  return element;
 }
 
 test("artifact editor keeps the draft across parent re-renders and saves the edited content", async () => {
@@ -50,12 +48,17 @@ test("artifact editor keeps the draft across parent re-renders and saves the edi
       root.render(<ArtifactMarkdownEditor {...baseProps} />);
     });
 
-    const textarea = container.querySelector("textarea");
+    const textarea = container.querySelector<HTMLTextAreaElement>("textarea");
+
     expect(textarea).not.toBeNull();
     expect(textarea?.value).toBe("# Draft\n");
 
+    if (!textarea) {
+      throw new Error("Missing textarea");
+    }
+
     await act(async () => {
-      setValue(textarea as HTMLTextAreaElement, "# Draft\n\nMore\n");
+      setValue(textarea, "# Draft\n\nMore\n");
     });
     expect(textarea?.value).toBe("# Draft\n\nMore\n");
 

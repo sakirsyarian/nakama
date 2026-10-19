@@ -105,6 +105,7 @@ describe("omitStaleArtifactWriteBodies", () => {
 
     const result = omitStaleArtifactWriteBodies(messages);
 
+    // SAFETY: The assistant message in this test was constructed with a known providerContent block structure.
     const block =
       result[0] && result[0].role === "assistant"
         ? (result[0].providerContent?.[0] as {

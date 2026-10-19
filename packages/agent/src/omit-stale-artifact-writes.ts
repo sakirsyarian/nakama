@@ -1,4 +1,5 @@
 import type { ChatMessage, ToolCall } from "@nakama/core";
+import { z } from "zod";
 
 const ARTIFACT_WRITE_TOOLS = new Set(["write_file", "write_docx"]);
 
@@ -7,14 +8,37 @@ const BODY_KEYS = ["content", "markdown"] as const;
 export const OMITTED_ARTIFACT_WRITE_BODY =
   "(omitted; call read_file on this path for the current file, including preview-panel edits)";
 
-function sanitizeWriteArgs(
-  args: Record<string, unknown>
-): Record<string, unknown> {
+const JsonArgsSchema = z.record(z.string(), z.json());
+
+type JsonArgs = z.infer<typeof JsonArgsSchema>;
+
+const ToolUseBlockSchema = z.object({
+  id: z.string().optional(),
+  input: JsonArgsSchema,
+  name: z.string(),
+  type: z.literal("tool_use"),
+});
+
+const FunctionCallBlockSchema = z.object({
+  arguments: z.string(),
+  id: z.string().optional(),
+  name: z.string(),
+  type: z.literal("function_call"),
+});
+
+const ProviderContentBlockSchema = z.record(z.string(), z.json());
+
+type ProviderContentBlock = z.infer<typeof ProviderContentBlockSchema>;
+
+function sanitizeWriteArgs(args: JsonArgs): JsonArgs {
   let changed = false;
   const next = { ...args };
 
   for (const key of BODY_KEYS) {
-    if (typeof next[key] === "string" && next[key].length > 0) {
+    const val = next[key];
+    const parsedStr = z.string().safeParse(val);
+
+    if (parsedStr.success && parsedStr.data.length > 0) {
       next[key] = OMITTED_ARTIFACT_WRITE_BODY;
       changed = true;
     }
@@ -37,42 +61,37 @@ function sanitizeToolCall(call: ToolCall): ToolCall {
   return { ...call, arguments: arguments_ };
 }
 
-function sanitizeProviderBlock(block: unknown): unknown {
-  if (!block || typeof block !== "object") {
-    return block;
-  }
+function sanitizeProviderBlock(
+  block: ProviderContentBlock
+): ProviderContentBlock {
+  const toolUse = ToolUseBlockSchema.safeParse(block);
 
-  const record = block as Record<string, unknown>;
-  const name = typeof record.name === "string" ? record.name : "";
+  if (toolUse.success && ARTIFACT_WRITE_TOOLS.has(toolUse.data.name)) {
+    const input = sanitizeWriteArgs(toolUse.data.input);
 
-  if (
-    record.type === "tool_use" &&
-    ARTIFACT_WRITE_TOOLS.has(name) &&
-    record.input &&
-    typeof record.input === "object"
-  ) {
-    const input = sanitizeWriteArgs(record.input as Record<string, unknown>);
-
-    if (input === record.input) {
+    if (input === toolUse.data.input) {
       return block;
     }
 
-    return { ...record, input };
+    return { ...block, input };
   }
 
+  const functionCall = FunctionCallBlockSchema.safeParse(block);
+
   if (
-    record.type === "function_call" &&
-    ARTIFACT_WRITE_TOOLS.has(name) &&
-    typeof record.arguments === "string"
+    functionCall.success &&
+    ARTIFACT_WRITE_TOOLS.has(functionCall.data.name)
   ) {
     try {
-      const parsed: unknown = JSON.parse(record.arguments);
+      const parsedArgs = JsonArgsSchema.safeParse(
+        JSON.parse(functionCall.data.arguments)
+      );
 
-      if (parsed && typeof parsed === "object") {
-        const input = sanitizeWriteArgs(parsed as Record<string, unknown>);
+      if (parsedArgs.success) {
+        const input = sanitizeWriteArgs(parsedArgs.data);
 
-        if (input !== parsed) {
-          return { ...record, arguments: JSON.stringify(input) };
+        if (input !== parsedArgs.data) {
+          return { ...block, arguments: JSON.stringify(input) };
         }
       }
     } catch {
@@ -94,7 +113,15 @@ export function omitStaleArtifactWriteBodies(
     const toolCalls = message.toolCalls?.map(sanitizeToolCall);
 
     const providerContent = Array.isArray(message.providerContent)
-      ? message.providerContent.map(sanitizeProviderBlock)
+      ? message.providerContent.map((rawBlock) => {
+          const parsed = ProviderContentBlockSchema.safeParse(rawBlock);
+
+          if (!parsed.success) {
+            return rawBlock;
+          }
+
+          return sanitizeProviderBlock(parsed.data);
+        })
       : message.providerContent;
 
     const toolCallsChanged =
@@ -113,10 +140,16 @@ export function omitStaleArtifactWriteBodies(
       return message;
     }
 
-    return {
-      ...message,
-      ...(toolCallsChanged ? { toolCalls } : {}),
-      ...(providerChanged ? { providerContent } : {}),
-    };
+    const nextMessage: ChatMessage = { ...message };
+
+    if (toolCallsChanged) {
+      nextMessage.toolCalls = toolCalls;
+    }
+
+    if (providerChanged) {
+      nextMessage.providerContent = providerContent;
+    }
+
+    return nextMessage;
   });
 }
