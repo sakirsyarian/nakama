@@ -45,3 +45,4 @@ tmp-repro-setup-auth.mjs
 .vscode/
 # jscpd duplication report
 .jscpd-report/
+.idea
