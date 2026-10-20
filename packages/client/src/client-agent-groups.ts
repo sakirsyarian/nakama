@@ -7,7 +7,11 @@ import type {
   ListAgentGroupsResponse,
   ListRailPinsResponse,
 } from "@nakama/core/agent-groups";
-import type { ImageAttachment } from "@nakama/core/contract";
+import type {
+  DocumentAttachment,
+  ImageAttachment,
+  ListWorkspaceFilesResponse,
+} from "@nakama/core/contract";
 import { OrgMemoryClient } from "./client-org-memory";
 
 interface AgentGroupInput {
@@ -63,6 +67,35 @@ export class AgentGroupsClient extends OrgMemoryClient {
     await this.request(agentGroupPath(groupId), { method: "DELETE" });
   }
 
+  async listAgentGroupFiles(
+    groupId: string,
+    folder = ""
+  ): Promise<ListWorkspaceFilesResponse> {
+    const query = new URLSearchParams({ folder });
+
+    return this.request<ListWorkspaceFilesResponse>(
+      `${agentGroupPath(groupId)}/files?${query}`
+    );
+  }
+
+  async readAgentGroupFile(
+    groupId: string,
+    filename: string,
+    options: { render?: "markdown" } = {}
+  ): Promise<Blob> {
+    const query = new URLSearchParams({ path: filename });
+
+    if (options.render) {
+      query.set("render", options.render);
+    }
+
+    const response = await this.fetchRaw(
+      `${agentGroupPath(groupId)}/files/content?${query}`
+    );
+
+    return response.blob();
+  }
+
   async uploadAgentGroupAvatar(
     groupId: string,
     image: ImageAttachment
@@ -90,11 +123,12 @@ export class AgentGroupsClient extends OrgMemoryClient {
   /** Opens a session with its first message; the agents start replying. */
   async createAgentGroupSession(
     groupId: string,
-    content: string
+    content: string,
+    documents: DocumentAttachment[] = []
   ): Promise<AgentGroupSession> {
     return this.request<AgentGroupSession>(
       `${agentGroupPath(groupId)}/sessions`,
-      { body: JSON.stringify({ content }), method: "POST" }
+      { body: JSON.stringify({ content, documents }), method: "POST" }
     );
   }
 
@@ -130,12 +164,13 @@ export class AgentGroupsClient extends OrgMemoryClient {
   async sendAgentGroupMessage(
     groupId: string,
     sessionId: string,
-    content: string
+    content: string,
+    documents: DocumentAttachment[] = []
   ): Promise<void> {
     await this.request(
       `${agentGroupSessionPath(groupId, sessionId)}/messages`,
       {
-        body: JSON.stringify({ content }),
+        body: JSON.stringify({ content, documents }),
         method: "POST",
       }
     );

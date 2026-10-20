@@ -288,7 +288,8 @@ export function createSuperNakamaTools(
             type: ["string", "null"],
           },
           name: {
-            description: "Display name for the profile.",
+            description:
+              "Display name for the profile: a human first name such as Maya or Theo, never a job title. Put the role in the soul files.",
             type: "string",
           },
           soulFiles: {
@@ -350,7 +351,11 @@ export function createSuperNakamaTools(
             items: { type: "string" },
             type: "array",
           },
-          name: { description: "Group name.", type: "string" },
+          name: {
+            description:
+              'Group name in short, readable title case, like "Rosid\'s Brand Team". Never a slug or hyphenated.',
+            type: "string",
+          },
         },
         required: ["name", "memberIds"],
         type: "object",
@@ -385,11 +390,16 @@ export function createSuperNakamaTools(
     },
     {
       description:
-        "Update a profile's stored system prompt and/or soul files. Draft changes in chat, wait for explicit user confirmation, then call this. Use get_profile first when you need the current prompt or soul files.",
+        "Update a profile's stored system prompt, soul files, and/or model. Draft changes in chat, wait for explicit user confirmation, then call this. Use get_profile first when you need the current prompt or soul files.",
       name: "update_profile",
       parameters: {
         additionalProperties: false,
         properties: {
+          model: {
+            description:
+              "Model id from list_models (providerId::modelId). Omit to leave unchanged.",
+            type: "string",
+          },
           profileId: {
             description: "Profile id to update.",
             type: "string",
@@ -409,13 +419,14 @@ export function createSuperNakamaTools(
         const profileId = readString(toolInput, "profileId");
         const systemPrompt = readStringAllowEmpty(toolInput, "systemPrompt");
         const soulFiles = readSoulFiles(toolInput);
+        const model = readString(toolInput, "model");
 
         if (!profileId) {
           throw new Error("profileId is required.");
         }
 
-        if (systemPrompt === null && soulFiles === undefined) {
-          throw new Error("Provide systemPrompt and/or soulFiles.");
+        if (systemPrompt === null && soulFiles === undefined && !model) {
+          throw new Error("Provide systemPrompt, soulFiles, and/or model.");
         }
 
         if (!sessionState.canUpdateProfile(context.sessionId)) {
@@ -430,6 +441,10 @@ export function createSuperNakamaTools(
 
         if (soulFiles !== undefined) {
           request.soulFiles = soulFiles;
+        }
+
+        if (model) {
+          request.model = model;
         }
 
         return profileService.updateProfile(

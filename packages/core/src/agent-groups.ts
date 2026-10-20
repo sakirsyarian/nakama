@@ -23,6 +23,8 @@ export interface AgentGroupMessage {
   authorProfileId: string | null;
   content: string;
   createdAt: string;
+  /** Names of the documents the user attached; their text stays on the server. */
+  files?: string[];
   id: number;
   /** Replies in the thread opened on this message; always 0 inside a thread. */
   threadReplies: number;
@@ -31,7 +33,11 @@ export interface AgentGroupMessage {
 export interface AgentGroupRun {
   activity: string | null;
   speakerProfileId: string | null;
+  /** What the speaker has done so far this turn, oldest first. */
+  steps?: string[];
   stopping: boolean;
+  /** The speaker's answer so far this turn. */
+  text?: string;
 }
 
 /** One conversation in a group; a group holds many, like an agent's chats. */

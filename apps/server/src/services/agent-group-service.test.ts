@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import type { ProfileSummary } from "@nakama/core";
 import { setupTestConfigDir } from "../test-config-dir";
 import type { SubAgentRunInput } from "../tools/sub-agent-shared";
-import { AgentGroupService } from "./agent-group-service";
+import { AgentGroupService, readGroupDocuments } from "./agent-group-service";
 import { closeAgentGroupDatabases } from "./agent-group-store";
 
 const ORG_ID = "org_test";
@@ -108,6 +108,27 @@ describe("AgentGroupService", () => {
     ]);
   });
 
+  test("every member of a group gets the same shared folder", async () => {
+    const dirs: Array<string | undefined> = [];
+
+    const { chat, service } = setup((input) => {
+      dirs.push(input.sharedDir);
+
+      return "ok";
+    });
+
+    const group = await service.create(ORG_ID, USER_ID, "Team", ["a", "b"]);
+    const other = await service.create(ORG_ID, USER_ID, "Other", ["a", "b"]);
+
+    await chat(group.id, "@all hi");
+    await chat(other.id, "@alpha hi");
+
+    expect(dirs[0]).toBe(dirs[1]);
+    expect(dirs[0]).toContain(group.id);
+    expect(dirs[2]).toContain(other.id);
+    expect(dirs[2]).not.toBe(dirs[0]);
+  });
+
   test("@all gives every member a turn, in member order", async () => {
     const { calls, chat, service } = setup(() => "here");
     const group = await service.create(ORG_ID, USER_ID, "Team", ["b", "a"]);
@@ -152,6 +173,60 @@ describe("AgentGroupService", () => {
     expect(tasks.every((task) => task.includes("Launch v2 on Friday"))).toBe(
       true
     );
+  });
+
+  test("an attached document reaches the agent, and the client sees only its name", async () => {
+    const contexts: string[] = [];
+
+    const { service } = setup(({ context }) => {
+      contexts.push(context ?? "");
+
+      return "ok";
+    });
+
+    const group = await service.create(ORG_ID, USER_ID, "Team", ["a", "b"]);
+
+    const documents = await readGroupDocuments([
+      {
+        data: Buffer.from("Q3 revenue was 42").toString("base64"),
+        filename: "notes.txt",
+        mediaType: "text/plain",
+      },
+    ]);
+
+    const { run, session } = service.start(
+      ORG_ID,
+      USER_ID,
+      group.id,
+      "",
+      documents
+    );
+
+    await run;
+
+    expect(contexts[0]).toContain("Q3 revenue was 42");
+
+    const [message] = service.session(
+      ORG_ID,
+      USER_ID,
+      group.id,
+      session.id
+    ).messages;
+
+    expect(message?.files).toEqual(["notes.txt"]);
+    expect(JSON.stringify(message)).not.toContain("Q3 revenue");
+  });
+
+  test("a document of an unsupported type is rejected", async () => {
+    await expect(
+      readGroupDocuments([
+        {
+          data: "AAAA",
+          filename: "run.exe",
+          mediaType: "application/x-msdownload",
+        },
+      ])
+    ).rejects.toThrow();
   });
 
   test("without a mention the session's last speaker replies, else the first member", async () => {
@@ -223,6 +298,42 @@ describe("AgentGroupService", () => {
     expect(
       service.session(ORG_ID, USER_ID, group.id, session.id).run
     ).toBeNull();
+  });
+
+  test("a running turn exposes the agent's steps and text so far", async () => {
+    const started = Promise.withResolvers<void>();
+    const held = Promise.withResolvers<void>();
+
+    const { service } = setup(async (input) => {
+      input.onActivity?.("Searching the web");
+      input.onText?.("Hel");
+      input.onText?.("lo");
+      started.resolve();
+      await held.promise;
+
+      return "Hello";
+    });
+
+    const group = await service.create(ORG_ID, USER_ID, "Team", ["a"]);
+
+    const { run, session } = service.start(
+      ORG_ID,
+      USER_ID,
+      group.id,
+      "@alpha hi"
+    );
+
+    await started.promise;
+
+    expect(service.session(ORG_ID, USER_ID, group.id, session.id).run).toEqual(
+      expect.objectContaining({
+        speakerProfileId: "a",
+        steps: ["Searching the web"],
+        text: "Hello",
+      })
+    );
+    held.resolve();
+    await run;
   });
 
   test("a message after Stop only wakes the agents it mentions", async () => {

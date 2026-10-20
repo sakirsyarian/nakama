@@ -7,11 +7,16 @@ import {
   type AgentGroupSessionDetail,
   memberHandles,
 } from "@nakama/core/agent-groups";
+import type { DocumentAttachment } from "@nakama/core/contract";
 import { Button } from "@nakama/ui";
 import { Spinner } from "@nakama/ui/spinner";
 import { toast } from "@nakama/ui/toast";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { MessageAdd01Icon, UserAdd01Icon } from "hugeicons-react";
+import {
+  Folder01Icon,
+  MessageAdd01Icon,
+  PencilEdit02Icon,
+} from "hugeicons-react";
 import { useMemo, useRef, useState } from "react";
 import {
   Link,
@@ -23,7 +28,11 @@ import { GroupAvatar } from "@/components/agent-groups/GroupAvatar";
 import { GroupComposer } from "@/components/agent-groups/group-composer";
 import { GroupDialog } from "@/components/agent-groups/group-dialog";
 import { GroupMessageList } from "@/components/agent-groups/group-message-list";
-import { GroupThreadPanel } from "@/components/agent-groups/group-thread-panel";
+import {
+  GroupFilesPanel,
+  GroupLivePanel,
+  GroupThreadPanel,
+} from "@/components/agent-groups/group-thread-panel";
 import { ProfileAvatar } from "@/components/ProfileAvatar";
 import { ChatAttachmentPanelProvider } from "@/context/chat-attachment-panel-context";
 import { useAgentGroupQuery } from "@/hooks/use-agent-groups";
@@ -51,16 +60,21 @@ export function AgentGroupChatPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const requested = Number(searchParams.get("thread"));
   const openThreadId = sessionId && requested > 0 ? requested : null;
+  const liveOpen = Boolean(sessionId) && searchParams.get("live") === "1";
+  const filesOpen = searchParams.get("files") === "1";
 
-  function setThread(messageId: number | null) {
+  // The thread, the live view and the files share one side panel; opening one closes the others.
+  function setPanel(panel: "files" | "live" | "thread", value: string | null) {
     setSearchParams(
       (current) => {
         const next = new URLSearchParams(current);
 
-        if (messageId === null) {
-          next.delete("thread");
-        } else {
-          next.set("thread", String(messageId));
+        for (const key of ["files", "live", "thread"]) {
+          next.delete(key);
+        }
+
+        if (value !== null) {
+          next.set(panel, value);
         }
 
         return next;
@@ -68,6 +82,12 @@ export function AgentGroupChatPage() {
       { replace: true }
     );
   }
+
+  const setThread = (messageId: number | null) =>
+    setPanel("thread", messageId === null ? null : String(messageId));
+
+  const setLive = (open: boolean) => setPanel("live", open ? "1" : null);
+  const setFilesOpen = (open: boolean) => setPanel("files", open ? "1" : null);
 
   if (isLoading) {
     return (
@@ -86,22 +106,24 @@ export function AgentGroupChatPage() {
     // The thread opens in its `below` slot: the same framed side panel as /btw.
     <ChatAttachmentPanelProvider
       below={
-        sessionId && openThreadId ? (
-          <GroupThreadPanel
-            group={group}
-            key={openThreadId}
-            messageId={openThreadId}
-            onClose={() => setThread(null)}
-            profiles={profiles}
-            sessionId={sessionId}
-          />
-        ) : null
+        <GroupSidePanel
+          filesOpen={filesOpen}
+          group={group}
+          liveOpen={liveOpen}
+          onCloseFiles={() => setFilesOpen(false)}
+          onCloseLive={() => setLive(false)}
+          onCloseThread={() => setThread(null)}
+          profiles={profiles}
+          sessionId={sessionId}
+          threadId={openThreadId}
+        />
       }
       key={`${groupId}:${sessionId ?? "new"}`}
     >
       {sessionId ? (
         <GroupSession
           group={group}
+          onOpenLive={() => setLive(true)}
           onOpenThread={setThread}
           profiles={profiles}
           sessionId={sessionId}
@@ -111,6 +133,61 @@ export function AgentGroupChatPage() {
       )}
     </ChatAttachmentPanelProvider>
   );
+}
+
+/** The one side panel that is open: files, the live view, or a thread. */
+function GroupSidePanel({
+  filesOpen,
+  group,
+  liveOpen,
+  onCloseFiles,
+  onCloseLive,
+  onCloseThread,
+  profiles,
+  sessionId,
+  threadId,
+}: {
+  filesOpen: boolean;
+  group: AgentGroup;
+  liveOpen: boolean;
+  onCloseFiles: () => void;
+  onCloseLive: () => void;
+  onCloseThread: () => void;
+  profiles: ProfileSummary[];
+  sessionId?: string;
+  threadId: number | null;
+}) {
+  if (filesOpen) {
+    return (
+      <GroupFilesPanel group={group} key={group.id} onClose={onCloseFiles} />
+    );
+  }
+
+  if (sessionId && liveOpen) {
+    return (
+      <GroupLivePanel
+        group={group}
+        onClose={onCloseLive}
+        profiles={profiles}
+        sessionId={sessionId}
+      />
+    );
+  }
+
+  if (sessionId && threadId) {
+    return (
+      <GroupThreadPanel
+        group={group}
+        key={threadId}
+        messageId={threadId}
+        onClose={onCloseThread}
+        profiles={profiles}
+        sessionId={sessionId}
+      />
+    );
+  }
+
+  return null;
 }
 
 function joinNames(names: string[]): string {
@@ -130,6 +207,35 @@ function GroupMissing({ message }: { message?: string }) {
   );
 }
 
+/** Opens the group's shared folder in the side panel. */
+function GroupFilesButton() {
+  const [searchParams, setSearchParams] = useSearchParams();
+
+  return (
+    <Button
+      onClick={() =>
+        setSearchParams(
+          (current) => {
+            const next = new URLSearchParams(current);
+            next.delete("thread");
+            next.delete("live");
+            next.set("files", "1");
+
+            return next;
+          },
+          { replace: true }
+        )
+      }
+      size="sm"
+      type="button"
+      variant={searchParams.get("files") === "1" ? "secondary" : "outline"}
+    >
+      <Folder01Icon aria-hidden />
+      Files
+    </Button>
+  );
+}
+
 function useMembers(group: AgentGroup, profiles: ProfileSummary[]) {
   const members = useMemo(
     () =>
@@ -142,7 +248,7 @@ function useMembers(group: AgentGroup, profiles: ProfileSummary[]) {
   return { handles: useMemo(() => memberHandles(members), [members]), members };
 }
 
-/** The group's name, its agents' avatars and count, and the new chat and add agent buttons. */
+/** The group's name, its agents' avatars and count, and the edit group and new chat buttons. */
 function GroupHeader({
   group,
   members,
@@ -151,7 +257,7 @@ function GroupHeader({
   members: ProfileSummary[];
 }) {
   const navigate = useNavigate();
-  const [adding, setAdding] = useState(false);
+  const [editing, setEditing] = useState(false);
 
   return (
     <header className="flex h-14 shrink-0 items-center gap-3 px-4 sm:px-6">
@@ -173,14 +279,15 @@ function GroupHeader({
       </span>
       <div className="ml-auto flex shrink-0 items-center gap-2">
         <Button
-          onClick={() => setAdding(true)}
+          onClick={() => setEditing(true)}
           size="sm"
           type="button"
           variant="outline"
         >
-          <UserAdd01Icon aria-hidden />
-          Add agent
+          <PencilEdit02Icon aria-hidden />
+          Edit group
         </Button>
+        <GroupFilesButton />
         <Button
           onClick={() => navigate(groupPath(group.id))}
           size="sm"
@@ -190,8 +297,8 @@ function GroupHeader({
           New chat
         </Button>
       </div>
-      {adding ? (
-        <GroupDialog group={group} onClose={() => setAdding(false)} />
+      {editing ? (
+        <GroupDialog group={group} onClose={() => setEditing(false)} />
       ) : null}
     </header>
   );
@@ -201,6 +308,7 @@ function GroupHeader({
 function GroupConversation({
   group,
   messages,
+  onOpenLive,
   onOpenThread,
   onSend,
   onStop,
@@ -211,8 +319,9 @@ function GroupConversation({
   group: AgentGroup;
   messages: AgentGroupMessage[];
   /** Absent while a new chat's session is still being created. */
+  onOpenLive?: () => void;
   onOpenThread?: (messageId: number) => void;
-  onSend: (content: string) => Promise<void>;
+  onSend: (content: string, documents?: DocumentAttachment[]) => Promise<void>;
   onStop: () => void;
   profiles: ProfileSummary[];
   run: AgentGroupRun | null;
@@ -232,6 +341,7 @@ function GroupConversation({
             <GroupMessageList
               handles={handles}
               messages={messages}
+              onOpenLive={() => onOpenLive?.()}
               onOpenThread={(messageId) => onOpenThread?.(messageId)}
               profiles={profiles}
               run={run}
@@ -240,6 +350,7 @@ function GroupConversation({
           </div>
           <div className={COMPOSER_DOCK}>
             <GroupComposer
+              allowDocuments
               busy={run !== null}
               handles={handles}
               members={members}
@@ -271,15 +382,28 @@ function GroupDraft({
   const { handles, members } = useMembers(group, profiles);
   const [pending, setPending] = useState<AgentGroupMessage | null>(null);
   const [restored, setRestored] = useState("");
+  const [editing, setEditing] = useState(false);
   const creating = useRef<Promise<AgentGroupSession> | null>(null);
 
   // `handles` maps handle to member id.
   const handleOf = (id: string) =>
     [...handles].find(([, memberId]) => memberId === id)?.[0] ?? "";
 
-  async function sendFirst(content: string) {
-    const message = pendingMessage(content);
-    const request = client.createAgentGroupSession(group.id, content);
+  async function sendFirst(
+    content: string,
+    documents: DocumentAttachment[] = []
+  ) {
+    const message = pendingMessage(
+      content,
+      documents.map((document) => document.filename)
+    );
+
+    const request = client.createAgentGroupSession(
+      group.id,
+      content,
+      documents
+    );
+
     creating.current = request;
     setPending(message);
 
@@ -315,11 +439,16 @@ function GroupDraft({
         group={group}
         messages={[pending]}
         // A second message before the session exists waits for it.
-        onSend={async (content) => {
+        onSend={async (content, documents) => {
           const session = await creating.current;
 
           if (session) {
-            await client.sendAgentGroupMessage(group.id, session.id, content);
+            await client.sendAgentGroupMessage(
+              group.id,
+              session.id,
+              content,
+              documents
+            );
           }
         }}
         onStop={() => undefined}
@@ -335,6 +464,18 @@ function GroupDraft({
         className="mx-auto flex min-h-0 w-full max-w-3xl flex-1 flex-col"
         id="group-new-chat"
       >
+        <div className="flex shrink-0 justify-end gap-2 px-4 pt-4">
+          <Button
+            onClick={() => setEditing(true)}
+            size="sm"
+            type="button"
+            variant="outline"
+          >
+            <PencilEdit02Icon aria-hidden />
+            Edit group
+          </Button>
+          <GroupFilesButton />
+        </div>
         <div className="flex flex-1 flex-col justify-center gap-6 pb-12">
           <div className="flex flex-col items-center gap-3 px-4 text-center">
             {group.avatarVersion ? (
@@ -363,6 +504,7 @@ function GroupDraft({
             </p>
           </div>
           <GroupComposer
+            allowDocuments
             busy={false}
             handles={handles}
             initialInput={restored}
@@ -402,6 +544,9 @@ function GroupDraft({
             ))}
           </div>
         </div>
+        {editing ? (
+          <GroupDialog group={group} onClose={() => setEditing(false)} />
+        ) : null}
       </div>
     </ChatPageColumn>
   );
@@ -409,11 +554,13 @@ function GroupDraft({
 
 function GroupSession({
   group,
+  onOpenLive,
   onOpenThread,
   profiles,
   sessionId,
 }: {
   group: AgentGroup;
+  onOpenLive: () => void;
   onOpenThread: (messageId: number) => void;
   profiles: ProfileSummary[];
   sessionId: string;
@@ -444,15 +591,26 @@ function GroupSession({
     ]).then(() => undefined);
 
   /** Shows the message at once, then lets the server confirm or roll it back. */
-  async function send(content: string) {
+  async function send(content: string, documents: DocumentAttachment[] = []) {
     setSending(true);
     await queryClient.cancelQueries({ exact: true, queryKey: sessionKey });
     queryClient.setQueryData<AgentGroupSessionDetail>(sessionKey, (detail) =>
-      detail ? withPendingMessage(detail, content) : detail
+      detail
+        ? withPendingMessage(
+            detail,
+            content,
+            documents.map((document) => document.filename)
+          )
+        : detail
     );
 
     try {
-      await client.sendAgentGroupMessage(group.id, sessionId, content);
+      await client.sendAgentGroupMessage(
+        group.id,
+        sessionId,
+        content,
+        documents
+      );
     } catch (sendError) {
       toast(formatError(sendError));
       throw sendError;
@@ -480,6 +638,7 @@ function GroupSession({
     <GroupConversation
       group={group}
       messages={data.messages}
+      onOpenLive={onOpenLive}
       onOpenThread={onOpenThread}
       onSend={send}
       onStop={() =>

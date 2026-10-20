@@ -4,7 +4,13 @@ import type {
   AgentGroupRun,
 } from "@nakama/core/agent-groups";
 import { cn } from "@nakama/ui/utils";
-import { Chat01Icon, CheckmarkCircle01Icon, Copy01Icon } from "hugeicons-react";
+import {
+  ArrowUpRight01Icon,
+  Chat01Icon,
+  CheckmarkCircle01Icon,
+  Copy01Icon,
+  File01Icon,
+} from "hugeicons-react";
 import {
   Fragment,
   useCallback,
@@ -28,8 +34,14 @@ import {
   MessageContent,
   MessageResponse,
 } from "@/components/ai-elements/message";
-import { ThinkingState } from "@/components/chat/ThinkingState";
+import { useArtifactAttachmentPreviewPanel } from "@/components/chat/use-artifact-attachment-preview-panel";
 import { ProfileAvatar } from "@/components/ProfileAvatar";
+import { useArtifactsExist } from "@/hooks/use-resource-mutations";
+import {
+  type ChatArtifactRef,
+  extractArtifactPathsFromText,
+  inferArtifactMimeType,
+} from "@/lib/chat-artifacts";
 
 /** Same threshold as the agent chat list. */
 const AT_BOTTOM_PX = 80;
@@ -108,6 +120,98 @@ function ThreadLink({
   );
 }
 
+/** One line: file icon, name and type, as its own bubble. */
+function ArtifactPill({
+  artifact,
+  id,
+  profileId,
+}: {
+  artifact: ChatArtifactRef;
+  id: string;
+  profileId: string;
+}) {
+  const { openPanel } = useArtifactAttachmentPreviewPanel({
+    artifact,
+    id,
+    profileId: artifact.ownerProfileId ?? profileId,
+  });
+
+  const type = artifact.filename.split(".").pop()?.toUpperCase();
+
+  return (
+    <button
+      className="inline-flex max-w-full cursor-pointer items-center gap-1.5 rounded-full border border-border bg-background px-3 py-1.5 text-sm shadow-xs transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+      onClick={openPanel}
+      type="button"
+    >
+      <File01Icon
+        aria-hidden
+        className="size-4 shrink-0 text-muted-foreground"
+      />
+      <span className="truncate font-medium">{artifact.filename}</span>
+      {type ? (
+        <span className="shrink-0 text-muted-foreground text-xs">{type}</span>
+      ) : null}
+      <ArrowUpRight01Icon
+        aria-hidden
+        className="size-3.5 shrink-0 text-muted-foreground"
+      />
+    </button>
+  );
+}
+
+/** Chips for the `artifacts/...` files an agent names in its message. */
+export function GroupMessageArtifacts({
+  content,
+  messageId,
+  profileId,
+}: {
+  content: string;
+  messageId: number;
+  profileId: string;
+}) {
+  const artifacts = useMemo<ChatArtifactRef[]>(
+    () =>
+      extractArtifactPathsFromText(content).map(({ ownerProfileId, path }) => {
+        const filename = path.split("/").pop() ?? path;
+
+        return {
+          filename,
+          mimeType: inferArtifactMimeType(filename),
+          ownerProfileId,
+          path,
+          savedAt: "",
+          sizeBytes: 0,
+        };
+      }),
+    [content]
+  );
+
+  const exists = useArtifactsExist(artifacts, profileId, messageId > 0);
+  const live = artifacts.filter((_, index) => exists[index]);
+
+  if (live.length === 0) {
+    return null;
+  }
+
+  return (
+    <div className="flex flex-col items-start gap-0.5">
+      {live.map((artifact) => {
+        const id = `group:${messageId}:${artifact.ownerProfileId ?? profileId}:${artifact.path}`;
+
+        return (
+          <ArtifactPill
+            artifact={artifact}
+            id={id}
+            key={id}
+            profileId={profileId}
+          />
+        );
+      })}
+    </div>
+  );
+}
+
 /** A time label shows between messages this far apart. */
 const TIME_GAP_MS = 30 * 60 * 1000;
 
@@ -163,10 +267,55 @@ function messageKeys(messages: AgentGroupMessage[]): string[] {
   );
 }
 
+/** The typing dots of the agent that is writing. */
+function TypingRow({
+  onOpenLive,
+  speaker,
+  speakerContinues,
+  stopping,
+}: {
+  onOpenLive: () => void;
+  speaker: ProfileSummary | undefined;
+  speakerContinues: boolean;
+  stopping: boolean;
+}) {
+  return (
+    <div className="mt-3 flex items-end gap-2">
+      {speaker ? (
+        <ProfileAvatar className="outline-none" profile={speaker} size="sm" />
+      ) : (
+        <span className="size-7 shrink-0" />
+      )}
+      <div className="flex flex-col items-start gap-1">
+        {speaker && !speakerContinues ? (
+          <div className="px-3.5 text-muted-foreground text-xs">
+            {speaker.name}
+          </div>
+        ) : null}
+        <button
+          aria-label={stopping ? "Stopping, watch live" : "Watch live"}
+          className="flex h-9 cursor-pointer items-center gap-1 rounded-[1.25rem] rounded-bl-md bg-muted px-4 transition-colors hover:bg-muted/70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          onClick={onOpenLive}
+          type="button"
+        >
+          {[0, 1, 2].map((dot) => (
+            <span
+              className="size-2 animate-bounce rounded-full bg-muted-foreground/60"
+              key={dot}
+              style={{ animationDelay: `${dot * 150}ms` }}
+            />
+          ))}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 /** The group transcript, laid out and pinned to the bottom like agent chat. */
 export function GroupMessageList({
   handles,
   messages,
+  onOpenLive,
   onOpenThread,
   profiles,
   run,
@@ -174,6 +323,7 @@ export function GroupMessageList({
 }: {
   handles: Map<string, string>;
   messages: AgentGroupMessage[];
+  onOpenLive: () => void;
   onOpenThread: (messageId: number) => void;
   profiles: ProfileSummary[];
   run: AgentGroupRun | null;
@@ -259,7 +409,18 @@ export function GroupMessageList({
           Date.parse(message.createdAt) - Date.parse(previous.createdAt) >
             TIME_GAP_MS;
 
+        const next = messages[index + 1];
+
+        const nextShowTime =
+          next !== undefined &&
+          Date.parse(next.createdAt) - Date.parse(message.createdAt) >
+            TIME_GAP_MS;
+
         return {
+          endsGroup:
+            !next ||
+            nextShowTime ||
+            next.authorProfileId !== message.authorProfileId,
           message,
           showTime,
           startsGroup:
@@ -268,6 +429,13 @@ export function GroupMessageList({
       }),
     [messages]
   );
+
+  // iMessage marks only the newest message as delivered, and only while it is
+  // still the last word.
+  const deliveredId =
+    messages.at(-1)?.authorProfileId === null && (messages.at(-1)?.id ?? 0) > 0
+      ? messages.at(-1)?.id
+      : undefined;
 
   const speakerContinues =
     speaker !== undefined && messages.at(-1)?.authorProfileId === speaker.id;
@@ -293,113 +461,127 @@ export function GroupMessageList({
           ref={scrollRef}
         >
           <div className="flex flex-col px-4 py-4" ref={contentRef}>
-            {rows.map(({ message, showTime, startsGroup }, index) => {
-              const spacing = index === 0 ? "" : startsGroup ? "mt-4" : "mt-1";
-              const author = profileById.get(message.authorProfileId ?? "");
+            {rows.map(
+              ({ endsGroup, message, showTime, startsGroup }, index) => {
+                const spacing =
+                  index === 0 ? "" : startsGroup ? "mt-3" : "mt-0.5";
 
-              return (
-                <Fragment key={keys[index]}>
-                  {showTime ? (
-                    <div
-                      className={cn(
-                        "text-center text-muted-foreground text-xs",
-                        index === 0 ? "pb-3" : "py-4"
-                      )}
-                    >
-                      {timeLabel(message.createdAt)}
-                    </div>
-                  ) : null}
-                  {message.authorProfileId === null ? (
-                    <div
-                      className={cn(
-                        "ml-auto w-fit max-w-[85%] whitespace-pre-wrap rounded-2xl bg-muted px-4 py-2.5",
-                        spacing
-                      )}
-                    >
-                      <MentionText
-                        handles={handles}
-                        profiles={profiles}
-                        text={message.content}
-                      />
-                    </div>
-                  ) : (
-                    <div className={cn("group flex gap-2.5", spacing)}>
-                      {startsGroup && author ? (
-                        <ProfileAvatar
-                          className="mt-0.5 outline-none"
-                          profile={author}
-                          size="sm"
-                        />
-                      ) : (
-                        <span
+                const author = profileById.get(message.authorProfileId ?? "");
+
+                return (
+                  <Fragment key={keys[index]}>
+                    {showTime ? (
+                      <div
+                        className={cn(
+                          "text-center text-muted-foreground text-xs",
+                          index === 0 ? "pb-3" : "py-4"
+                        )}
+                      >
+                        {timeLabel(message.createdAt)}
+                      </div>
+                    ) : null}
+                    {message.authorProfileId === null ? (
+                      <div className={cn("flex flex-col items-end", spacing)}>
+                        <div
                           className={cn(
-                            "size-7 shrink-0",
-                            startsGroup && "mt-0.5 rounded-full bg-muted"
+                            "[&_span]:!text-white w-fit max-w-[75%] whitespace-pre-wrap rounded-[1.25rem] bg-[#0b84fe] px-3.5 py-2 text-white",
+                            endsGroup && "rounded-br-md"
                           )}
-                        />
-                      )}
-                      <div className="flex min-w-0 max-w-[85%] flex-col items-start gap-1">
-                        {startsGroup ? (
-                          <div className="px-1 font-medium text-13 text-foreground">
-                            {author?.name ?? "Unavailable agent"}
-                          </div>
+                        >
+                          {message.files?.map((filename) => (
+                            <div
+                              className="flex items-center gap-1.5 font-medium text-sm"
+                              key={filename}
+                            >
+                              <File01Icon
+                                aria-hidden
+                                className="size-4 shrink-0"
+                              />
+                              <span className="truncate">{filename}</span>
+                            </div>
+                          ))}
+                          {message.content ? (
+                            <MentionText
+                              handles={handles}
+                              profiles={profiles}
+                              text={message.content}
+                            />
+                          ) : null}
+                        </div>
+                        {message.id === deliveredId && !run ? (
+                          <span className="mt-0.5 pr-1 text-muted-foreground text-xs">
+                            Delivered
+                          </span>
                         ) : null}
-                        <div className="relative max-w-full rounded-2xl bg-muted px-4 py-2.5">
-                          <Message
-                            className="mr-0 ml-0 max-w-full items-start justify-start"
-                            from="assistant"
+                      </div>
+                    ) : (
+                      <div
+                        className={cn("group flex items-end gap-2", spacing)}
+                      >
+                        {endsGroup && author ? (
+                          <ProfileAvatar
+                            className="outline-none"
+                            profile={author}
+                            size="sm"
+                          />
+                        ) : (
+                          <span className="size-7 shrink-0" />
+                        )}
+                        <div className="flex min-w-0 max-w-[75%] flex-col items-start gap-1">
+                          {startsGroup ? (
+                            <div className="px-3.5 text-muted-foreground text-xs">
+                              {author?.name ?? "Unavailable agent"}
+                            </div>
+                          ) : null}
+                          <div
+                            className={cn(
+                              "relative max-w-full rounded-[1.25rem] bg-muted px-3.5 py-2",
+                              endsGroup && "rounded-bl-md"
+                            )}
                           >
-                            <MessageContent className="ml-0 w-full max-w-full gap-1 group-[.is-user]:ml-0">
-                              <MessageResponse components={markdownComponents}>
-                                {markMentions(message.content, handles)}
-                              </MessageResponse>
-                            </MessageContent>
-                          </Message>
-                          <MessageActions
-                            onReply={() => onOpenThread(message.id)}
-                            text={message.content}
+                            <Message
+                              className="mr-0 ml-0 max-w-full items-start justify-start"
+                              from="assistant"
+                            >
+                              <MessageContent className="ml-0 w-full max-w-full gap-1 group-[.is-user]:ml-0">
+                                <MessageResponse
+                                  components={markdownComponents}
+                                >
+                                  {markMentions(message.content, handles)}
+                                </MessageResponse>
+                              </MessageContent>
+                            </Message>
+                            <MessageActions
+                              onReply={() => onOpenThread(message.id)}
+                              text={message.content}
+                            />
+                          </div>
+                          {message.authorProfileId ? (
+                            <GroupMessageArtifacts
+                              content={message.content}
+                              messageId={message.id}
+                              profileId={message.authorProfileId}
+                            />
+                          ) : null}
+                          <ThreadLink
+                            onClick={() => onOpenThread(message.id)}
+                            replies={message.threadReplies}
+                            replying={replyingThreads.has(message.id)}
                           />
                         </div>
-                        <ThreadLink
-                          onClick={() => onOpenThread(message.id)}
-                          replies={message.threadReplies}
-                          replying={replyingThreads.has(message.id)}
-                        />
                       </div>
-                    </div>
-                  )}
-                </Fragment>
-              );
-            })}
+                    )}
+                  </Fragment>
+                );
+              }
+            )}
             {run ? (
-              <div className="mt-4 flex gap-2.5">
-                {speaker && !speakerContinues ? (
-                  <ProfileAvatar
-                    className="mt-0.5 outline-none"
-                    profile={speaker}
-                    size="sm"
-                  />
-                ) : (
-                  <span className="size-7 shrink-0" />
-                )}
-                <div className="flex flex-col items-start gap-1">
-                  {speaker && !speakerContinues ? (
-                    <div className="px-1 font-medium text-13">
-                      {speaker.name}
-                    </div>
-                  ) : null}
-                  <div className="rounded-2xl bg-muted px-4 py-2.5">
-                    <ThinkingState
-                      className="text-sm"
-                      label={
-                        run.stopping
-                          ? "Stopping after this reply"
-                          : run.activity || "Working…"
-                      }
-                    />
-                  </div>
-                </div>
-              </div>
+              <TypingRow
+                onOpenLive={onOpenLive}
+                speaker={speaker}
+                speakerContinues={speakerContinues}
+                stopping={run.stopping}
+              />
             ) : null}
           </div>
         </div>
