@@ -3,12 +3,12 @@ import type {
   AgentGroup,
   AgentGroupThreadDetail,
 } from "@nakama/core/agent-groups";
-import type { WorkspaceEntry } from "@nakama/core/contract";
+import type { DocumentAttachment, WorkspaceEntry } from "@nakama/core/contract";
 import { toast } from "@nakama/ui/toast";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { GroupComposer } from "@/components/agent-groups/group-composer";
-import { GroupMessageArtifacts } from "@/components/agent-groups/group-message-list";
+import { GroupMessageArtifacts } from "@/components/agent-groups/group-message-files";
 import {
   Message,
   MessageContent,
@@ -23,7 +23,12 @@ import {
   artifactMatchesTypeFilter,
   availableArtifactTypeFilters,
 } from "@/components/soul-tools/artifacts-tab-filters";
-import { PENDING_RUN, pendingMessage } from "@/lib/agent-group-pending";
+import {
+  PENDING_RUN,
+  pendingMessage,
+  shortenSharedPaths,
+} from "@/lib/agent-group-pending";
+import { inferArtifactMimeType } from "@/lib/chat-artifacts";
 import { client, formatError } from "@/lib/client";
 import {
   type FilesViewMode,
@@ -41,7 +46,7 @@ import {
 import { FilesSearchRow } from "@/pages/files/files-search-row";
 import { FilesToolbar } from "@/pages/files/files-toolbar";
 
-const THREAD_PANEL_WIDTH = 448;
+export const THREAD_PANEL_WIDTH = 448;
 
 /** A private chat with the agent that wrote one message of the group chat. */
 export function GroupThreadPanel({
@@ -89,13 +94,19 @@ export function GroupThreadPanel({
       queryKey: queryKeys.agentGroups.session(group.id, sessionId),
     });
 
-  async function send(content: string) {
+  async function send(content: string, documents: DocumentAttachment[] = []) {
     await queryClient.cancelQueries({ exact: true, queryKey: threadKey });
     queryClient.setQueryData<AgentGroupThreadDetail>(threadKey, (detail) =>
       detail
         ? {
             ...detail,
-            messages: [...detail.messages, pendingMessage(content)],
+            messages: [
+              ...detail.messages,
+              pendingMessage(
+                content,
+                documents.map((document) => document.filename)
+              ),
+            ],
             run: detail.run ?? PENDING_RUN,
           }
         : detail
@@ -106,7 +117,8 @@ export function GroupThreadPanel({
         group.id,
         sessionId,
         messageId,
-        content
+        content,
+        documents
       );
     } catch (sendError) {
       toast(formatError(sendError));
@@ -152,7 +164,9 @@ export function GroupThreadPanel({
               ) : null}
               <div className="flex min-w-0 flex-1 flex-col gap-1">
                 <span className="font-medium text-13">{agent?.name}</span>
-                <MessageResponse>{message.content}</MessageResponse>
+                <MessageResponse>
+                  {shortenSharedPaths(message.content)}
+                </MessageResponse>
                 <GroupMessageArtifacts
                   content={message.content}
                   messageId={message.id}
@@ -188,6 +202,7 @@ export function GroupThreadPanel({
       </div>
       <div className="shrink-0 px-4 pt-2 pb-4">
         <GroupComposer
+          allowDocuments
           busy={data?.run != null}
           handles={noHandles}
           members={agent ? [agent] : []}
@@ -275,17 +290,33 @@ export function GroupLivePanel({
   );
 }
 
-/** The group's shared folder, which its agents write to. */
+/** The group's shared folder, which its agents write to; `file` opens on that file. */
 export function GroupFilesPanel({
+  file,
   group,
   onClose,
 }: {
+  file: string | null;
   group: AgentGroup;
   onClose: () => void;
 }) {
   const [width, setWidth] = useState(THREAD_PANEL_WIDTH);
   const [folder, setFolder] = useState("");
-  const [selected, setSelected] = useState<WorkspaceEntry | null>(null);
+
+  const [selected, setSelected] = useState<WorkspaceEntry | null>(() => {
+    const filename = file?.split("/").pop();
+
+    return file && filename
+      ? {
+          filename,
+          kind: "file",
+          mimeType: inferArtifactMimeType(filename),
+          path: file,
+          sizeBytes: 0,
+          updatedAt: "",
+        }
+      : null;
+  });
 
   return (
     <AttachmentDetailPanel
