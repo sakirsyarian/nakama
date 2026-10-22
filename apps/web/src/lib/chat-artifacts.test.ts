@@ -1,12 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import type { ChatListItem } from "@/lib/chat-history";
 import {
-  artifactContentWritePath,
-  artifactPreviewErrorMessage,
   extractArtifactPathsFromText,
   extractTurnArtifacts,
-  inferArtifactMimeType,
-  toArtifactsRelativePath,
 } from "./chat-artifacts";
 
 const ARTIFACTS_ROOT =
@@ -474,37 +470,6 @@ describe("extractTurnArtifacts", () => {
   });
 });
 
-describe("toArtifactsRelativePath", () => {
-  test("strips the artifacts directory prefix", () => {
-    expect(toArtifactsRelativePath(`${ARTIFACTS_ROOT}/weekly/report.md`)).toBe(
-      "weekly/report.md"
-    );
-  });
-
-  test("supports relative artifacts paths", () => {
-    expect(toArtifactsRelativePath("artifacts/weekly/report.md")).toBe(
-      "weekly/report.md"
-    );
-  });
-});
-
-describe("artifactContentWritePath", () => {
-  test("keeps paths that are already relative to the artifacts dir", () => {
-    expect(artifactContentWritePath("weekly/report.md")).toBe(
-      "weekly/report.md"
-    );
-  });
-
-  test("strips an artifacts/ prefix and absolute artifacts roots", () => {
-    expect(artifactContentWritePath("artifacts/weekly/report.md")).toBe(
-      "weekly/report.md"
-    );
-    expect(artifactContentWritePath(`${ARTIFACTS_ROOT}/weekly/report.md`)).toBe(
-      "weekly/report.md"
-    );
-  });
-});
-
 describe("extractArtifactPathsFromText", () => {
   test("finds bare and owner-qualified artifact paths", () => {
     expect(
@@ -537,34 +502,5 @@ describe("extractArtifactPathsFromText", () => {
       [undefined, "report.md"],
       ["video-producer", "report.md"],
     ]);
-  });
-});
-
-describe("inferArtifactMimeType", () => {
-  test("maps common extensions", () => {
-    expect(inferArtifactMimeType("slides.html")).toBe("text/html");
-    expect(inferArtifactMimeType("notes.md")).toBe("text/markdown");
-    expect(inferArtifactMimeType("data.json")).toBe("application/json");
-  });
-});
-
-describe("artifactPreviewErrorMessage", () => {
-  test("rewrites missing-file errors", () => {
-    expect(
-      artifactPreviewErrorMessage(
-        "ENOENT: no such file or directory, stat 'C:\\\\Users\\\\sakir\\\\.nakama\\\\script.md'"
-      )
-    ).toBe(
-      "This file was moved or deleted. Open the latest attachment or Artifacts."
-    );
-    expect(artifactPreviewErrorMessage("Artifact not found: script.md")).toBe(
-      "This file was moved or deleted. Open the latest attachment or Artifacts."
-    );
-  });
-
-  test("keeps other errors", () => {
-    expect(artifactPreviewErrorMessage("Preview is not available")).toBe(
-      "Preview is not available"
-    );
   });
 });

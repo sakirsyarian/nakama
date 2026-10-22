@@ -28,6 +28,8 @@ data/logs/*
 !.agents/skills/browser-video-proof/**
 !.agents/skills/plan-review/
 !.agents/skills/plan-review/**
+!.agents/skills/verify-bs/
+!.agents/skills/verify-bs/**
 apps/data/*
 .cursor/
 docs/plans/*
