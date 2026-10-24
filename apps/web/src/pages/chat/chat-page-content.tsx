@@ -16,14 +16,25 @@ import { BrowserLiveViewPanelBridge } from "@/components/chat/browser-live-view-
 import { ChatCognitoControl } from "@/components/chat/chat-cognito-control";
 import { ChatComposer } from "@/components/chat/chat-composer";
 import { ChatMessageList } from "@/components/chat/chat-message-list";
+import { UserContextEditorDialog } from "@/components/UserContextCard";
 import { ChatAttachmentPanelProvider } from "@/context/chat-attachment-panel-context";
 import { useChatUsageVisible } from "@/hooks/use-chat-usage-visible";
 import { usePostTurnSkillReviewOverlay } from "@/hooks/use-post-turn-skill-review-overlay";
 import { formatSessionChannelLabel } from "@/lib/chat-history";
 import { sumChatUsage } from "@/lib/chat-usage";
 import { extractModelId } from "@/lib/models";
+import {
+  ChatGoalPrompt,
+  ChatSetupChecklist,
+  ChatSetupFinding,
+  ChatSetupPill,
+} from "@/pages/chat/chat-onboarding";
 import { shouldShowCognitoControl } from "@/pages/chat/chat-page.shared";
 import { ChatPageColumn, ChatWelcome } from "@/pages/chat/chat-page-layout";
+import {
+  type Onboarding,
+  useOnboarding,
+} from "@/pages/chat/use-chat-onboarding";
 import type { ChatPageState } from "@/pages/chat/use-chat-page";
 
 const ProviderSetupForm = lazy(async () => ({
@@ -83,6 +94,14 @@ export function ChatPageContent({
   } = state;
 
   const [providerDialogOpen, setProviderDialogOpen] = useState(false);
+
+  const onboarding = useOnboarding({
+    cognito,
+    cognitoLocked,
+    isEmptyState,
+    profileId,
+    readOnlySession,
+  });
 
   // A locked cognito chat looks like a normal one: it has no other mode.
   const cognitoSurface = cognito && !cognitoLocked;
@@ -172,15 +191,17 @@ export function ChatPageContent({
       <ChatPageColumn centered cognito={cognitoSurface}>
         {cognitoControl}
         <div className="mx-auto mb-12 flex w-full max-w-3xl flex-col gap-1">
-          <ChatWelcome
-            cognito={cognito}
-            onProfileSwitch={handleProfileSwitch}
-            profile={activeProfile}
-            profileId={profileId}
-            profileSwitchDisabled={busy}
-            profiles={profiles}
-          />
-          {composer}
+          <EmptyChatBody onboarding={onboarding}>
+            <ChatWelcome
+              cognito={cognito}
+              onProfileSwitch={handleProfileSwitch}
+              profile={activeProfile}
+              profileId={profileId}
+              profileSwitchDisabled={busy}
+              profiles={profiles}
+            />
+            {composer}
+          </EmptyChatBody>
         </div>
       </ChatPageColumn>
     </ChatAttachmentPanelProvider>
@@ -217,6 +238,65 @@ export function ChatPageContent({
       </Dialog>
     </PromptInputProvider>
   );
+}
+
+/** Swaps the welcome and composer for the onboarding step that is active. */
+function EmptyChatBody({
+  children,
+  onboarding,
+}: {
+  children: ReactNode;
+  onboarding: Onboarding;
+}) {
+  const dialog = (
+    <UserContextEditorDialog
+      onOpenChange={onboarding.setAboutYouOpen}
+      onSaved={onboarding.markAboutYouSaved}
+      open={onboarding.aboutYouOpen}
+    />
+  );
+
+  switch (onboarding.view) {
+    case "goal":
+      return (
+        <ChatGoalPrompt
+          error={onboarding.goalError}
+          onSave={onboarding.saveGoal}
+          onSkip={onboarding.skipGoal}
+          saving={onboarding.savingGoal}
+        />
+      );
+    case "finding":
+      return <ChatSetupFinding goal={onboarding.goal} />;
+    case "checklist":
+      return (
+        <>
+          <ChatSetupChecklist
+            busyKey={onboarding.busyKey}
+            error={onboarding.actionError}
+            goal={onboarding.goal}
+            onAction={onboarding.runAction}
+            onFinish={onboarding.finish}
+            onSkipRest={onboarding.skipRest}
+            rows={onboarding.rows}
+          />
+          {dialog}
+        </>
+      );
+    default:
+      return (
+        <>
+          {onboarding.pill ? (
+            <ChatSetupPill
+              done={onboarding.pill.done}
+              onOpen={onboarding.openChecklist}
+              total={onboarding.pill.total}
+            />
+          ) : null}
+          {children}
+        </>
+      );
+  }
 }
 
 function ChatConversation({
