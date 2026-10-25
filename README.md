@@ -128,6 +128,17 @@ Interactive API docs are at `http://127.0.0.1:4310/docs`.
 
 MIT
 
+## Maintainers
+
+<p align="center">
+  <a href="https://github.com/ahmadrosid"><img src="https://images.weserv.nl/?url=github.com/ahmadrosid.png&mask=circle&w=96&h=96" width="96" alt="ahmadrosid" /></a>
+  <a href="https://github.com/fajarhide"><img src="https://images.weserv.nl/?url=github.com/fajarhide.png&mask=circle&w=96&h=96" width="96" alt="fajarhide" /></a>
+</p>
+
+<p align="center">
+  <a href="https://github.com/ahmadrosid">@ahmadrosid</a> and <a href="https://github.com/fajarhide">@fajarhide</a>
+</p>
+
 ## Contributors
 
 Thanks to everyone who helps make Nakama better.
