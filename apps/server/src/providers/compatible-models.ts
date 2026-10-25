@@ -11,6 +11,7 @@ import {
   resolveNetraModelId,
 } from "@nakama/core/discovery-providers";
 import OpenAI from "openai";
+import { z } from "zod";
 import { AVAILABLE_MODELS, type ProviderModelOption } from "./model-catalog";
 import { openRouterSlugSupportsThinking } from "./openrouter/thinking";
 import {
@@ -610,6 +611,82 @@ export async function fetchRemoteOpenAIModels(
   }
 
   return fetchRemoteOpenAIModelsRaw(normalized, apiKey);
+}
+
+type NetraOutputLimit = {
+  lookup: Promise<number | undefined>;
+  failedAt?: number;
+};
+
+const netraOutputLimits = new Map<string, NetraOutputLimit>();
+
+const NETRA_MODELS_TIMEOUT_MS = 3000;
+
+const NETRA_MODELS_RETRY_MS = 10 * 60_000;
+
+const netraModelsSchema = z.object({
+  data: z.array(
+    z.object({
+      id: z.string(),
+      top_provider: z
+        .object({
+          max_completion_tokens: z.number().int().positive().nullish(),
+        })
+        .nullish(),
+    })
+  ),
+});
+
+/** The output limit `/v1/models` reports for a Netra model, read once per
+ * process and API key. A failed lookup resolves to undefined and is retried
+ * no sooner than NETRA_MODELS_RETRY_MS, so a down endpoint costs one request,
+ * not one per chat turn. */
+export function fetchNetraMaxOutputTokens(
+  apiKey: string,
+  modelId: string,
+  now = Date.now()
+): Promise<number | undefined> {
+  const key = `${apiKey}\u0000${modelId}`;
+  const cached = netraOutputLimits.get(key);
+
+  if (
+    cached &&
+    (cached.failedAt === undefined ||
+      now - cached.failedAt < NETRA_MODELS_RETRY_MS)
+  ) {
+    return cached.lookup;
+  }
+
+  const entry: NetraOutputLimit = { lookup: Promise.resolve(undefined) };
+
+  entry.lookup = (async () => {
+    const response = await fetch(`${defaultDiscoveryBaseUrl("netra")}/models`, {
+      headers: {
+        Accept: "application/json",
+        Authorization: `Bearer ${apiKey}`,
+      },
+      // A chat request may wait on this lookup, so a slow /v1/models must
+      // not hold the reply: give up and send the 32k fallback.
+      signal: AbortSignal.timeout(NETRA_MODELS_TIMEOUT_MS),
+    });
+
+    if (!response.ok) {
+      throw new Error(`Netra models request failed (${response.status}).`);
+    }
+
+    const { data } = netraModelsSchema.parse(await response.json());
+
+    return (
+      data.find((entry) => entry.id === modelId)?.top_provider
+        ?.max_completion_tokens ?? undefined
+    );
+  })().catch((): undefined => {
+    entry.failedAt = Date.now();
+  });
+
+  netraOutputLimits.set(key, entry);
+
+  return entry.lookup;
 }
 
 export async function fetchNetraModels(
