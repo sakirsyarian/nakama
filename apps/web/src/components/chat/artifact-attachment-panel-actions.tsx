@@ -12,13 +12,14 @@ import {
   CheckmarkCircle01Icon,
   Download04Icon,
 } from "hugeicons-react";
+import { useOptionalChatAttachmentPanel } from "@/context/use-chat-attachment-panel";
 
 export function ArtifactAttachmentPanelActions({
   copied,
   loading,
   content,
   copyDisabled = false,
-  fullscreen,
+  fullscreen: fullscreenProp,
   downloadLabel,
   downloadUrl,
   filename,
@@ -30,7 +31,7 @@ export function ArtifactAttachmentPanelActions({
   loading: boolean;
   content: string | null;
   copyDisabled?: boolean;
-  fullscreen: boolean;
+  fullscreen?: boolean;
   downloadLabel: string;
   downloadUrl: string;
   filename: string;
@@ -38,6 +39,19 @@ export function ArtifactAttachmentPanelActions({
   onToggleFullscreen: () => void;
   additionalMenuItems?: React.ReactNode;
 }) {
+  const panel = useOptionalChatAttachmentPanel();
+  const fullscreen = panel ? panel.isFullscreen : (fullscreenProp ?? false);
+
+  const handleToggleFullscreen = () => {
+    if (panel?.toggleFullscreen && panel.activeId) {
+      panel.toggleFullscreen(panel.activeId);
+
+      return;
+    }
+
+    onToggleFullscreen();
+  };
+
   return (
     <>
       <div className="inline-flex h-7 items-stretch overflow-hidden rounded-md border border-border bg-muted">
@@ -95,7 +109,7 @@ export function ArtifactAttachmentPanelActions({
 
       <Button
         aria-label={fullscreen ? "Exit fullscreen" : "Enter fullscreen"}
-        onClick={onToggleFullscreen}
+        onClick={handleToggleFullscreen}
         size="icon-sm"
         title={fullscreen ? "Exit fullscreen" : "Fullscreen"}
         type="button"

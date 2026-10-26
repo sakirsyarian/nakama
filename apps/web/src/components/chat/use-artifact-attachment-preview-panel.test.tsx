@@ -43,7 +43,7 @@ test("opening an artifact preview does not update the panel on every render", as
         value={{
           activeId: config?.id ?? null,
           hide: () => setConfig(null),
-          isFullscreen: false,
+          isFullscreen: config?.fullscreen ?? false,
           isOpen: config !== null,
           show,
           update,
@@ -85,6 +85,140 @@ test("opening an artifact preview does not update the panel on every render", as
     );
     await act(async () => openPanel());
     expect(updates).toBe(1);
+  } finally {
+    await act(async () => root.unmount());
+    queryClient.clear();
+  }
+});
+
+test("toggling fullscreen repeatedly updates panel fullscreen state without getting stuck, even when unmounted", async () => {
+  const queryClient = new QueryClient();
+  const container = document.createElement("div");
+  const root = createRoot(container);
+  let openPanel!: () => void;
+  let setHookMounted!: (mounted: boolean) => void;
+
+  function Preview() {
+    const [config, setConfig] = useState<ChatAttachmentPanelConfig | null>(
+      null
+    );
+
+    const [hookMounted, setHookMountedState] = useState(true);
+    setHookMounted = setHookMountedState;
+
+    const show = useCallback((next: ChatAttachmentPanelConfig) => {
+      setConfig(next);
+    }, []);
+
+    const update = useCallback(
+      (id: string, patch: Partial<ChatAttachmentPanelConfig>) => {
+        setConfig((current) =>
+          current?.id === id ? { ...current, ...patch } : current
+        );
+      },
+      []
+    );
+
+    const toggleFullscreen = useCallback((id?: string) => {
+      setConfig((current) => {
+        if (!current || (id && current.id !== id)) {
+          return current;
+        }
+
+        const nextFullscreen = !current.fullscreen;
+
+        return {
+          ...current,
+          fullscreen: nextFullscreen,
+          resizable: !nextFullscreen,
+        };
+      });
+    }, []);
+
+    return (
+      <ChatAttachmentPanelContext.Provider
+        value={{
+          activeId: config?.id ?? null,
+          hide: () => setConfig(null),
+          isFullscreen: config?.fullscreen ?? false,
+          isOpen: config !== null,
+          show,
+          toggleFullscreen,
+          update,
+        }}
+      >
+        {hookMounted ? <PreviewHook /> : null}
+        <div data-testid="header-actions">{config?.headerActions}</div>
+      </ChatAttachmentPanelContext.Provider>
+    );
+  }
+
+  function PreviewHook() {
+    ({ openPanel } = useArtifactAttachmentPreviewPanel({
+      artifact: {
+        filename: "report.zip",
+        mimeType: "application/zip",
+        path: "report.zip",
+        savedAt: "2026-10-07T00:00:00Z",
+        sizeBytes: 12,
+      },
+      id: "report",
+      profileId: "profile",
+    }));
+
+    return null;
+  }
+
+  // SAFETY: Preview reads only activeOrg and user from this fixture.
+  const auth = { activeOrg: null, user: null } as AuthContextValue;
+
+  try {
+    await act(async () =>
+      root.render(
+        <QueryClientProvider client={queryClient}>
+          <AuthContext.Provider value={auth}>
+            <Preview />
+          </AuthContext.Provider>
+        </QueryClientProvider>
+      )
+    );
+    await act(async () => openPanel());
+
+    const getToggleButton = () =>
+      container.querySelector<HTMLButtonElement>(
+        'button[aria-label="Enter fullscreen"], button[aria-label="Exit fullscreen"]'
+      );
+
+    expect(getToggleButton()?.getAttribute("aria-label")).toBe(
+      "Enter fullscreen"
+    );
+
+    // 1st click: enters fullscreen
+    await act(async () => getToggleButton()?.click());
+    expect(getToggleButton()?.getAttribute("aria-label")).toBe(
+      "Exit fullscreen"
+    );
+
+    // 2nd click: exits fullscreen
+    await act(async () => getToggleButton()?.click());
+    expect(getToggleButton()?.getAttribute("aria-label")).toBe(
+      "Enter fullscreen"
+    );
+
+    // 3rd click: enters fullscreen again
+    await act(async () => getToggleButton()?.click());
+    expect(getToggleButton()?.getAttribute("aria-label")).toBe(
+      "Exit fullscreen"
+    );
+
+    // Unmount hook while in fullscreen (simulating virtual list item unmount)
+    await act(async () => setHookMounted(false));
+
+    // 4th click: should successfully exit fullscreen even when hook was unmounted
+    await act(async () => getToggleButton()?.click());
+    expect(getToggleButton()?.getAttribute("aria-label")).toBe(
+      "Enter fullscreen"
+    );
   } finally {
     await act(async () => root.unmount());
     queryClient.clear();

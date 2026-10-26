@@ -196,6 +196,22 @@ export function ChatAttachmentPanelProvider({
     setConfig(null);
   }, []);
 
+  const toggleFullscreen = useCallback((id?: string) => {
+    setConfig((current) => {
+      if (!current || (id && current.id !== id)) {
+        return current;
+      }
+
+      const nextFullscreen = !current.fullscreen;
+
+      return {
+        ...current,
+        fullscreen: nextFullscreen,
+        resizable: !nextFullscreen,
+      };
+    });
+  }, []);
+
   const value = useMemo(
     () => ({
       activeId: config?.id ?? null,
@@ -203,9 +219,10 @@ export function ChatAttachmentPanelProvider({
       isFullscreen: config?.fullscreen ?? false,
       isOpen: config !== null,
       show,
+      toggleFullscreen,
       update,
     }),
-    [config, show, update, hide]
+    [config, show, update, hide, toggleFullscreen]
   );
 
   const overlay = presentation === "overlay";

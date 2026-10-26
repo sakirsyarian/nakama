@@ -647,12 +647,22 @@ function PluginPanelExpandButton({ panelId }: { panelId: string }) {
   return (
     <Button
       aria-label={fullscreen ? "Exit fullscreen" : "Enter fullscreen"}
-      onClick={() =>
-        panel?.update(panelId, {
+      onClick={() => {
+        if (!panel) {
+          return;
+        }
+
+        if (panel.toggleFullscreen) {
+          panel.toggleFullscreen(panelId);
+
+          return;
+        }
+
+        panel.update(panelId, {
           fullscreen: !fullscreen,
           resizable: fullscreen,
-        })
-      }
+        });
+      }}
       size="icon-sm"
       title={fullscreen ? "Exit fullscreen" : "Fullscreen"}
       type="button"

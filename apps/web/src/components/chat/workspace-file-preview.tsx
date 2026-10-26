@@ -137,8 +137,11 @@ export function WorkspaceFilePreview({
   onClose: () => void;
   id?: string;
 }) {
-  const { show, update, hide } = useChatAttachmentPanel();
-  const [fullscreen, setFullscreen] = useState(false);
+  const { show, update, hide, activeId, isFullscreen, toggleFullscreen } =
+    useChatAttachmentPanel();
+
+  const open = Boolean(id && activeId === id);
+  const fullscreen = open && isFullscreen;
   const [copied, setCopied] = useState(false);
 
   const [previewMode, setPreviewMode] =
@@ -230,7 +233,20 @@ export function WorkspaceFilePreview({
               // Clipboard may be unavailable outside secure contexts.
             }
           }}
-          onToggleFullscreen={() => setFullscreen((value) => !value)}
+          onToggleFullscreen={() => {
+            if (toggleFullscreen) {
+              toggleFullscreen(id);
+
+              return;
+            }
+
+            if (id) {
+              update(id, {
+                fullscreen: !fullscreen,
+                resizable: fullscreen,
+              });
+            }
+          }}
         />
       ),
       leading: isMarkdown ? (

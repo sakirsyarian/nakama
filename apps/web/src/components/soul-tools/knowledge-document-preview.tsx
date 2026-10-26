@@ -65,7 +65,9 @@ export function KnowledgeDocumentPreview({
   document: KnowledgeBaseDocument;
   className?: string;
 }) {
-  const { show, update, activeId, isFullscreen } = useChatAttachmentPanel();
+  const { show, update, activeId, isFullscreen, toggleFullscreen } =
+    useChatAttachmentPanel();
+
   const id = `kb-doc-${document.id}`;
   const open = activeId === id;
   const fullscreen = open && isFullscreen;
@@ -172,12 +174,18 @@ export function KnowledgeDocumentPreview({
           fullscreen={fullscreen}
           loading={loading}
           onCopy={() => void copyDocument()}
-          onToggleFullscreen={() =>
+          onToggleFullscreen={() => {
+            if (toggleFullscreen) {
+              toggleFullscreen(id);
+
+              return;
+            }
+
             update(id, {
               fullscreen: !fullscreen,
               resizable: fullscreen,
-            })
-          }
+            });
+          }}
         />
       ),
       leading: showPreviewToggle ? (

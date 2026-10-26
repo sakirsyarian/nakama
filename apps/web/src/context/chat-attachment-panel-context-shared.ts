@@ -62,6 +62,7 @@ export interface ChatAttachmentPanelContextValue {
   isFullscreen: boolean;
   isOpen: boolean;
   show: (config: ChatAttachmentPanelConfig) => void;
+  toggleFullscreen?: (id?: string) => void;
   update: (
     id: string,
     patch: Partial<Omit<ChatAttachmentPanelConfig, "id">>
