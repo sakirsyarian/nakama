@@ -50,6 +50,7 @@ import {
 import {
   createContext,
   type ReactNode,
+  type RefObject,
   useCallback,
   useContext,
   useEffect,
@@ -152,6 +153,11 @@ interface ChatComposerBaseProps {
   onStop?: () => void;
   onSubmit: (text: string, files: FileUIPart[]) => void;
   placeholder?: string;
+  /**
+   * Owned by the caller so it survives the composer remounting when the
+   * first send in a new chat changes `session` from null to a real id.
+   */
+  promptHistoryRef?: RefObject<string[]>;
   queuedMessages?: QueuedComposerMessage[];
   todos?: AgentTodo[];
 }
@@ -698,6 +704,16 @@ const ConnectorsContext = createContext<{
 /** True when `/btw` is offered: only the composer that can open a side chat. */
 const BtwCommandContext = createContext(false);
 
+const PromptHistoryContext = createContext<{
+  promptHistoryRef: RefObject<string[]>;
+  historyPointer: number | null;
+  setHistoryPointer: (pointer: number | null) => void;
+}>({
+  historyPointer: null,
+  promptHistoryRef: { current: [] },
+  setHistoryPointer: () => undefined,
+});
+
 const CommandPrefixContext = createContext<{
   prefix: string | null;
   setPrefix: (prefix: string | null) => void;
@@ -774,6 +790,14 @@ function useOpenPluginContext(profileId: string | null) {
 export function ChatComposer(props: ChatComposerProps) {
   const { activeOrg, updateOrg, user } = useAuth();
   const { textInput } = usePromptInputController();
+  const ownPromptHistoryRef = useRef<string[]>([]);
+  const promptHistoryRef = props.promptHistoryRef ?? ownPromptHistoryRef;
+  const [historyPointer, setHistoryPointer] = useState<number | null>(null);
+
+  const promptHistoryContext = useMemo(
+    () => ({ historyPointer, promptHistoryRef, setHistoryPointer }),
+    [historyPointer, promptHistoryRef]
+  );
 
   const [addDialog, setAddDialog] = useState<ComposerAddCommandAction | null>(
     null
@@ -872,6 +896,8 @@ export function ChatComposer(props: ChatComposerProps) {
         return;
       }
 
+      promptHistoryRef.current.push(text);
+      setHistoryPointer(null);
       clearDraft();
       props.onSubmit(text, files);
     },
@@ -912,41 +938,43 @@ export function ChatComposer(props: ChatComposerProps) {
       <BtwCommandContext.Provider value={Boolean(onBtw)}>
         <OpenPluginContext.Provider value={pluginsMenuContext}>
           <ConnectorsContext.Provider value={connectorsContext}>
-            <div className={cn("w-full shrink-0", props.className)}>
-              {layout.showOfflineHint && isFullComposer(props) ? (
-                <ChatComposerOfflineHint
-                  onConnectProvider={props.onConnectProvider}
+            <PromptHistoryContext.Provider value={promptHistoryContext}>
+              <div className={cn("w-full shrink-0", props.className)}>
+                {layout.showOfflineHint && isFullComposer(props) ? (
+                  <ChatComposerOfflineHint
+                    onConnectProvider={props.onConnectProvider}
+                  />
+                ) : null}
+                <ChatComposerMain
+                  displayError={displayError}
+                  layout={layout}
+                  onAddCommand={openAddCommand}
+                  props={composerProps}
+                  setAttachmentError={setAttachmentError}
                 />
-              ) : null}
-              <ChatComposerMain
-                displayError={displayError}
-                layout={layout}
-                onAddCommand={openAddCommand}
-                props={composerProps}
-                setAttachmentError={setAttachmentError}
-              />
-              {addProfileId ? (
-                <ChatAddCapabilitiesDialogs
-                  mcpOpen={addDialog === "add-mcp"}
-                  onMcpOpenChange={(open) => {
-                    setAddDialog(open ? "add-mcp" : null);
-                  }}
-                  onPluginOpenChange={(open) =>
-                    setAddDialog(open ? "add-plugin" : null)
-                  }
-                  onSkillOpenChange={(open) => {
-                    setAddDialog(open ? "add-skill" : null);
-                  }}
-                  onToolOpenChange={(open) => {
-                    setAddDialog(open ? "add-tool" : null);
-                  }}
-                  pluginOpen={addDialog === "add-plugin"}
-                  profileId={addProfileId}
-                  skillOpen={addDialog === "add-skill"}
-                  toolOpen={addDialog === "add-tool"}
-                />
-              ) : null}
-            </div>
+                {addProfileId ? (
+                  <ChatAddCapabilitiesDialogs
+                    mcpOpen={addDialog === "add-mcp"}
+                    onMcpOpenChange={(open) => {
+                      setAddDialog(open ? "add-mcp" : null);
+                    }}
+                    onPluginOpenChange={(open) =>
+                      setAddDialog(open ? "add-plugin" : null)
+                    }
+                    onSkillOpenChange={(open) => {
+                      setAddDialog(open ? "add-skill" : null);
+                    }}
+                    onToolOpenChange={(open) => {
+                      setAddDialog(open ? "add-tool" : null);
+                    }}
+                    pluginOpen={addDialog === "add-plugin"}
+                    profileId={addProfileId}
+                    skillOpen={addDialog === "add-skill"}
+                    toolOpen={addDialog === "add-tool"}
+                  />
+                ) : null}
+              </div>
+            </PromptHistoryContext.Provider>
           </ConnectorsContext.Provider>
         </OpenPluginContext.Provider>
       </BtwCommandContext.Provider>
@@ -1102,6 +1130,10 @@ function ChatComposerTextarea({
   );
 
   const { prefix, setPrefix } = useContext(CommandPrefixContext);
+
+  const { promptHistoryRef, historyPointer, setHistoryPointer } =
+    useContext(PromptHistoryContext);
+
   const value = controller.textInput.value;
   const setInput = controller.textInput.setInput;
 
@@ -1137,6 +1169,10 @@ function ChatComposerTextarea({
         disabled={disabled}
         longPasteWordThreshold={longPasteWordThreshold}
         onChange={(event) => {
+          if (historyPointer !== null) {
+            setHistoryPointer(null);
+          }
+
           updateSlashRange(
             event.currentTarget.value,
             event.currentTarget.selectionStart
@@ -1158,6 +1194,39 @@ function ChatComposerTextarea({
             if (event.key === "Escape" && prefix) {
               event.preventDefault();
               setPrefix(null);
+            }
+
+            if (
+              event.currentTarget.selectionStart === 0 &&
+              event.currentTarget.selectionEnd === 0
+            ) {
+              if (event.key === "ArrowUp") {
+                if (promptHistoryRef.current.length === 0) {
+                  return;
+                }
+
+                const nextPointer =
+                  historyPointer === null
+                    ? promptHistoryRef.current.length - 1
+                    : Math.max(historyPointer - 1, 0);
+
+                event.preventDefault();
+                setHistoryPointer(nextPointer);
+                setInput(promptHistoryRef.current[nextPointer]);
+              }
+
+              if (event.key === "ArrowDown" && historyPointer !== null) {
+                event.preventDefault();
+
+                if (historyPointer >= promptHistoryRef.current.length - 1) {
+                  setHistoryPointer(null);
+                  setInput("");
+                } else {
+                  const nextPointer = historyPointer + 1;
+                  setHistoryPointer(nextPointer);
+                  setInput(promptHistoryRef.current[nextPointer]);
+                }
+              }
             }
 
             return;

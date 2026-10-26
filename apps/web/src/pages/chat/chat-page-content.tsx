@@ -91,6 +91,7 @@ export function ChatPageContent({
     stopStreaming,
     agentTodos,
     agentQuestionnaire,
+    promptHistoryRef,
   } = state;
 
   const [providerDialogOpen, setProviderDialogOpen] = useState(false);
@@ -168,6 +169,7 @@ export function ChatPageContent({
         primarySupportsVision={activeModelSupportsVision}
         profileId={profileId}
         profileModelId={extractModelId(currentModelSelection)}
+        promptHistoryRef={promptHistoryRef}
         providerConfigured={health?.providerConfigured}
         providerModelGroups={providerModelGroups}
         queuedMessages={queuedMessages}

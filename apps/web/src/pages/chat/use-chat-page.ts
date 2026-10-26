@@ -310,6 +310,9 @@ export function useChatPage() {
   const sessionLoadRef = useRef(0);
   const sessionOrgRef = useRef<string | null | undefined>(undefined);
   const orgRouteResetRef = useRef(false);
+  // Outlives the composer's own remount when the first send in a new chat
+  // swaps `session` from null to a real id (see PromptInputProvider's key).
+  const promptHistoryRef = useRef<string[]>([]);
 
   /**
    * Hand the current stream back before the page moves to another chat.
@@ -1729,6 +1732,7 @@ export function useChatPage() {
     messages,
     profileId,
     profiles,
+    promptHistoryRef,
     providerModelGroups,
     queuedMessages,
     readOnlySession,
