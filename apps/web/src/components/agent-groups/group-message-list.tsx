@@ -126,7 +126,7 @@ function startOfDay(date: Date): number {
   return new Date(
     date.getFullYear(),
     date.getMonth(),
-    date.getDate()
+    date.getDate(),
   ).getTime();
 }
 
@@ -168,7 +168,7 @@ function messageKeys(messages: AgentGroupMessage[]): string[] {
   return messages.map((message) =>
     message.authorProfileId === null
       ? `user-${userCount++}`
-      : `message-${message.id}`
+      : `message-${message.id}`,
   );
 }
 
@@ -241,7 +241,7 @@ export function GroupMessageList({
 
   const markdownComponents = useMemo(
     () => mentionMarkdownComponents(handles, profiles),
-    [handles, profiles]
+    [handles, profiles],
   );
 
   const pin = useCallback((behavior: ScrollBehavior) => {
@@ -290,12 +290,12 @@ export function GroupMessageList({
         pin("smooth");
       },
     }),
-    [isAtBottom, pin]
+    [isAtBottom, pin],
   );
 
   const profileById = useMemo(
     () => new Map(profiles.map((profile) => [profile.id, profile])),
-    [profiles]
+    [profiles],
   );
 
   const replyingThreads = useMemo(() => new Set(threadRunIds), [threadRunIds]);
@@ -332,7 +332,7 @@ export function GroupMessageList({
             showTime || previous?.authorProfileId !== message.authorProfileId,
         };
       }),
-    [messages]
+    [messages],
   );
 
   // iMessage marks only the newest message as delivered, and only while it is
@@ -382,7 +382,7 @@ export function GroupMessageList({
                       <div
                         className={cn(
                           "text-center text-muted-foreground text-xs",
-                          index === 0 ? "pb-3" : "py-4"
+                          index === 0 ? "pb-3" : "py-4",
                         )}
                       >
                         {timeLabel(message.createdAt)}
@@ -398,8 +398,8 @@ export function GroupMessageList({
                         {message.files || message.content ? (
                           <div
                             className={cn(
-                              "[&_span]:!text-white w-fit max-w-[75%] whitespace-pre-wrap rounded-[1.25rem] bg-[#0b84fe] px-3.5 py-2 text-white",
-                              endsGroup && "rounded-br-md"
+                              "w-fit max-w-[75%] whitespace-pre-wrap rounded-[1.25rem] bg-[#0b84fe] px-3.5 py-2 text-sm text-white leading-[1.55] [&_span]:text-white!",
+                              endsGroup && "rounded-br-md",
                             )}
                           >
                             {message.files?.map((filename) => (
@@ -452,7 +452,7 @@ export function GroupMessageList({
                           <div
                             className={cn(
                               "relative max-w-full rounded-[1.25rem] bg-muted px-3.5 py-2",
-                              endsGroup && "rounded-bl-md"
+                              endsGroup && "rounded-bl-md",
                             )}
                           >
                             <Message
@@ -465,7 +465,7 @@ export function GroupMessageList({
                                 >
                                   {markMentions(
                                     shortenSharedPaths(message.content),
-                                    handles
+                                    handles,
                                   )}
                                 </MessageResponse>
                               </MessageContent>
@@ -492,7 +492,7 @@ export function GroupMessageList({
                     )}
                   </Fragment>
                 );
-              }
+              },
             )}
             {run ? (
               <TypingRow
