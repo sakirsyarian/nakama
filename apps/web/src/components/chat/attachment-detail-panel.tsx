@@ -256,7 +256,7 @@ export function AttachmentDetailPanel({
           </div>
         </div>
         <div
-          className={cn("min-h-0 flex-1 overflow-y-auto p-4", bodyClassName)}
+          className={cn("min-h-0 flex-1 overflow-y-auto p-6", bodyClassName)}
           data-artifact-panel-scroll=""
           ref={bodyRef}
         >
