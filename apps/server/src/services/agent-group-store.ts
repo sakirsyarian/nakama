@@ -523,6 +523,24 @@ export function deleteGroupSession(
   );
 }
 
+/** The shared-folder paths of the images posted in a session. */
+export function listGroupSessionImages(
+  orgId: string,
+  sessionId: string
+): string[] {
+  const rows = withGroupDb(orgId, (db) =>
+    db
+      .query<{ documents: string }, [string]>(
+        "SELECT documents FROM messages WHERE session_id = ? AND documents IS NOT NULL"
+      )
+      .all(sessionId)
+  );
+
+  return rows.flatMap((row) =>
+    parseDocuments(row.documents).flatMap((d) => (d.path ? [d.path] : []))
+  );
+}
+
 /** The newest `limit` messages of a session's main chat, oldest first. */
 export function listAgentGroupMessages(
   orgId: string,
@@ -594,10 +612,12 @@ export function listGroupMessageDocuments(
       .all(...messageIds)
   );
 
+  return new Map(rows.map((row) => [row.id, parseDocuments(row.documents)]));
+}
+
+function parseDocuments(documents: string): GroupDocument[] {
   // SAFETY: documents is only ever written by this store as a GroupDocument array.
-  return new Map(
-    rows.map((row) => [row.id, JSON.parse(row.documents) as GroupDocument[]])
-  );
+  return JSON.parse(documents) as GroupDocument[];
 }
 
 /**

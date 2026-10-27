@@ -45,8 +45,8 @@ describe("resolveModel", () => {
     ];
 
     for (const provider of USER_PROVIDER_NAMES) {
-      if (provider === "cloudflare" || provider === "netra") {
-        // Cloudflare uses its fixed catalog; Netra uses its explicit allowlist.
+      if (provider === "netra") {
+        // Netra uses its explicit allowlist.
         continue;
       }
 
@@ -386,6 +386,14 @@ describe("modelSupportsVision", () => {
         ).toBe(supportsVision);
       }
     }
+  });
+
+  test("treats a saved Cloudflare model without a vision flag as text-only", () => {
+    expect(
+      modelSupportsVision("@cf/qwen/qwen3.8-27b", "cloudflare", [
+        { id: "@cf/qwen/qwen3.8-27b" },
+      ])
+    ).toBe(false);
   });
 
   test("keeps Moonshot models opt-in only (discovered lists)", () => {

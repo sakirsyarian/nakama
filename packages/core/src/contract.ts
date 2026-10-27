@@ -2101,7 +2101,12 @@ export interface DiscoverModelsRequest {
   baseUrl?: string;
   hostMode?: OllamaHostMode;
   /** When set, discovery uses the matching remote fetch path (Ollama includes `/api/tags` fallback). */
-  provider?: "ollama" | "openai_compatible" | "fireworks" | "netra";
+  provider?:
+    | "ollama"
+    | "openai_compatible"
+    | "fireworks"
+    | "netra"
+    | "cloudflare";
   providerId?: string;
 }
 
@@ -2386,6 +2391,8 @@ export interface CreateMcpServerRequest {
   name: string;
   /** When testing an existing server, merges blank header/env values with stored secrets. */
   serverId?: string;
+  /** Start the browser sign-in even when the server answers without credentials. */
+  signIn?: boolean;
   transport: McpTransport;
 }
 
@@ -3140,9 +3147,9 @@ export interface ToolContext {
   /** Emits concise live status lines while a sub-agent child loop runs (parent web UI). */
   emitSubAgentActivity?: (label: string) => void;
   /**
-   * When true (save_artifact is in the session tool list), write_file refuses paths
-   * under artifacts/ so every saved artifact goes through save_artifact and gets an
-   * owner row.
+   * When true (save_artifact is in the session tool list), write_file and delete_file
+   * refuse paths under artifacts/ so every saved artifact goes through save_artifact
+   * and gets an owner row, and an existing one is never deleted to reuse its name.
    */
   forbidArtifactFileWrites?: boolean;
   /**
