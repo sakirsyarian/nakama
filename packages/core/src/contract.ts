@@ -131,6 +131,8 @@ export interface HealthResponse {
   /** `NAKAMA_ENABLE_ONBOARDING` is on: a new user gets the goal prompt. */
   onboardingEnabled: boolean;
   providerConfigured: boolean;
+  /** `NAKAMA_DISABLE_UPDATE_CHECK` is not set: platform admins see newer releases. */
+  updateCheckEnabled: boolean;
   userConfigured: boolean;
   /** App version (`NAKAMA_VERSION` or package.json). Not `apiVersion`. */
   version: string;
@@ -440,6 +442,26 @@ export interface SetupAuthRequest {
 
 export interface UpdateWebPublicUrlRequest {
   webPublicUrl: string;
+}
+
+export interface NakamaVersionResponse {
+  current: string;
+  latest: string;
+  releaseUrl: string;
+  updateAvailable: boolean;
+}
+
+export interface NakamaUpgradeResponse {
+  /** False until the Compose updater service is running. */
+  available: boolean;
+  /** Versions with an archive of their data, newest first, current excluded. */
+  rollbacks: Array<{ at: string; version: string }>;
+  status: {
+    at: string;
+    message: string;
+    state: "running" | "done" | "failed" | "rolled_back";
+    version: string;
+  } | null;
 }
 
 export interface WebPublicUrlSettingsResponse {

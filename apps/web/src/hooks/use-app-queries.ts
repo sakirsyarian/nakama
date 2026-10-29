@@ -599,6 +599,39 @@ export function AppQueryPrefetch() {
   return null;
 }
 
+export function useNakamaVersionQuery(enabled: boolean) {
+  return useQuery({
+    enabled,
+    queryFn: () => client.getNakamaVersion(),
+    queryKey: queryKeys.nakamaVersion,
+    retry: false,
+    staleTime: 60 * 60 * 1000,
+  });
+}
+
+/** Polls while the updater runs, and keeps polling through the restart. */
+export function useNakamaUpgradeQuery(enabled: boolean) {
+  return useQuery({
+    enabled,
+    queryFn: () => client.getNakamaUpgrade(),
+    queryKey: queryKeys.nakamaUpgrade,
+    refetchInterval: (query) =>
+      query.state.data?.available || query.state.error ? 3000 : false,
+    retry: false,
+  });
+}
+
+export function useStartNakamaUpgrade() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: (request: { rollback?: boolean; version: string }) =>
+      client.startNakamaUpgrade(request.version, request.rollback),
+    onSuccess: () =>
+      queryClient.invalidateQueries({ queryKey: queryKeys.nakamaUpgrade }),
+  });
+}
+
 export function useHealthQuery() {
   return useQuery(healthQueryOptions);
 }
