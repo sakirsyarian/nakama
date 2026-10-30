@@ -38,6 +38,183 @@ async function seedFirstMessage(
 describe("listSessions reports the live turn", () => {
   setupTestConfigDir("nakama-session-list-");
 
+  test("a closed chat stops, leaves the list, stays searchable, and comes back on its next turn", async () => {
+    const { db, service } = await createService();
+
+    const sessionId = await service.createSession(
+      ORG_ID,
+      "web",
+      "profile_default",
+      USER.id
+    );
+
+    await seedFirstMessage(db, sessionId);
+
+    const listed = async (query?: string) =>
+      (
+        await service.listSessions(
+          ORG_ID,
+          "profile_default",
+          "web",
+          { isPlatformAdmin: true, user: USER },
+          undefined,
+          query
+        )
+      ).sessions.map((session) => session.id);
+
+    const abort = new AbortController();
+    expect(sessionTurnRegistry.beginTurn(sessionId).started).toBe(true);
+    sessionTurnRegistry.attachAbort(sessionId, abort);
+
+    expect(await service.closeSession(sessionId, ORG_ID, { user: USER })).toBe(
+      true
+    );
+    expect(abort.signal.aborted).toBe(true);
+
+    // The aborted turn still ends through its own endTurn.
+    sessionTurnRegistry.endTurn(sessionId, {
+      error: "Turn cancelled.",
+      type: "error",
+    });
+
+    expect(await listed()).toEqual([]);
+    expect(await listed("hello")).toEqual([sessionId]);
+
+    expect(await service.beginSessionTurn(sessionId, ORG_ID)).toBe(true);
+    sessionTurnRegistry.cancelTurn(sessionId);
+
+    expect(await listed()).toEqual([sessionId]);
+  });
+
+  test("a close the database does not record leaves the turn running", async () => {
+    const { db, service } = await createService();
+
+    const sessionId = await service.createSession(
+      ORG_ID,
+      "web",
+      "profile_default",
+      USER.id
+    );
+
+    db.updateSessionClosedAt = () => Promise.resolve(false);
+
+    const abort = new AbortController();
+    expect(sessionTurnRegistry.beginTurn(sessionId).started).toBe(true);
+    sessionTurnRegistry.attachAbort(sessionId, abort);
+
+    expect(await service.closeSession(sessionId, ORG_ID, { user: USER })).toBe(
+      false
+    );
+    expect(abort.signal.aborted).toBe(false);
+
+    sessionTurnRegistry.cancelTurn(sessionId);
+  });
+
+  test("a member cannot stop or hide a messaging chat someone else started", async () => {
+    const { db, service } = await createService();
+
+    const sessionId = await service.createSession(
+      ORG_ID,
+      "telegram",
+      "profile_default",
+      USER.id
+    );
+
+    await seedFirstMessage(db, sessionId);
+
+    const abort = new AbortController();
+    expect(sessionTurnRegistry.beginTurn(sessionId).started).toBe(true);
+    sessionTurnRegistry.attachAbort(sessionId, abort);
+
+    await expect(
+      service.closeSession(sessionId, ORG_ID, {
+        orgRole: "member",
+        user: { id: "user_other" },
+      })
+    ).rejects.toThrow();
+    expect(abort.signal.aborted).toBe(false);
+    expect((await db.getSession(sessionId))?.closedAt ?? null).toBeNull();
+
+    // Positive control: an org admin may close it.
+    expect(
+      await service.closeSession(sessionId, ORG_ID, {
+        orgRole: "admin",
+        user: { id: "user_other" },
+      })
+    ).toBe(true);
+    expect(abort.signal.aborted).toBe(true);
+
+    sessionTurnRegistry.cancelTurn(sessionId);
+  });
+
+  test("a failed reopen frees the turn instead of locking the chat", async () => {
+    const { db, service } = await createService();
+
+    const sessionId = await service.createSession(
+      ORG_ID,
+      "web",
+      "profile_default",
+      USER.id
+    );
+
+    expect(await service.closeSession(sessionId, ORG_ID, { user: USER })).toBe(
+      true
+    );
+
+    const update = db.updateSessionClosedAt.bind(db);
+    db.updateSessionClosedAt = () => Promise.reject(new Error("busy"));
+
+    await expect(service.beginSessionTurn(sessionId, ORG_ID)).rejects.toThrow();
+    expect(sessionTurnRegistry.isActive(sessionId)).toBe(false);
+
+    db.updateSessionClosedAt = update;
+    expect(await service.beginSessionTurn(sessionId, ORG_ID)).toBe(true);
+    sessionTurnRegistry.cancelTurn(sessionId);
+  });
+
+  test("closing a chat closes the chats sub_agent started from it, not its branches", async () => {
+    const { db, service } = await createService();
+
+    const parentId = await service.createSession(
+      ORG_ID,
+      "web",
+      "profile_default",
+      USER.id
+    );
+
+    await seedFirstMessage(db, parentId);
+
+    const childId = await service.createSession(
+      ORG_ID,
+      "web",
+      "profile_default",
+      USER.id,
+      { parentSessionId: parentId }
+    );
+
+    await seedFirstMessage(db, childId);
+
+    const branch = await service.branchSession(parentId, 0, ORG_ID);
+
+    expect(await db.getSession(branch?.sessionId ?? "")).not.toBeNull();
+
+    const childAbort = new AbortController();
+    expect(sessionTurnRegistry.beginTurn(childId).started).toBe(true);
+    sessionTurnRegistry.attachAbort(childId, childAbort);
+
+    expect(await service.closeSession(parentId, ORG_ID, { user: USER })).toBe(
+      true
+    );
+
+    expect(childAbort.signal.aborted).toBe(true);
+    expect((await db.getSession(childId))?.closedAt).toBeString();
+    expect(
+      (await db.getSession(branch?.sessionId ?? ""))?.closedAt ?? null
+    ).toBeNull();
+
+    sessionTurnRegistry.cancelTurn(childId);
+  });
+
   test("a session is active only while its turn is running", async () => {
     const { db, service } = await createService();
 

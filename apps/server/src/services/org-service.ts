@@ -40,6 +40,7 @@ import type {
   CreateOrganizationRequest,
   CreateOrganizationResponse,
   CreateTeamRequest,
+  ListOrgInvitesResponse,
   ListOrgMembersResponse,
   ListOrgSharedResourcesResponse,
   ListUserOrgsResponse,
@@ -1054,6 +1055,7 @@ export class OrgService {
       "discord",
       "whatsapp",
       "slack",
+      "teams",
     ] as const) {
       for (const owner of await listChannelOwners(platform)) {
         if (owner.orgId === orgId) {
@@ -2072,6 +2074,31 @@ export class OrgService {
     };
   }
 
+  async listInvites(orgId: string): Promise<ListOrgInvitesResponse> {
+    await this.requireActiveOrganization(orgId);
+
+    const records = await this.databaseAdapter.listPendingOrgInvites(
+      orgId,
+      new Date().toISOString()
+    );
+
+    return { invites: records.map(toOrgInviteSummary) };
+  }
+
+  async revokeInvite(orgId: string, inviteId: string): Promise<void> {
+    await this.requireActiveOrganization(orgId);
+
+    const revoked = await this.databaseAdapter.revokeOrgInvite(
+      orgId,
+      inviteId,
+      new Date().toISOString()
+    );
+
+    if (!revoked) {
+      throw new NakamaApiError("Not found", 404);
+    }
+  }
+
   async acceptInvite(request: AcceptOrgInviteRequest): Promise<{
     user: StoredUserRecord;
     orgId: string;
@@ -2225,7 +2252,8 @@ export class OrgService {
     return { delivered: delivery.ok, token: delivery.ok ? null : token };
   }
 
-  async resetPassword(request: ResetPasswordRequest): Promise<void> {
+  /** Returns the id of the user whose password was reset. */
+  async resetPassword(request: ResetPasswordRequest): Promise<string> {
     const token = request.token?.trim();
 
     if (!token) {
@@ -2235,18 +2263,20 @@ export class OrgService {
     const newPassword = request.newPassword?.trim() ?? "";
     assertNewPassword(newPassword);
 
-    const consumed = await this.databaseAdapter.consumePasswordResetToken(
+    const userId = await this.databaseAdapter.consumePasswordResetToken(
       this.authService.hashToken(token),
       await this.authService.hashPassword(newPassword),
       new Date().toISOString()
     );
 
-    if (!consumed) {
+    if (!userId) {
       throw new NakamaApiError(
         "Password reset token is invalid or has expired.",
         400
       );
     }
+
+    return userId;
   }
 
   async changePassword(input: {

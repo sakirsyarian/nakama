@@ -8,6 +8,7 @@ import type {
   UpdateEmailSettingsRequest,
   UpdateErrorTrackingSettingsRequest,
   UpdateSlackSettingsRequest,
+  UpdateTeamsSettingsRequest,
   UpdateTelegramSettingsRequest,
   UpdateThinkingRequest,
   UpdateWebSearchSettingsRequest,
@@ -373,6 +374,27 @@ export function useRegenerateSlackHandshake() {
   );
 }
 
+function useTeamsSettingsHooks() {
+  const profileId = useChannelProfileId();
+  const { activeOrg } = useAuth();
+  const api = client.forOrg(activeOrg?.id ?? null);
+
+  return createSettingsHooks({
+    mutationFn: (request: UpdateTeamsSettingsRequest) =>
+      api.setTeamsSettings(request, profileId),
+    queryFn: () => api.getTeamsSettings(profileId),
+    queryKey: [...queryKeys.teams.settings, activeOrg?.id, profileId],
+  });
+}
+
+export function useTeamsSettings() {
+  return useTeamsSettingsHooks().useSettings();
+}
+
+export function useSaveTeamsSettings() {
+  return useTeamsSettingsHooks().useSave();
+}
+
 const emailSettings = createSettingsHooks({
   mutationFn: async (request: UpdateEmailSettingsRequest) => {
     const { password, ...settings } = request;
@@ -723,10 +745,14 @@ export function mcpServerDetailQueryOptions(serverId: string) {
   });
 }
 
-export function useMcpServerDetailQuery(serverId: string | null) {
+export function useMcpServerDetailQuery(
+  serverId: string | null,
+  { refetchInterval }: { refetchInterval?: number } = {}
+) {
   return useQuery({
     ...mcpServerDetailQueryOptions(serverId ?? ""),
     enabled: Boolean(serverId),
+    refetchInterval,
   });
 }
 

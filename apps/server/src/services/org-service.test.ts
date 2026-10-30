@@ -687,6 +687,50 @@ describe("OrgService", () => {
     expect(accepted.role).toBe("member");
   });
 
+  test("lists and revokes pending invites only within their org", async () => {
+    const { orgService } = createOrgService();
+
+    const acme = await orgService.createOrganization({
+      name: "Acme",
+      slug: "acme-revoke",
+    });
+
+    const other = await orgService.createOrganization({
+      name: "Other",
+      slug: "other-revoke",
+    });
+
+    const invite = await orgService.createInvite({
+      email: "guest@acme.com",
+      invitedByUserId: "user_platform",
+      orgId: acme.organization.id,
+      role: "member",
+    });
+
+    expect(
+      (await orgService.listInvites(acme.organization.id)).invites
+    ).toEqual([invite.invite]);
+    expect(
+      (await orgService.listInvites(other.organization.id)).invites
+    ).toEqual([]);
+
+    await expect(
+      orgService.revokeInvite(other.organization.id, invite.invite.id)
+    ).rejects.toMatchObject({ status: 404 });
+
+    await orgService.revokeInvite(acme.organization.id, invite.invite.id);
+
+    expect(
+      (await orgService.listInvites(acme.organization.id)).invites
+    ).toEqual([]);
+    await expect(
+      orgService.acceptInvite({ password: "secret123", token: invite.token! })
+    ).rejects.toMatchObject({ status: 400 });
+    await expect(
+      orgService.revokeInvite(acme.organization.id, invite.invite.id)
+    ).rejects.toMatchObject({ status: 404 });
+  });
+
   test("only creates invites for allowed email domains", async () => {
     const sent: string[] = [];
 
@@ -3702,7 +3746,9 @@ if __name__ == "__main__":
         expect(second.getHistory()).toEqual(history);
         expect(selections).toEqual(["second::same-model", "first::same-model"]);
         expect(
-          await agent.updateSessionModel(id, "org_team_a", "second::same-model")
+          await agent.updateSessionRunSettings(id, "org_team_a", {
+            model: "second::same-model",
+          })
         ).toBe(true);
         const overridden = (await agent.resolveSession(id, "org_team_a"))!;
         expect(overridden.getHistory()).toEqual(history);

@@ -203,6 +203,8 @@ interface SessionRow {
   agent_todos: string;
   branch_message_index: number | null;
   channel: string;
+  closed_at?: string | null;
+  coding_workspace_root?: string | null;
   created_at: string;
   id: string;
   model: string | null;
@@ -1409,8 +1411,8 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
 
   // org_id follows the profile's org. The profile move path keeps it in sync.
   const upsertSessionStmt = db.prepare(`
-    INSERT INTO sessions (id, profile_id, channel, created_at, updated_at, app_user_id, user_id, model, org_id, pinned, parent_session_id, branch_message_index, thinking_effort)
-    VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO sessions (id, profile_id, channel, created_at, updated_at, app_user_id, user_id, model, org_id, pinned, parent_session_id, branch_message_index, thinking_effort, coding_workspace_root)
+    VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(id) DO UPDATE SET
       profile_id = excluded.profile_id,
       channel = excluded.channel,
@@ -1430,6 +1432,10 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
 
   const updateSessionModelStmt = db.prepare(
     "UPDATE sessions SET model = ? WHERE id = ? AND app_user_id IS NULL"
+  );
+
+  const updateSessionClosedAtStmt = db.prepare(
+    "UPDATE sessions SET closed_at = ? WHERE id = ? AND app_user_id IS NULL"
   );
 
   const updateSessionThinkingEffortStmt = db.prepare(
@@ -1637,6 +1643,8 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
           OR s.channel IN (SELECT value FROM json_each(?11))
         )
         AND s.app_user_id IS NULL
+        -- A closed chat leaves Recents but a search or a lookup by id still finds it.
+        AND (s.closed_at IS NULL OR ?8 IS NOT NULL OR ?9 IS NOT NULL)
         -- Only message text is searched: content is a string or an array of
         -- parts, and matching the raw JSON would let "role" hit every chat.
         -- LIKE ignores case for ASCII letters only, so "école" does not find
@@ -2913,14 +2921,14 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
       const token = getUsablePasswordResetTokenStmt.get(tokenHash, consumedAt);
 
       if (!token) {
-        return false;
+        return null;
       }
 
       consumePasswordResetTokensForUserStmt.run(consumedAt, token.user_id);
       updateUserPasswordStmt.run(passwordHash, consumedAt, token.user_id);
       revokeBrowserSessionsForUserStmt.run(consumedAt, token.user_id);
 
-      return true;
+      return token.user_id;
     }
   );
 
@@ -3236,6 +3244,24 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
     FROM org_invites
     WHERE org_id = ? AND email = ? AND accepted_at IS NULL AND revoked_at IS NULL
     LIMIT 1
+  `);
+
+  const listPendingOrgInvitesStmt = db.prepare<
+    OrgInviteRow,
+    SQLQueryBindings[]
+  >(`
+    SELECT
+      id, org_id, email, role, token_hash, invited_by_user_id,
+      expires_at, accepted_at, revoked_at, created_at
+    FROM org_invites
+    WHERE org_id = ? AND accepted_at IS NULL AND revoked_at IS NULL AND expires_at > ?
+    ORDER BY created_at DESC
+  `);
+
+  const revokeOrgInviteStmt = db.prepare(`
+    UPDATE org_invites
+    SET revoked_at = ?
+    WHERE id = ? AND org_id = ? AND accepted_at IS NULL AND revoked_at IS NULL
   `);
 
   const markOrgInviteAcceptedStmt = db.prepare(`
@@ -5756,6 +5782,10 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
       return listPasskeysStmt.all(userId).map((row) => toPasskeyRecord(row));
     },
 
+    async listPendingOrgInvites(orgId, now) {
+      return listPendingOrgInvitesStmt.all(orgId, now).map(toOrgInviteRecord);
+    },
+
     async listPlatformAdminUsers() {
       const rows = listPlatformAdminUsersStmt.all();
 
@@ -6081,6 +6111,10 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
 
       return result.changes;
     },
+
+    async revokeOrgInvite(orgId, id, revokedAt) {
+      return revokeOrgInviteStmt.run(revokedAt, id, orgId).changes > 0;
+    },
     async setFilePinned(orgId, userId, profileId, path, pinned) {
       if (pinned) {
         db.query(
@@ -6207,6 +6241,10 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
     },
     async updatePasskeyCounter(userId, credentialId, counter) {
       updatePasskeyCounterStmt.run(counter, userId, credentialId);
+    },
+
+    async updateSessionClosedAt(sessionId, closedAt) {
+      return updateSessionClosedAtStmt.run(closedAt, sessionId).changes > 0;
     },
 
     async updateSessionModel(sessionId, model) {
@@ -6447,7 +6485,8 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
         record.pinned ? 1 : 0,
         record.parentSessionId ?? null,
         record.branchMessageIndex ?? null,
-        record.thinkingEffort ?? null
+        record.thinkingEffort ?? null,
+        record.codingWorkspaceRoot ?? null
       );
     },
     async upsertSkill(record) {
@@ -6954,6 +6993,8 @@ function toSessionRecord(row: SessionRow): StoredSessionRecord {
     agentTodos: parseAgentTodos(row.agent_todos),
     branchMessageIndex: row.branch_message_index,
     channel: row.channel,
+    closedAt: row.closed_at ?? null,
+    codingWorkspaceRoot: row.coding_workspace_root ?? null,
     createdAt: row.created_at,
     id: row.id,
     model: row.model ?? null,

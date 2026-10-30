@@ -60,12 +60,18 @@ export function registerSessionRoutes(
   // createSession refuses Super Nakama to non-admins. Every route that names an
   // existing session repeats the check, or holding the ID would be enough.
   const requireSessionAccess = async (
-    c: Parameters<typeof requireActiveOrgIdFromContext>[0]
+    c: Parameters<typeof requireActiveOrgIdFromContext>[0],
+    { runsTools = false }: { runsTools?: boolean } = {}
   ) => {
     const auth = getRequestAuth(c);
     const orgId = requireActiveOrgIdFromContext(c);
     const sessionId = decodeURIComponent(c.req.param("sessionId") ?? "");
-    await agent.assertSessionProfileAccess(sessionId, orgId, auth);
+    await agent.assertSessionProfileAccess(
+      sessionId,
+      orgId,
+      auth,
+      runsTools ? { localClient: auth.mode === "local-token" } : {}
+    );
 
     return { orgId, sessionId };
   };
@@ -828,24 +834,11 @@ export function registerSessionRoutes(
 
     const body: UpdateSessionRequest = parsedBody.data;
 
-    if (body.model !== undefined) {
-      const updated = await agent.updateSessionModel(
-        sessionId,
-        orgId,
-        body.model
-      );
-
-      if (!updated) {
-        return errorResponse("Session not found", 404);
-      }
-    }
-
-    if (body.thinkingEffort !== undefined) {
-      const updated = await agent.updateSessionThinkingEffort(
-        sessionId,
-        orgId,
-        body.thinkingEffort
-      );
+    if (body.model !== undefined || body.thinkingEffort !== undefined) {
+      const updated = await agent.updateSessionRunSettings(sessionId, orgId, {
+        model: body.model,
+        thinkingEffort: body.thinkingEffort,
+      });
 
       if (!updated) {
         return errorResponse("Session not found", 404);
@@ -1050,7 +1043,11 @@ export function registerSessionRoutes(
 
   app.post("/v1/sessions/:sessionId/branch", async (c) => {
     requireOrgMemberFromContext(c);
-    const { orgId, sessionId } = await requireSessionAccess(c);
+
+    const { orgId, sessionId } = await requireSessionAccess(c, {
+      runsTools: true,
+    });
+
     const body = await readJson(c.req.raw, branchSessionRequestSchema);
 
     const result = await agent.branchSession(
@@ -1068,7 +1065,10 @@ export function registerSessionRoutes(
 
   app.post("/v1/sessions/:sessionId/messages", async (c) => {
     requireOrgMemberFromContext(c);
-    const { orgId, sessionId } = await requireSessionAccess(c);
+
+    const { orgId, sessionId } = await requireSessionAccess(c, {
+      runsTools: true,
+    });
 
     const turnStarted = await agent.beginSessionTurn(sessionId, orgId);
 
@@ -1152,13 +1152,15 @@ export function registerSessionRoutes(
       );
     }
 
+    // close_session stops a turn through this controller, as streamMessage does.
+    const turnAbort = new AbortController();
+    sessionTurnRegistry.attachAbort(sessionId, turnAbort);
+
     try {
-      const reply = await session.send(
-        input,
-        body.whatsappMessage
-          ? { whatsappMessage: body.whatsappMessage }
-          : undefined
-      );
+      const reply = await session.send(input, {
+        signal: turnAbort.signal,
+        whatsappMessage: body.whatsappMessage,
+      });
 
       const contextUsage = session.getContextUsage() ?? undefined;
       const usage = session.getTurnUsage() ?? undefined;

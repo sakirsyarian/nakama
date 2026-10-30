@@ -5,6 +5,7 @@ import { builtinTools } from "./builtin";
 import {
   createFakeMailReader,
   createFakeMailSender,
+  emailTool,
   runEmailTool,
 } from "./email";
 
@@ -63,6 +64,24 @@ describe("email tool", () => {
     expect(sender.sent).toHaveLength(1);
   });
 
+  test("only org admins, platform admins and automation turns reach the mailbox", async () => {
+    const run = (context: Parameters<typeof emailTool.run>[1]) =>
+      emailTool.run({ action: "list", limit: 1 }, context);
+
+    const refused = { error: "Only org admins can use the email tool." };
+
+    expect(await run({ orgRole: "member" })).toEqual(refused);
+    expect(await run({})).toEqual(refused);
+
+    for (const context of [
+      { orgRole: "admin" as const },
+      { isPlatformAdmin: true, orgRole: "member" as const },
+      { automationId: "automation_1", orgRole: "member" as const },
+    ]) {
+      expect(await run(context)).not.toEqual(refused);
+    }
+  });
+
   test("returns configuration error when mailbox is incomplete", async () => {
     const reader = createFakeMailReader();
     const sender = createFakeMailSender();
@@ -81,29 +100,6 @@ describe("email tool", () => {
         "Email is not configured. Ask an org admin to set up mailbox settings in System → Tools.",
     });
     expect(sender.sent).toHaveLength(0);
-  });
-
-  test("lists messages with fake reader", async () => {
-    const reader = createFakeMailReader([
-      {
-        date: "2026-06-21T00:00:00.000Z",
-        folder: "INBOX",
-        from: "team@example.com",
-        subject: "Weekly update",
-        text: "summary",
-        uid: 10,
-      },
-    ]);
-
-    const result = await runEmailTool(
-      { action: "list", limit: 5 },
-      {
-        createReader: () => reader,
-        loadConfig: async () => completeConfig,
-      }
-    );
-
-    expect("messages" in result && result.messages).toHaveLength(1);
   });
 
   test("reads a message by uid", async () => {

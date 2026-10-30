@@ -99,6 +99,7 @@ export const AGENT_CHANNELS = [
   "whatsapp",
   "discord",
   "slack",
+  "teams",
   "automation",
   "task",
   "subagent",
@@ -185,6 +186,15 @@ export interface DiscordWorkerStatus {
 }
 
 export interface SlackWorkerStatus {
+  configured: boolean;
+  connected: boolean;
+  ok: boolean;
+  paired: boolean;
+  process?: WorkerProcessInfo;
+  running: boolean;
+}
+
+export interface TeamsWorkerStatus {
   configured: boolean;
   connected: boolean;
   ok: boolean;
@@ -302,6 +312,7 @@ export interface SystemStatusResponse {
   mcp: McpStatus;
   server: HealthResponse;
   slackWorker: SlackWorkerStatus;
+  teamsWorker: TeamsWorkerStatus;
   telegramWorker: TelegramWorkerStatus;
   whatsappWorker: WhatsAppWorkerStatus;
 }
@@ -793,6 +804,10 @@ export interface OrgMemberSummary {
 
 export interface ListOrgMembersResponse {
   members: OrgMemberSummary[];
+}
+
+export interface ListOrgInvitesResponse {
+  invites: OrgInviteSummary[];
 }
 
 export interface AddOrgMemberRequest {
@@ -1706,6 +1721,24 @@ export interface DiscordSettingsResponse {
   inviteUrl: string | null;
   pairedUserIds: string[];
   profileId: string;
+}
+
+export interface TeamsSettingsResponse {
+  allowedUserIds: string[];
+  clientId: string | null;
+  clientSecretConfigured: boolean;
+  configured: boolean;
+  messagingEndpoint: string | null;
+  profileId: string;
+  tenantId: string | null;
+}
+
+export interface UpdateTeamsSettingsRequest {
+  allowedUserIds?: string;
+  clientId?: string;
+  clientSecret?: string;
+  profileId?: string;
+  tenantId?: string;
 }
 
 export interface UpdateDiscordSettingsRequest {
@@ -2935,6 +2968,7 @@ export type ProviderName =
   | "zhipu_cn"
   | "xai"
   | "groq"
+  | "cheaper_inference"
   | "together"
   | "xiaomi"
   | "meta"

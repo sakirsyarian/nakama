@@ -2,35 +2,26 @@ import type { ImageAttachment, OrgRole, ProfileSummary } from "@nakama/core";
 import { NakamaApiError } from "@nakama/core";
 import {
   type AgentGroup,
-  type AgentGroupMemoryChange,
   type AgentGroupMessage,
   type AgentGroupRun,
   type AgentGroupSession,
   type AgentGroupSessionDetail,
   type AgentGroupThreadDetail,
+  assignHandles,
+  type GroupRoster,
+  groupRoster,
   groupSessionTitle,
-  memberHandles,
-  mentionedMemberIds,
 } from "@nakama/core/agent-groups";
 import { validateImageAttachments } from "@nakama/core/message-content";
 import { filterProfilesForChatAccess } from "@nakama/core/profiles";
 import type { DatabaseAdapter } from "@nakama/db";
-import { failSubAgentResult } from "../tools/sub-agent-shared";
 import {
   requireGroup,
   requireSession,
   requireThreadRoot,
 } from "./agent-group-lookup";
 import {
-  addressedMembers,
-  groupMembers,
-  groupTurn,
-  isPassReply,
-  threadTask,
-  threadTranscript,
-  transcript,
-} from "./agent-group-prompt";
-import {
+  addAgentGroupHandles,
   appendAgentGroupMessage,
   createAgentGroup,
   createGroupSession,
@@ -50,6 +41,7 @@ import {
   updateGroupSession,
 } from "./agent-group-store";
 import { retitleGroupSession } from "./agent-group-title";
+import { addressedMembers, takeGroupTurn } from "./agent-group-turn";
 import { type PostedDocument, workspaceOfGroup } from "./agent-group-workspace";
 import type { AgentService } from "./agent-service";
 
@@ -63,6 +55,8 @@ interface GroupAccess {
 
 interface ActiveRun extends AgentGroupRun {
   groupId: string;
+  /** Aborts the hop in progress. */
+  hop: AbortController | null;
   hopsLeft: number;
   /** User messages not yet turned into speakers. */
   inbox: string[];
@@ -78,6 +72,8 @@ interface ActiveRun extends AgentGroupRun {
 interface ThreadRun extends AgentGroupRun {
   /** The user wrote again while the agent was replying. */
   again: boolean;
+  /** Aborts the reply in progress. */
+  hop: AbortController | null;
 }
 
 export class AgentGroupService {
@@ -94,7 +90,7 @@ export class AgentGroupService {
     private readonly db: Pick<DatabaseAdapter, "getOrgMember" | "getUserById">,
     private readonly agent: Pick<
       AgentService,
-      "generateSessionTitle" | "listProfiles" | "runSubAgentPrompt"
+      "generateSessionTitle" | "listProfiles" | "runGroupTurn"
     >
   ) {}
 
@@ -113,9 +109,9 @@ export class AgentGroupService {
     memberIds: string[],
     brief = ""
   ): Promise<AgentGroup> {
-    await this.assertMembers(orgId, userId, memberIds, []);
+    const handles = await this.assertMembers(orgId, userId, memberIds, {});
 
-    return createAgentGroup(orgId, userId, name, memberIds, brief);
+    return createAgentGroup(orgId, userId, name, memberIds, brief, handles);
   }
 
   /** Members kept from before may have lost access; only new ones are checked. */
@@ -128,8 +124,8 @@ export class AgentGroupService {
     brief = ""
   ): Promise<AgentGroup> {
     const group = requireGroup(orgId, userId, groupId);
-    await this.assertMembers(orgId, userId, memberIds, group.memberIds);
-    updateAgentGroup(orgId, userId, groupId, name, memberIds, brief);
+    const handles = await this.assertMembers(orgId, userId, memberIds, group);
+    updateAgentGroup(orgId, userId, groupId, name, memberIds, brief, handles);
 
     return requireGroup(orgId, userId, groupId);
   }
@@ -296,6 +292,7 @@ export class AgentGroupService {
     const run: ThreadRun = {
       activity: null,
       again: true,
+      hop: null,
       speakerProfileId: root.authorProfileId,
       stopping: false,
     };
@@ -323,6 +320,7 @@ export class AgentGroupService {
     if (run) {
       run.stopping = true;
       run.again = false;
+      run.hop?.abort();
     }
   }
 
@@ -434,6 +432,7 @@ export class AgentGroupService {
     const run: ActiveRun = {
       activity: null,
       groupId,
+      hop: null,
       hopsLeft: 0,
       inbox: [content],
       lastSpeaker:
@@ -483,16 +482,10 @@ export class AgentGroupService {
       // membership may change mid-run.
       const group = getAgentGroup(orgId, userId, session.groupId);
       const access = await this.access(orgId, userId);
-      const members = group ? groupMembers(group, access.profiles) : [];
-      const handles = memberHandles(members);
+      const roster = this.roster(orgId, group, access);
 
       for (const message of run.inbox.splice(0)) {
-        const woken = addressedMembers(
-          message,
-          members,
-          handles,
-          run.lastSpeaker
-        );
+        const woken = addressedMembers(message, roster, run.lastSpeaker);
 
         // Everyone woken gets a turn, even past the cap (`@all`).
         run.hopsLeft = Math.max(MAX_GROUP_HOPS, woken.length);
@@ -520,98 +513,48 @@ export class AgentGroupService {
         return;
       }
 
-      const speaker = members.find((p) => p.id === profileId);
-
-      if (!speaker) {
-        appendAgentGroupMessage(
-          orgId,
-          session,
-          profileId,
-          "_Skipped: no access_"
-        );
-        continue;
-      }
-
       run.speakerProfileId = profileId;
       run.activity = null;
-
-      const turn = groupTurn(orgId, session.id, group, speaker, handles);
       run.steps = [];
       run.text = "";
-      const memoryChanges: AgentGroupMemoryChange[] = [];
+      run.hop = new AbortController();
 
-      // ponytail: Stop and the hop timeout cannot abort a running hop, add an
-      // AbortSignal to SubAgentRunInput if that cost matters.
-      const result = await this.agent
-        .runSubAgentPrompt({
-          agentDepth: 1,
-          context: transcript(orgId, session.id, handles, members),
-          onActivity: (label) => {
-            run.activity = label;
-            run.steps.push(label);
-          },
-          onGroupMemoryChange: (change) => memoryChanges.push(change),
-          onText: (chunk) => {
-            run.text += chunk;
-          },
-          orgId,
-          orgRole: access.orgRole,
-          profileId,
-          sharedDir: turn.sharedDir,
-          task: turn.task,
-          userId,
-        })
-        .catch((error) =>
-          failSubAgentResult(
-            error instanceof Error ? error.message : String(error)
-          )
-        );
+      const outcome = await takeGroupTurn(this.agent, {
+        group,
+        onActivity: (label) => {
+          run.activity = label;
+          run.steps.push(label);
+        },
+        onText: (chunk) => {
+          run.text += chunk;
+        },
+        orgId,
+        orgRole: access.orgRole,
+        profileId,
+        roster,
+        session,
+        signal: run.hop.signal,
+        userId,
+      });
 
-      const text = result.output.trim();
-
-      // A pass spends no hop, but a completed memory write must remain visible.
-      if (turn.mayPass && result.status === "success" && isPassReply(text)) {
-        if (memoryChanges.length > 0) {
-          appendAgentGroupMessage(
-            orgId,
-            session,
-            profileId,
-            "",
-            undefined,
-            [],
-            memoryChanges
-          );
-        }
-
+      if (outcome.kind === "silent") {
         continue;
       }
 
       run.hopsLeft -= 1;
-      appendAgentGroupMessage(
-        orgId,
-        session,
-        profileId,
-        result.status === "success" && text
-          ? text
-          : `_${result.error ?? "No reply."}_`,
-        undefined,
-        [],
-        memoryChanges
-      );
+      run.lastSpeaker = profileId;
 
-      if (result.status === "success" && text) {
+      if (outcome.kind === "replied") {
         run.titling ??= retitleGroupSession(
           this.agent,
           orgId,
           userId,
           session,
           profileId,
-          text
+          outcome.text
         );
+        enqueue(run.queue, roster.mentions(outcome.text, profileId));
       }
-
-      run.lastSpeaker = profileId;
-      enqueue(run.queue, mentionedMemberIds(text, handles, profileId));
     }
   }
 
@@ -629,75 +572,44 @@ export class AgentGroupService {
 
       const group = getAgentGroup(orgId, userId, session.groupId);
       const access = await this.access(orgId, userId);
-      const members = group ? groupMembers(group, access.profiles) : [];
-      const speaker = members.find((p) => p.id === profileId);
 
-      if (!(group && speaker)) {
-        appendAgentGroupMessage(
-          orgId,
-          session,
-          profileId,
-          "_Skipped: no access_",
-          root.id
-        );
-
+      // Stop may land while access loads, before there is a hop to abort.
+      if (run.stopping) {
         return;
       }
 
-      const handles = memberHandles(members);
-      const sharedDir = workspaceOfGroup(orgId, group.id).open();
-      const memoryChanges: AgentGroupMemoryChange[] = [];
+      run.hop = new AbortController();
 
-      const result = await this.agent
-        .runSubAgentPrompt({
-          agentDepth: 1,
-          context: threadTranscript(
-            orgId,
-            session.id,
-            root.id,
-            handles,
-            members
-          ),
-          onActivity: (label) => {
-            run.activity = label;
-          },
-          onGroupMemoryChange: (change) => memoryChanges.push(change),
-          orgId,
-          orgRole: access.orgRole,
-          profileId,
-          sharedDir,
-          task: threadTask(group, speaker, handles, sharedDir),
-          userId,
-        })
-        .catch((error) =>
-          failSubAgentResult(
-            error instanceof Error ? error.message : String(error)
-          )
-        );
-
-      const text = result.output.trim();
-
-      appendAgentGroupMessage(
+      const outcome = await takeGroupTurn(this.agent, {
+        group,
+        onActivity: (label) => {
+          run.activity = label;
+        },
         orgId,
-        session,
+        orgRole: access.orgRole,
         profileId,
-        result.status === "success" && text
-          ? text
-          : `_${result.error ?? "No reply."}_`,
-        root.id,
-        [],
-        memoryChanges
-      );
+        root,
+        roster: this.roster(orgId, group, access),
+        session,
+        signal: run.hop.signal,
+        userId,
+      });
+
       run.activity = null;
+
+      if (outcome.kind === "silent") {
+        return;
+      }
     }
   }
 
+  /** Checks the new members and returns the handles to save for them. */
   private async assertMembers(
     orgId: string,
     userId: string,
     memberIds: string[],
-    kept: string[]
-  ): Promise<void> {
+    kept: Partial<Pick<AgentGroup, "handles" | "memberIds">>
+  ): Promise<Record<string, string>> {
     if (new Set(memberIds).size !== memberIds.length) {
       throw new NakamaApiError("Each agent can join a group once.", 400);
     }
@@ -705,12 +617,48 @@ export class AgentGroupService {
     const { profiles } = await this.access(orgId, userId);
 
     const allowed = memberIds.every(
-      (id) => kept.includes(id) || profiles.some((p) => p.id === id)
+      (id) => kept.memberIds?.includes(id) || profiles.some((p) => p.id === id)
     );
 
     if (!allowed) {
       throw new NakamaApiError("You cannot use one of these agents.", 403);
     }
+
+    // A group saved before handles were kept gets its old ones first, in the
+    // old member order, so the edit does not move a handle to another agent.
+    const before = assignHandles(
+      kept.handles ?? {},
+      kept.memberIds ?? [],
+      profiles
+    );
+
+    return assignHandles(before, memberIds, profiles);
+  }
+
+  /**
+   * The group's roster for a turn. A group saved before handles were kept
+   * saves them here, before any agent reads a mention.
+   */
+  private roster(
+    orgId: string,
+    group: AgentGroup | null,
+    access: GroupAccess
+  ): GroupRoster {
+    if (!group) {
+      return groupRoster({ handles: {}, memberIds: [] }, []);
+    }
+
+    const handles = assignHandles(
+      group.handles,
+      group.memberIds,
+      access.profiles
+    );
+
+    if (Object.keys(handles).length > Object.keys(group.handles).length) {
+      addAgentGroupHandles(orgId, group.id, handles);
+    }
+
+    return groupRoster({ ...group, handles }, access.profiles);
   }
 
   /** The agents this user may chat with right now; none once they leave the org. */
@@ -756,6 +704,7 @@ export class AgentGroupService {
  */
 function halt(run: ActiveRun): void {
   run.stopping = true;
+  run.hop?.abort();
   run.queue.length = 0;
   run.inbox.length = 0;
 }

@@ -541,6 +541,7 @@ const HISTORY_SESSION_CHANNEL = {
   slack: true,
   subagent: false,
   task: false,
+  teams: true,
   telegram: true,
   web: true,
   whatsapp: true,
@@ -560,6 +561,7 @@ const READ_ONLY_SESSION_CHANNEL = {
   slack: true,
   subagent: false,
   task: false,
+  teams: true,
   telegram: true,
   web: false,
   whatsapp: true,
@@ -598,6 +600,8 @@ export function formatSessionChannelLabel(channel: AgentChannel): string {
       return "Discord";
     case "slack":
       return "Slack";
+    case "teams":
+      return "Microsoft Teams";
     case "web":
       return "Web";
     default:
