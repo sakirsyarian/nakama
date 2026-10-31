@@ -4,7 +4,7 @@ import {
   createInMemoryDatabaseAdapter,
   seedOrgSuperNakamaProfile,
 } from "@nakama/db";
-import { asTestFetch } from "../../providers/test-helpers";
+import { asTestFetch, streamFromChunks } from "../../providers/test-helpers";
 import { AgentService } from "../../services/agent-service";
 import { createAttachmentSaver } from "../../services/attachment-service";
 import { setupTestConfigDir } from "../../test-config-dir";
@@ -108,6 +108,7 @@ const CROSS_ORG_ROUTES: Array<{
   { method: "DELETE", path: (id) => `/v1/sessions/${id}?purge=true` },
   { method: "DELETE", path: (id) => `/v1/sessions/${id}` },
   { method: "POST", path: (id) => `/v1/sessions/${id}/compact` },
+  { method: "POST", path: (id) => `/v1/sessions/${id}/stop` },
   { method: "GET", path: (id) => `/v1/sessions/${id}/browser` },
   { method: "DELETE", path: (id) => `/v1/sessions/${id}/browser` },
   {
@@ -763,15 +764,13 @@ describe("clearing a session while its turn is running", () => {
         providerCalled.resolve();
         await releaseProvider.promise;
 
-        return Response.json({
-          choices: [
-            {
-              finish_reason: "stop",
-              index: 0,
-              message: { content: "late reply", role: "assistant" },
-            },
-          ],
-        });
+        return new Response(
+          streamFromChunks([
+            'data: {"choices":[{"delta":{"content":"late reply"},"finish_reason":"stop","index":0}]}\n\n',
+            "data: [DONE]\n\n",
+          ]),
+          { headers: { "Content-Type": "text/event-stream" } }
+        );
       })
     );
 

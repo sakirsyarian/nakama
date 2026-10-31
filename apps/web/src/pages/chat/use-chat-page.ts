@@ -326,15 +326,12 @@ export function useChatPage() {
   /**
    * Hand the current stream back before the page moves to another chat.
    *
-   * The server ends a turn as soon as the request streaming it goes away, so a
-   * send stream is detached rather than aborted: the chat keeps running in the
-   * background and is picked up again by the reconnect in `resumeSession`.
+   * A send stream is detached rather than aborted: the chat keeps running in
+   * the background and is picked up again by the reconnect in `resumeSession`.
    * Everything the turn owned on the page (busy flags, the queue) is released
-   * here, because the next chat needs a clean composer.
-   *
-   * ponytail: a detached turn still dies with the page (reload, closed tab).
-   * Give the server an explicit stop endpoint and stop cancelling on
-   * disconnect if turns need to outlive the tab.
+   * here, because the next chat needs a clean composer. The server keeps a
+   * browser's turn running even when the page goes away; only Stop
+   * (`stopSessionTurn`) ends it.
    */
   const releaseActiveStream = useCallback(() => {
     const released = releaseChatStream({
@@ -1207,11 +1204,82 @@ export function useChatPage() {
   ]);
 
   const stopStreaming = useCallback(() => {
-    // Stop means stop: aborting closes the request, which is how the server
-    // learns to end the turn. Detaching is only for switching chats.
+    // Stop means stop. Closing the request no longer ends a browser's turn
+    // (a phone locking must not), so the server is told outright. Detaching
+    // is only for switching chats.
+    const sessionId = activeSessionIdRef.current;
+
+    if (sessionId) {
+      // The abort below no longer stops the server, so a lost /stop would
+      // leave the turn running out of sight: try twice, then say so. A 4xx
+      // answer will not change, so only a network or server error retries.
+      const stop = () => client.stopSessionTurn(sessionId);
+
+      stop()
+        .catch((err) => {
+          if (err instanceof NakamaApiError && err.status < 500) {
+            throw err;
+          }
+
+          return stop();
+        })
+        .catch((err) => {
+          // The session went away, and its turn with it.
+          if (err instanceof NakamaApiError && err.status === 404) {
+            return;
+          }
+
+          // Only on the chat that was stopped, not one opened since.
+          if (activeSessionIdRef.current === sessionId) {
+            setError(`The reply could not be stopped: ${formatError(err)}`);
+          }
+        });
+    }
+
     detachStreamRef.current = null;
     streamAbortRef.current?.abort();
   }, []);
+
+  const removeQueuedMessage = useCallback((id: string) => {
+    messageQueueRef.current = messageQueueRef.current.filter(
+      (item) => item.id !== id
+    );
+    setQueuedMessages((current) => current.filter((item) => item.id !== id));
+  }, []);
+
+  const editQueuedMessage = useCallback((id: string, text: string) => {
+    messageQueueRef.current = messageQueueRef.current.map((item) =>
+      item.id === id ? { ...item, text } : item
+    );
+    setQueuedMessages((current) =>
+      current.map((item) => (item.id === id ? { ...item, text } : item))
+    );
+  }, []);
+
+  // Moves the message to the front, then stops the reply so it sends next.
+  const sendQueuedMessageNow = useCallback(
+    (id: string) => {
+      const item = messageQueueRef.current.find((entry) => entry.id === id);
+
+      if (!item) {
+        return;
+      }
+
+      messageQueueRef.current = [
+        item,
+        ...messageQueueRef.current.filter((entry) => entry.id !== id),
+      ];
+      setQueuedMessages((current) => {
+        const hit = current.find((entry) => entry.id === id);
+
+        return hit
+          ? [hit, ...current.filter((entry) => entry.id !== id)]
+          : current;
+      });
+      stopStreaming();
+    },
+    [stopStreaming]
+  );
 
   const executeSend = useCallback(
     async (
@@ -1758,6 +1826,7 @@ export function useChatPage() {
     composerEntry,
     contextUsage: isEmptyState ? null : contextUsage,
     currentModelSelection,
+    editQueuedMessage,
     error,
     handleBranchMessage,
     handleCognitoChange,
@@ -1776,8 +1845,10 @@ export function useChatPage() {
     providerModelGroups,
     queuedMessages,
     readOnlySession,
+    removeQueuedMessage,
     renderModelLabel,
     sendMessage,
+    sendQueuedMessageNow,
     session,
     sessionChannel,
     showOfflineHint,

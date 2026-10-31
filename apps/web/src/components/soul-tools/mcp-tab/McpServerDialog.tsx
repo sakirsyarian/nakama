@@ -13,11 +13,12 @@ import {
   DialogTitle,
 } from "@nakama/ui/dialog";
 import { Spinner } from "@nakama/ui/spinner";
+import { toast } from "@nakama/ui/toast";
 import { cn } from "@nakama/ui/utils";
+import { useQueryClient } from "@tanstack/react-query";
 import { type ComponentProps, useState } from "react";
 import {
   McpAppPicker,
-  McpConnectApp,
   McpCustomConnection,
   McpSignInPending,
   type PopularServer,
@@ -26,7 +27,13 @@ import { McpImportConfigDialog } from "@/components/soul-tools/mcp-tab/mcp-impor
 import { McpServerDialogForm } from "@/components/soul-tools/mcp-tab/mcp-server-dialog-form";
 import { unregisteredPopularServers } from "@/components/soul-tools/mcp-tab/popular-mcp-servers";
 import { useMcpServerDialogState } from "@/components/soul-tools/mcp-tab/use-mcp-server-dialog-state";
-import { useMcpServersQuery } from "@/hooks/use-app-queries";
+import { useAuth } from "@/context/use-auth";
+import { useMcpServersQuery, useProfileQuery } from "@/hooks/use-app-queries";
+import { connectComposioApp, useComposioToolkits } from "@/hooks/use-composio";
+import { formatError } from "@/lib/client";
+import { isProfileOwner } from "@/lib/profiles";
+import { invalidateQueries } from "@/lib/query-client";
+import { queryKeys } from "@/lib/query-keys";
 
 type McpServerDialogState = ReturnType<typeof useMcpServerDialogState>;
 
@@ -147,32 +154,103 @@ function McpServerDialogCreateForm({
   );
 }
 
-type CreateView = "apps" | "connect" | "custom";
+type CreateView = "apps" | "custom";
 
 function McpCreateBody({
   availableServers,
   busy,
   onAssign,
   onOpenChange,
+  profileId,
   state,
 }: {
   availableServers?: McpServerSummary[];
   busy: boolean;
   onAssign?: (serverId: string) => void;
   onOpenChange: (open: boolean) => void;
+  profileId?: string;
   state: McpServerDialogState;
 }) {
+  const queryClient = useQueryClient();
+  const { activeOrg, user } = useAuth();
+  const isOrgAdmin = activeOrg?.role === "admin";
   const [view, setView] = useState<CreateView>("apps");
-  const [preset, setPreset] = useState<PopularServer | null>(null);
   const [query, setQuery] = useState("");
+  const [connecting, setConnecting] = useState(false);
 
   // Every server in the org, assigned or not, so a preset never duplicates one.
   const { data: orgServers } = useMcpServersQuery();
+  const { data: composio } = useComposioToolkits();
+  const { data: profile } = useProfileQuery(profileId ?? null);
 
-  function startForm(name: string, url: string) {
-    state.selectKind("signin");
-    state.setName(name);
-    state.setUrl(url);
+  // A Composio app only works once it is on the agent, so offer it only to
+  // someone who can add it there.
+  const canManageAgent =
+    Boolean(profile && !profile.sharedAgent) &&
+    (isOrgAdmin ||
+      user?.isPlatformAdmin === true ||
+      isProfileOwner(profile, user?.id));
+
+  // A member cannot turn a toolkit on, so they see only the ones an admin has.
+  const enabledSlugs = new Set(
+    composio?.orgToolkits
+      .filter((item) => item.status === "enabled")
+      .map((item) => item.toolkitSlug)
+  );
+
+  const offered =
+    composio?.configured && canManageAgent
+      ? composio.catalog.filter(
+          (item) => isOrgAdmin || enabledSlugs.has(item.slug)
+        )
+      : [];
+
+  async function connectApp(item: PopularServer) {
+    if (!offered.some((toolkit) => toolkit.slug === item.toolkit)) {
+      // No Composio for this app here: sign in to its own MCP server.
+      if ("url" in item) {
+        state.selectKind("signin");
+        state.setName(item.name);
+        state.setUrl(item.url);
+        setView("custom");
+      }
+
+      return;
+    }
+
+    if (!composio) {
+      return;
+    }
+
+    setConnecting(true);
+
+    try {
+      const signInUrl = await connectComposioApp({
+        isOrgAdmin,
+        profileId,
+        returnTo: `${window.location.pathname}${window.location.search}`,
+        toolkitSlug: item.toolkit,
+        toolkits: composio,
+      });
+
+      if (signInUrl) {
+        window.location.href = signInUrl;
+
+        return;
+      }
+
+      await invalidateQueries(
+        queryClient,
+        queryKeys.composio.toolkits,
+        queryKeys.composio.profileToolkits(profileId ?? "none"),
+        queryKeys.profiles.all
+      );
+      toast(`${item.name} is ready`);
+      onOpenChange(false);
+    } catch (error) {
+      toast(formatError(error));
+      setConnecting(false);
+    }
   }
 
   if (state.pendingAuth) {
@@ -181,22 +259,8 @@ function McpCreateBody({
         name={state.pendingAuth.name}
         onDone={() => onOpenChange(false)}
         opened={state.pendingAuth.opened}
-        preset={preset ?? undefined}
         serverId={state.pendingAuth.serverId}
         url={state.pendingAuth.url}
-      />
-    );
-  }
-
-  if (view === "connect" && preset) {
-    return (
-      <McpConnectApp
-        busy={busy}
-        canSubmit={state.canSubmit}
-        onBack={() => setView("apps")}
-        onSubmit={state.handleSubmit}
-        preset={preset}
-        submitError={state.submitError}
       />
     );
   }
@@ -222,20 +286,21 @@ function McpCreateBody({
 
   return (
     <McpAppPicker
-      busy={busy}
+      busy={busy || connecting}
       onAssign={onAssign}
-      onConnect={(item) => {
-        setPreset(item);
-        startForm(item.name, item.url);
-        setView("connect");
-      }}
+      onConnect={(item) => void connectApp(item)}
       onCustom={() => {
-        setPreset(null);
-        startForm("", "");
+        state.selectKind("signin");
+        state.setName("");
+        state.setUrl("");
         setView("custom");
       }}
       onQueryChange={setQuery}
-      popular={unregisteredPopularServers(orgServers ?? availableServers)}
+      popular={
+        composio
+          ? unregisteredPopularServers(orgServers ?? availableServers, offered)
+          : []
+      }
       query={query}
       registered={onAssign ? (availableServers ?? []) : []}
     />
@@ -251,6 +316,7 @@ export function McpServerDialog({
   onOpenChange,
   onSubmit,
   onAssign,
+  profileId,
 }: {
   open: boolean;
   busy: boolean;
@@ -262,6 +328,8 @@ export function McpServerDialog({
     request: CreateMcpServerRequest
   ) => Promise<McpServerResponse | void>;
   onAssign?: (serverId: string) => void;
+  /** The agent the dialog adds to; a preset app is assigned to it. */
+  profileId?: string;
 }) {
   const state = useMcpServerDialogState({ busy, onSubmit, open, server });
 
@@ -307,6 +375,7 @@ export function McpServerDialog({
                 busy={busy}
                 onAssign={onAssign}
                 onOpenChange={onOpenChange}
+                profileId={profileId}
                 state={state}
               />
             ) : null}

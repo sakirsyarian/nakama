@@ -18,6 +18,7 @@ import {
 import { AppSidebar } from "@/components/AppSidebar";
 import { CommandPalette } from "@/components/CommandPalette";
 import { MobileNavDrawer } from "@/components/MobileNavDrawer";
+import { WebPushPrompt } from "@/components/notifications/web-push-prompt";
 import { ProfileRail } from "@/components/ProfileRail";
 import { RouteBoundary } from "@/components/RouteBoundary";
 import { useBtwChatStore } from "@/context/btw-chat-store";
@@ -25,6 +26,7 @@ import { useAppContext } from "@/context/use-app-context";
 import { useAgentGroupQuery } from "@/hooks/use-agent-groups";
 import { useOrgPlugins } from "@/hooks/use-plugins";
 import { useChatSessionSummary } from "@/hooks/use-resource-mutations";
+import { useOrgFromNotification, usePushPresence } from "@/hooks/use-web-push";
 import {
   enabledPluginNavEntries,
   findNavItem,
@@ -45,6 +47,8 @@ const BtwChatHost = lazy(() =>
 
 export function Layout() {
   const shell = useAppShell();
+  usePushPresence();
+  const switchingOrg = useOrgFromNotification();
   const btwOpen = useBtwChatStore((store) => store.chat !== null);
 
   return (
@@ -75,13 +79,14 @@ export function Layout() {
             <AppShellError error={shell.error} />
             <main className={appShellMainClassName(shell.page, shell.pathname)}>
               <RouteBoundary resetKey={shell.pathname}>
-                <Outlet />
+                {switchingOrg ? null : <Outlet />}
               </RouteBoundary>
             </main>
           </div>
         </div>
       </div>
       <CommandPalette />
+      <WebPushPrompt />
       {btwOpen ? (
         <Suspense fallback={null}>
           <BtwChatHost />
@@ -243,7 +248,7 @@ function AppShellHeader({
         "app-shell-header gap-2 bg-card px-3 sm:gap-4 sm:px-6",
         // Standalone on iOS the shell owns the status bar, so the bar grows by
         // the top inset and paints its own background under the notch.
-        "h-[calc(3.5rem+env(safe-area-inset-top))] pt-[env(safe-area-inset-top)]",
+        "h-[calc(3rem+env(safe-area-inset-top))] pt-[env(safe-area-inset-top)]",
         // Chat uses the full desktop column; phones still need the header
         // to reach navigation.
         (page === "chat" || hideDesktop) && "sm:hidden"

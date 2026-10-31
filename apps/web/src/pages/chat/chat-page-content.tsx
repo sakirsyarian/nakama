@@ -72,6 +72,9 @@ export function ChatPageContent({
     composerDraftKey,
     composerEntry,
     queuedMessages,
+    editQueuedMessage,
+    removeQueuedMessage,
+    sendQueuedMessageNow,
     showOfflineHint,
     health,
     providerModelGroups,
@@ -174,7 +177,10 @@ export function ChatPageContent({
         headerNotice={skillReviewBanner}
         onBtw={onBtw}
         onConnectProvider={() => setProviderDialogOpen(true)}
+        onEditQueuedMessage={editQueuedMessage}
         onModelChange={handleModelChange}
+        onRemoveQueuedMessage={removeQueuedMessage}
+        onSendQueuedMessageNow={sendQueuedMessageNow}
         onStop={stopStreaming}
         onSubmit={(text, files) => {
           void sendMessage(text, files);

@@ -9,10 +9,12 @@ import type {
 } from "@nakama/core";
 import { NakamaApiError } from "@nakama/core";
 import { resolveComposioCallbackBaseUrl } from "../../services/composio-callback-url";
+import { isSameSiteReturnPath } from "../../services/composio-service";
 import type { ServerOptions } from "../context";
 import {
   requireOrgAdminFromContext,
   requireOrgMemberFromContext,
+  requireProfileManageFromContext,
 } from "../org-guards";
 import {
   errorResponse,
@@ -191,7 +193,12 @@ export function registerComposioRoutes(
             clientOrigin: body.callbackOrigin,
             request: c.req.raw,
           }),
-          { returnTo: "/integrations?section=composio" }
+          {
+            returnTo:
+              body.returnTo && isSameSiteReturnPath(body.returnTo)
+                ? body.returnTo
+                : "/integrations?section=composio",
+          }
         )
       );
     } catch (error) {
@@ -252,8 +259,11 @@ export function registerComposioRoutes(
     }
   });
 
+  // Members manage the toolkits of the agents they created, like other tools.
   app.get("/v1/profiles/:profileId/composio-toolkits", async (c) => {
-    const auth = requireOrgAdminFromContext(c);
+    const auth = await requireProfileManageFromContext(c, options.agent, {
+      allowOrgAdmin: true,
+    });
 
     const profile = await options.databaseAdapter?.getProfile(
       c.req.param("profileId")
@@ -269,7 +279,9 @@ export function registerComposioRoutes(
   });
 
   app.put("/v1/profiles/:profileId/composio-toolkits", async (c) => {
-    const auth = requireOrgAdminFromContext(c);
+    const auth = await requireProfileManageFromContext(c, options.agent, {
+      allowOrgAdmin: true,
+    });
 
     const profile = await options.databaseAdapter?.getProfile(
       c.req.param("profileId")
