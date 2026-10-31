@@ -41,6 +41,7 @@ import {
   useBranchSessionMutation,
   useUpdateSessionMutation,
 } from "@/hooks/use-resource-mutations";
+import { notifyReplyReady } from "@/hooks/use-web-push";
 import { acpAgentSettingsKey } from "@/lib/acp-settings";
 import type { FileUIPart } from "@/lib/ai-ui-types";
 import {
@@ -406,6 +407,27 @@ export function useChatPage() {
   const activeProfile = useMemo(
     () => profiles.find((profile) => profile.id === profileId),
     [profiles, profileId]
+  );
+
+  // Read when a turn ends, which can be after the user opened another chat.
+  const profilesRef = useRef(profiles);
+
+  useEffect(() => {
+    profilesRef.current = profiles;
+  }, [profiles]);
+
+  const notifyTurnDone = useCallback(
+    (turnProfileId: string, sessionId: string, reply: string) => {
+      notifyReplyReady({
+        body: reply,
+        onOpen: () => navigate(buildChatPath(turnProfileId, sessionId)),
+        tag: `session-${sessionId}`,
+        title:
+          profilesRef.current.find((profile) => profile.id === turnProfileId)
+            ?.name ?? "Nakama",
+      });
+    },
+    [navigate]
   );
 
   const availableSkills = activeProfileQuery.data?.skills ?? [];
@@ -842,12 +864,28 @@ export function useChatPage() {
 
             const abortController = new AbortController();
             streamAbortRef.current = abortController;
+            // Opening another chat detaches this stream instead of aborting
+            // it, so the turn can still announce its reply when it ends.
+            let detached = false;
+            detachStreamRef.current = () => {
+              detached = true;
+            };
+
+            const whileAttached =
+              <TValue>(write: (value: TValue) => void) =>
+              (value: TValue) => {
+                if (!detached) {
+                  write(value);
+                }
+              };
 
             const { reconnected } = await reconnectActiveSessionStream({
-              handlers: buildStreamHandlers(setMessages, {
-                onContextUsage: setContextUsage,
-                onQuestionnaireUpdated: setAgentQuestionnaire,
-                onTodosUpdated: setAgentTodos,
+              handlers: buildStreamHandlers(whileAttached(setMessages), {
+                onContextUsage: whileAttached(setContextUsage),
+                onDone: (reply) =>
+                  notifyTurnDone(nextProfileId, sessionId, reply),
+                onQuestionnaireUpdated: whileAttached(setAgentQuestionnaire),
+                onTodosUpdated: whileAttached(setAgentTodos),
               }),
               messages: listItems,
               sessionId,
@@ -919,11 +957,19 @@ export function useChatPage() {
 
         if (isCurrentLoad()) {
           streamAbortRef.current = null;
+          detachStreamRef.current = null;
           setTurnStartedAt(null);
         }
       }
     },
-    [navigate, profileId, releaseActiveStream, setProfileId, syncChatUrl]
+    [
+      navigate,
+      notifyTurnDone,
+      profileId,
+      releaseActiveStream,
+      setProfileId,
+      syncChatUrl,
+    ]
   );
 
   const handleBranchMessage = useCallback(
@@ -1387,6 +1433,10 @@ export function useChatPage() {
             }
           };
 
+        const sessionForTurn = activeSession;
+        // A cognito chat has no URL to open and promises no trace.
+        const announceTurn = !cognitoRef.current;
+
         await activeSession.sendStream(
           {
             documents: documents.length > 0 ? documents : undefined,
@@ -1395,6 +1445,12 @@ export function useChatPage() {
           },
           buildStreamHandlers(whileAttached(setMessages), {
             onContextUsage: whileAttached(setContextUsage),
+            // Not while attached only: a detached turn is the one to announce.
+            onDone: (reply) => {
+              if (announceTurn) {
+                notifyTurnDone(profileId, sessionForTurn.id, reply);
+              }
+            },
             onQuestionnaireUpdated: whileAttached(setAgentQuestionnaire),
             onTodosUpdated: whileAttached(setAgentTodos),
           }),
@@ -1578,6 +1634,7 @@ export function useChatPage() {
       sessionModel,
       sessionThinkingEffort,
       queryClient,
+      notifyTurnDone,
     ]
   );
 

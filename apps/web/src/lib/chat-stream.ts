@@ -772,6 +772,8 @@ export function buildStreamHandlers(
     onTodosUpdated?: (todos: AgentTodo[]) => void;
     onQuestionnaireUpdated?: (questionnaire: AgentQuestionnaire | null) => void;
     onContextUsage?: (usage: ChatContextUsage) => void;
+    /** Gets the reply the server sends with its done event. */
+    onDone?: (reply: string) => void;
   } = {}
 ): StreamHandlers {
   return {
@@ -803,6 +805,7 @@ export function buildStreamHandlers(
       });
     },
     onContextUsage: options.onContextUsage,
+    onDone: options.onDone,
     onQuestionnaireUpdated: options.onQuestionnaireUpdated,
     onSubAgentActivity: (event) => {
       setMessages((current) =>
