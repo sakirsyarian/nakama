@@ -25,6 +25,8 @@ interface AttachmentDetailPanelProps {
   headerClassName?: string;
   leading?: ReactNode;
   onClose: () => void;
+  /** Called once when a drag ends, with the width the user chose. */
+  onResizeEnd?: (width: number) => void;
   onWidthChange: (width: number) => void;
   resizable?: boolean;
   scrollKey?: string;
@@ -49,6 +51,7 @@ export function AttachmentDetailPanel({
   fullscreen = false,
   width,
   onWidthChange,
+  onResizeEnd,
   onClose,
   className,
   scrollKey,
@@ -181,6 +184,7 @@ export function AttachmentDetailPanel({
     }
 
     draggingRef.current = false;
+    onResizeEnd?.(clampWidth(window.innerWidth - event.clientX));
 
     if (event.currentTarget.hasPointerCapture(event.pointerId)) {
       event.currentTarget.releasePointerCapture(event.pointerId);
@@ -228,7 +232,7 @@ export function AttachmentDetailPanel({
         >
           <div className="flex min-w-0 flex-1 items-center gap-2">
             <div className="min-w-0">
-              <h2 className="truncate font-semibold text-sm">{title}</h2>
+              <h2 className="truncate font-medium text-sm">{title}</h2>
               {leading ? null : subtitle ? (
                 <p className="mt-0.5 truncate text-muted-foreground text-xs">
                   {subtitle}

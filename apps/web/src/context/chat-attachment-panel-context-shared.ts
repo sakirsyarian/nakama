@@ -10,6 +10,8 @@ export interface ChatAttachmentPanelConfig {
   leading?: ReactNode;
   onClose?: () => void | Promise<void>;
   resizable?: boolean;
+  /** Saved for the chat, so the same panel opens again after a reload. */
+  restoreKey?: string;
   subtitle?: string | null;
   subtitleClassName?: string;
   title: string;
@@ -61,6 +63,15 @@ export interface ChatAttachmentPanelContextValue {
   hide: (id?: string) => void;
   isFullscreen: boolean;
   isOpen: boolean;
+  /**
+   * Called by a card as it mounts. Runs `open` if this card shows the panel
+   * that was open when the chat was last left. Returns a cleanup for unmount.
+   */
+  requestRestore: (
+    restoreKey: string,
+    id: string,
+    open: () => void
+  ) => () => void;
   show: (config: ChatAttachmentPanelConfig) => void;
   toggleFullscreen?: (id?: string) => void;
   update: (

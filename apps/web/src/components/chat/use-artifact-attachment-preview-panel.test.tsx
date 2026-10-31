@@ -45,6 +45,7 @@ test("opening an artifact preview does not update the panel on every render", as
           hide: () => setConfig(null),
           isFullscreen: config?.fullscreen ?? false,
           isOpen: config !== null,
+          requestRestore: () => () => undefined,
           show,
           update,
         }}
@@ -142,6 +143,7 @@ test("toggling fullscreen repeatedly updates panel fullscreen state without gett
           hide: () => setConfig(null),
           isFullscreen: config?.fullscreen ?? false,
           isOpen: config !== null,
+          requestRestore: () => () => undefined,
           show,
           toggleFullscreen,
           update,
@@ -219,6 +221,77 @@ test("toggling fullscreen repeatedly updates panel fullscreen state without gett
     expect(getToggleButton()?.getAttribute("aria-label")).toBe(
       "Enter fullscreen"
     );
+  } finally {
+    await act(async () => root.unmount());
+    queryClient.clear();
+  }
+});
+
+test("a card asks to restore its panel on mount and opens it when told to", async () => {
+  const queryClient = new QueryClient();
+  const root = createRoot(document.createElement("div"));
+  const requests: { id: string; restoreKey: string }[] = [];
+  let shown: ChatAttachmentPanelConfig | null = null;
+
+  function Card() {
+    useArtifactAttachmentPreviewPanel({
+      artifact: {
+        filename: "bakso.html",
+        mimeType: "text/html",
+        path: "artifacts/bakso.html",
+        savedAt: "2026-10-07T00:00:00Z",
+        sizeBytes: 12,
+      },
+      id: "turn-1:profile:artifacts/bakso.html",
+      profileId: "profile",
+    });
+
+    return null;
+  }
+
+  // SAFETY: Preview reads only activeOrg and user from this fixture.
+  const auth = { activeOrg: null, user: null } as AuthContextValue;
+
+  try {
+    await act(async () =>
+      root.render(
+        <QueryClientProvider client={queryClient}>
+          <AuthContext.Provider value={auth}>
+            <ChatAttachmentPanelContext.Provider
+              value={{
+                activeId: null,
+                hide: () => undefined,
+                isFullscreen: false,
+                isOpen: false,
+                requestRestore: (restoreKey, id, open) => {
+                  requests.push({ id, restoreKey });
+                  open();
+
+                  return () => undefined;
+                },
+                show: (config) => {
+                  shown = config;
+                },
+                update: () => undefined,
+              }}
+            >
+              <Card />
+            </ChatAttachmentPanelContext.Provider>
+          </AuthContext.Provider>
+        </QueryClientProvider>
+      )
+    );
+
+    expect(requests).toEqual([
+      {
+        id: "turn-1:profile:artifacts/bakso.html",
+        restoreKey: "profile:artifacts/bakso.html",
+      },
+    ]);
+    expect(shown).toMatchObject({
+      id: "turn-1:profile:artifacts/bakso.html",
+      restoreKey: "profile:artifacts/bakso.html",
+    });
   } finally {
     await act(async () => root.unmount());
     queryClient.clear();

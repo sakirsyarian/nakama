@@ -90,6 +90,7 @@ async function renderComposer(options: { withPlugin: boolean }) {
     hide: () => undefined,
     isFullscreen: false,
     isOpen: false,
+    requestRestore: () => () => undefined,
     show,
     update: () => undefined,
   };

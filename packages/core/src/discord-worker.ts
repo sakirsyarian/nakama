@@ -7,15 +7,12 @@ import {
 } from "./discord-config";
 import {
   createWorkerHeartbeatStore,
-  isHeartbeatAlive,
   type WorkerHeartbeatBase,
 } from "./worker-heartbeat";
 
 export interface DiscordWorkerHeartbeat extends WorkerHeartbeatBase {
   connected?: boolean;
 }
-
-export { isHeartbeatAlive };
 
 export function createDiscordWorkerHeartbeat(scope: ChannelConfigScope = null) {
   return createWorkerHeartbeatStore<DiscordWorkerHeartbeat>({
@@ -68,8 +65,9 @@ export async function getDiscordWorkerStatus(
   scope: ChannelConfigScope = null
 ): Promise<DiscordWorkerStatus> {
   const settings = await loadDiscordSettingsPublic(scope);
-  const heartbeat = await createDiscordWorkerHeartbeat(scope).read();
-  const running = isHeartbeatAlive(heartbeat);
+  const store = createDiscordWorkerHeartbeat(scope);
+  const heartbeat = await store.read();
+  const running = await store.isRunning(heartbeat);
 
   return resolveDiscordWorkerStatus(
     settings,

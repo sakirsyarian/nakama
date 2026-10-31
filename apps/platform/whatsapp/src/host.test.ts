@@ -140,3 +140,68 @@ test("console output from a channel goes to that channel's log files", async () 
     await readFile(join(root, second.profileId, "stderr.log"), "utf8")
   ).toBe("later from agent_b\n");
 });
+
+test("console output after a channel's logs are closed does not throw", async () => {
+  const lines: string[] = [];
+
+  const write = (...args: unknown[]) => {
+    lines.push(args.join(" "));
+  };
+
+  const target = {
+    debug: write,
+    error: write,
+    info: write,
+    log: write,
+    warn: write,
+  };
+
+  installChannelLogRouting(target);
+
+  const sync = createWhatsAppHost({
+    getLogDir: (owner) => join(root, owner.profileId),
+    start: async (owner) => {
+      // A timer the channel leaves behind keeps its log context.
+      setTimeout(() => target.log(`late from ${owner.profileId}`), 20);
+
+      return { stop: async () => {} };
+    },
+  });
+
+  hosts.push(sync);
+  await sync([first]);
+  await sync([]);
+  await Bun.sleep(40);
+
+  expect(lines).toHaveLength(1);
+  expect(lines[0]).toContain(JSON.stringify([first.orgId, first.profileId]));
+});
+
+test("a channel whose log file cannot open still stops with the others", async () => {
+  const events: string[] = [];
+
+  const sync = createWhatsAppHost({
+    getLogDir: (owner) =>
+      owner === first ? join(root, "missing") : join(root, owner.profileId),
+    start: async (owner) => {
+      events.push(`start ${owner.profileId}`);
+
+      return {
+        stop: async () => {
+          events.push(`stop ${owner.profileId}`);
+        },
+      };
+    },
+  });
+
+  await sync([first, second]);
+  await Bun.sleep(5);
+  await sync([]);
+
+  expect(events).toEqual([
+    "start agent_a",
+    "start agent_b",
+    "stop agent_a",
+    "stop agent_b",
+  ]);
+});

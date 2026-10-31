@@ -3,15 +3,18 @@ import {
   beforeEach,
   describe,
   expect,
+  jest,
   mock,
   spyOn,
   test,
 } from "bun:test";
 import { EventEmitter } from "node:events";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { deflateSync } from "node:zlib";
+import { pathExists } from "@nakama/core/fs";
+import { getWhatsAppQrCodePath } from "@nakama/core/whatsapp-worker";
 import * as baileys from "@whiskeysockets/baileys";
 import processMessage from "@whiskeysockets/baileys/lib/Utils/process-message.js";
 import { usePrivateMultiFileAuthState } from "./auth-state";
@@ -60,17 +63,27 @@ const createSocket = mock((_config: baileys.UserFacingSocketConfig) => {
   return socket;
 });
 
+const fetchVersionOffline = async (): Promise<{
+  error?: unknown;
+  version: baileys.WAVersion;
+}> => {
+  throw new Error("GitHub version lookup is unavailable");
+};
+
+const fetchVersion = mock(fetchVersionOffline);
+
 mock.module("@whiskeysockets/baileys", () => ({
   ...baileys,
-  fetchLatestBaileysVersion: async () => {
-    throw new Error("GitHub version lookup is unavailable");
-  },
+  fetchLatestBaileysVersion: () => fetchVersion(),
   makeWASocket: createSocket,
 }));
 
-const { createWhatsAppSocket, summarizeMissingTextPayload } = await import(
-  "./socket"
-);
+const {
+  createWhatsAppQrQueue,
+  createWhatsAppSocket,
+  resetWhatsAppWebVersionForTests,
+  summarizeMissingTextPayload,
+} = await import("./socket");
 
 test.each([null, undefined, "request-123"])(
   "peer response delivers the recovered message with stanza ID: %s",
@@ -193,20 +206,27 @@ const SAMPLE_UPSERT = {
 
 describe("WhatsApp socket reconnect", () => {
   let logSpy: ReturnType<typeof spyOn>;
+  let warnSpy: ReturnType<typeof spyOn>;
   let timeoutSpy: ReturnType<typeof spyOn>;
   let previousConfigDir: string | undefined;
   let tempConfigDir: string;
 
   beforeEach(async () => {
+    previousConfigDir = process.env.NAKAMA_CONFIG_DIR;
+    tempConfigDir = await mkdtemp(join(tmpdir(), "nakama-wa-socket-"));
+    process.env.NAKAMA_CONFIG_DIR = tempConfigDir;
+    // Load the version once on real timers, so its timeout is not a reconnect delay.
+    resetWhatsAppWebVersionForTests();
+    const warnOnce = spyOn(console, "warn").mockImplementation(() => {});
+    await (await createWhatsAppSocket({ onMessage: async () => {} })).start();
+    warnOnce.mockRestore();
     sockets.length = 0;
     delays.length = 0;
     endOrder.length = 0;
     endResolvers = [];
     createSocket.mockClear();
-    previousConfigDir = process.env.NAKAMA_CONFIG_DIR;
-    tempConfigDir = await mkdtemp(join(tmpdir(), "nakama-wa-socket-"));
-    process.env.NAKAMA_CONFIG_DIR = tempConfigDir;
     logSpy = spyOn(console, "log").mockImplementation(() => {});
+    warnSpy = spyOn(console, "warn").mockImplementation(() => {});
     timeoutSpy = spyOn(globalThis, "setTimeout").mockImplementation(
       (fn, ms) => {
         delays.push(Number(ms));
@@ -222,6 +242,7 @@ describe("WhatsApp socket reconnect", () => {
 
   afterEach(async () => {
     logSpy.mockRestore();
+    warnSpy.mockRestore();
     timeoutSpy.mockRestore();
 
     if (previousConfigDir === undefined) {
@@ -242,7 +263,7 @@ describe("WhatsApp socket reconnect", () => {
     const handle = await createWhatsAppSocket({ onConnected, onMessage, onQr });
     await handle.start();
     emit(0, { qr: "private-qr" });
-    expect(onQr).toHaveBeenCalledWith("private-qr");
+    expect(onQr).toHaveBeenCalledWith("private-qr", handle.generation);
     const config = createSocket.mock.calls[0]![0];
     config.auth!.creds.me = { id: "123@s.whatsapp.net", lid: "456@lid" };
     await sockets[0]!.ev.listeners("connection.update")[0]!({
@@ -384,7 +405,7 @@ describe("WhatsApp socket reconnect", () => {
         lastDisconnect: { error: { message, output: { statusCode: code } } },
       });
       await flush();
-      const line = String(logSpy.mock.calls[0]![0]);
+      const line = disconnectLines(warnSpy)[0]!;
       const diagnostic = JSON.parse(line.slice(line.indexOf("{")));
       expect(diagnostic).toEqual({
         cause: null,
@@ -427,7 +448,7 @@ describe("WhatsApp socket reconnect", () => {
       },
     });
     await flush();
-    const lines = logSpy.mock.calls.map(([line]) => String(line));
+    const lines = disconnectLines(warnSpy);
     expect(lines).toHaveLength(3);
 
     for (const line of lines) {
@@ -438,6 +459,52 @@ describe("WhatsApp socket reconnect", () => {
         diagnostic.code === 408 ? "ECONNRESET" : "[redacted]"
       );
     }
+  });
+
+  test("a QR write that races a socket close leaves no QR file", async () => {
+    let handle: Awaited<ReturnType<typeof createWhatsAppSocket>> | null = null;
+    const qrCodes = createWhatsAppQrQueue(null, () => handle?.generation ?? -1);
+
+    handle = await createWhatsAppSocket({
+      onDisconnected: () => {
+        void qrCodes.clear();
+      },
+      onMessage: async () => {},
+      onQr: (qr, generation) => {
+        void qrCodes.write(qr, generation);
+      },
+    });
+
+    await handle.start();
+    emit(0, { qr: "dead-qr" });
+    emit(0, TIMEOUT_CLOSE);
+    await qrCodes.clear();
+
+    expect(await pathExists(getWhatsAppQrCodePath(null))).toBe(false);
+  });
+
+  test("ignores a QR event from an old socket generation", async () => {
+    let current = 2;
+    const qrCodes = createWhatsAppQrQueue(null, () => current);
+
+    await qrCodes.write("old-qr", 1);
+    expect(await pathExists(getWhatsAppQrCodePath(null))).toBe(false);
+
+    await qrCodes.write("new-qr", 2);
+    expect(await readFile(getWhatsAppQrCodePath(null), "utf8")).toBe("new-qr");
+
+    current = 3;
+    await qrCodes.write("late-qr", 2);
+    expect(await readFile(getWhatsAppQrCodePath(null), "utf8")).toBe("new-qr");
+  });
+
+  test("starts the socket on Baileys' default version when the lookup fails", async () => {
+    const handle = await createWhatsAppSocket({ onMessage: async () => {} });
+    await handle.start();
+
+    expect(createSocket.mock.calls[0]![0].version).toEqual(
+      baileys.DEFAULT_CONNECTION_CONFIG.version
+    );
   });
 
   test("ends the previous socket and waits before reconnecting on 408", async () => {
@@ -687,6 +754,12 @@ type TestConnectionUpdate = {
   qr?: string;
 };
 
+function disconnectLines(warnSpy: ReturnType<typeof spyOn>): string[] {
+  return warnSpy.mock.calls
+    .map(([line]: unknown[]) => String(line))
+    .filter((line: string) => line.includes('"reconnect":'));
+}
+
 function emit(index: number, update: TestConnectionUpdate) {
   sockets[index]?.ev.emit("connection.update", update);
 }
@@ -696,6 +769,100 @@ async function flush(): Promise<void> {
   await Promise.resolve();
   await Promise.resolve();
 }
+
+describe("WhatsApp Web version", () => {
+  let warnSpy: ReturnType<typeof spyOn>;
+  let previousConfigDir: string | undefined;
+  let tempConfigDir: string;
+
+  beforeEach(async () => {
+    createSocket.mockClear();
+    fetchVersion.mockReset();
+    fetchVersion.mockImplementation(fetchVersionOffline);
+    resetWhatsAppWebVersionForTests();
+    previousConfigDir = process.env.NAKAMA_CONFIG_DIR;
+    tempConfigDir = await mkdtemp(join(tmpdir(), "nakama-wa-version-"));
+    process.env.NAKAMA_CONFIG_DIR = tempConfigDir;
+    warnSpy = spyOn(console, "warn").mockImplementation(() => {});
+  });
+
+  afterEach(async () => {
+    warnSpy.mockRestore();
+    fetchVersion.mockImplementation(fetchVersionOffline);
+    resetWhatsAppWebVersionForTests();
+
+    if (previousConfigDir === undefined) {
+      delete process.env.NAKAMA_CONFIG_DIR;
+    } else {
+      process.env.NAKAMA_CONFIG_DIR = previousConfigDir;
+    }
+
+    await rm(tempConfigDir, { force: true, recursive: true });
+  });
+
+  async function startedVersion(): Promise<baileys.WAVersion | undefined> {
+    const handle = await createWhatsAppSocket({ onMessage: async () => {} });
+    await handle.start();
+
+    return createSocket.mock.calls.at(-1)![0].version;
+  }
+
+  test("links with the fetched version and reuses it on the next start", async () => {
+    fetchVersion.mockImplementation(async () => ({ version: [2, 3000, 1] }));
+
+    expect(await startedVersion()).toEqual([2, 3000, 1]);
+    expect(await startedVersion()).toEqual([2, 3000, 1]);
+    expect(fetchVersion).toHaveBeenCalledTimes(1);
+  });
+
+  test("falls back to the Baileys default when the fetch reports an error", async () => {
+    fetchVersion.mockImplementation(async () => ({
+      error: new Error("Not Found"),
+      version: [2, 1, 1],
+    }));
+
+    expect(await startedVersion()).toEqual(
+      baileys.DEFAULT_CONNECTION_CONFIG.version
+    );
+  });
+
+  test("falls back to the Baileys default when the fetch times out", async () => {
+    fetchVersion.mockImplementation(() => new Promise(() => {}));
+    const handle = await createWhatsAppSocket({ onMessage: async () => {} });
+    jest.useFakeTimers();
+
+    try {
+      const started = handle.start();
+      jest.advanceTimersByTime(5000);
+      await started;
+    } finally {
+      jest.useRealTimers();
+    }
+
+    expect(createSocket.mock.calls.at(-1)![0].version).toEqual(
+      baileys.DEFAULT_CONNECTION_CONFIG.version
+    );
+  });
+
+  test("retries a failed lookup after the retry window, not on every start", async () => {
+    const now = Date.now();
+    const clock = spyOn(Date, "now").mockReturnValue(now);
+
+    try {
+      await startedVersion();
+      await startedVersion();
+      expect(fetchVersion).toHaveBeenCalledTimes(1);
+
+      fetchVersion.mockImplementation(async () => ({ version: [2, 3000, 2] }));
+      clock.mockReturnValue(now + 6 * 60 * 1000);
+
+      expect(await startedVersion()).toEqual([2, 3000, 2]);
+      expect(fetchVersion).toHaveBeenCalledTimes(2);
+    } finally {
+      clock.mockRestore();
+    }
+  });
+});
 
 describe("summarizeMissingTextPayload", () => {
   test("keeps structural metadata without raw payload content or JIDs", () => {

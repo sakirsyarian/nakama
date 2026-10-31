@@ -14,15 +14,17 @@ import {
   withTokenEndpointStubbed,
 } from "../test-teams-helpers";
 
-setupTestConfigDir("nakama-teams-proxy-test-");
+// Registered first so it runs first: Windows cannot delete the config dir
+// while a test worker still holds its lock file open.
+const servers: { stop: () => void | Promise<void> }[] = [];
 
-const servers: { stop: () => void }[] = [];
-
-afterEach(() => {
+afterEach(async () => {
   for (const server of servers.splice(0)) {
-    server.stop();
+    await server.stop();
   }
 });
+
+setupTestConfigDir("nakama-teams-proxy-test-");
 
 /** A stand-in for the worker's SDK listener, bound to loopback like the real one. */
 function startFakeWorker(
@@ -51,8 +53,12 @@ describe("teams webhook proxy", () => {
 
     const server = startFakeWorker(handler);
 
+    // A live worker holds the connection lock, not only a fresh heartbeat.
+    const heartbeat = createTeamsWorkerHeartbeat(owner);
+    await heartbeat.acquire();
+    servers.push({ stop: heartbeat.clear });
     await saveTeamsInboundPort(server.port, owner);
-    await createTeamsWorkerHeartbeat(owner).write(true);
+    await heartbeat.write(true);
 
     return server;
   }

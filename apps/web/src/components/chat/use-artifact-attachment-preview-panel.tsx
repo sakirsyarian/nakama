@@ -184,8 +184,17 @@ export function useArtifactAttachmentPreviewPanel({
   id: string;
   artifact: ChatArtifactRef;
 }) {
-  const { show, update, activeId, isFullscreen, toggleFullscreen } =
-    useChatAttachmentPanel();
+  const {
+    show,
+    update,
+    activeId,
+    isFullscreen,
+    toggleFullscreen,
+    requestRestore,
+  } = useChatAttachmentPanel();
+
+  // The path, not the card id: a card id can change after a reload.
+  const restoreKey = `${profileId}:${artifact.path}`;
 
   const share = useArtifactShareControls({
     artifactPath: artifact.path,
@@ -567,11 +576,14 @@ export function useArtifactAttachmentPreviewPanel({
     header.typeLabel,
   ]);
 
-  function openPanel() {
+  function resetPanelState() {
     setCopied(false);
     setPreviewMode("preview");
     setEditMode(null);
     setSaveError(null);
+  }
+
+  function showPanel() {
     show({
       ...buildPanelConfig("preview"),
       content: buildPanelBody(
@@ -585,15 +597,24 @@ export function useArtifactAttachmentPreviewPanel({
       defaultWidth: artifactPanelDefaultWidth(artifact.filename, mimeType),
       fullscreen: false,
       id,
-      onClose: () => {
-        setCopied(false);
-        setPreviewMode("preview");
-        setEditMode(null);
-        setSaveError(null);
-      },
+      onClose: resetPanelState,
       resizable: true,
+      restoreKey,
     });
   }
+
+  function openPanel() {
+    resetPanelState();
+    showPanel();
+  }
+
+  // Opens again the artifact that was open when the chat was last left. The
+  // card has just mounted, so its own state is already at the defaults.
+  useEffect(
+    () => requestRestore(restoreKey, id, showPanel),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [requestRestore, restoreKey, id]
+  );
 
   return {
     imagePreviewUrl,

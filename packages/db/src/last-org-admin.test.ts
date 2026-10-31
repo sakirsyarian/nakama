@@ -72,4 +72,45 @@ describe("last org admin", () => {
     expect(await db.updateOrgMemberRole("org_a", first!, "member")).toBe(true);
     expect(await adminCount(db)).toBe(1);
   });
+
+  // disabled_at lives on users and never touches org_members, so a disabled
+  // admin row must not count as usable coverage inside the statement.
+  test("refuses to delete the last usable admin while a disabled admin row remains", async () => {
+    const db = createSqliteMemoryAdapter();
+
+    const [first, second, disabled] = await seedOrgWithAdmins(db, [
+      "admin",
+      "admin",
+      "admin",
+    ]);
+
+    await db.disableUser(disabled!, NOW);
+
+    // Two usable admins: the first removal is allowed.
+    expect(await db.deleteOrgMember("org_a", first!)).toBe(true);
+
+    // Only one usable admin is left; deleting it while a disabled admin row
+    // remains would leave the org with no admin who can sign in.
+    expect(await db.deleteOrgMember("org_a", second!)).toBe(false);
+    expect(await adminCount(db)).toBe(2);
+  });
+
+  test("refuses to demote the last usable admin while a disabled admin row remains", async () => {
+    const db = createSqliteMemoryAdapter();
+
+    const [first, second, disabled] = await seedOrgWithAdmins(db, [
+      "admin",
+      "admin",
+      "admin",
+    ]);
+
+    await db.disableUser(disabled!, NOW);
+
+    expect(await db.updateOrgMemberRole("org_a", first!, "member")).toBe(true);
+
+    expect(await db.updateOrgMemberRole("org_a", second!, "member")).toBe(
+      false
+    );
+    expect(await adminCount(db)).toBe(2);
+  });
 });

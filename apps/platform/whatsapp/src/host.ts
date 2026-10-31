@@ -6,6 +6,7 @@ import { format } from "node:util";
 import type { ChannelOwner } from "@nakama/core/channel-config-shared";
 
 interface ChannelLogs {
+  key: string;
   stderr: WriteStream;
   stdout: WriteStream;
 }
@@ -36,7 +37,16 @@ export function installChannelLogRouting(
       }
 
       const toStderr = method === "error" || method === "warn";
-      (toStderr ? logs.stderr : logs.stdout).write(`${format(...args)}\n`);
+      const stream = toStderr ? logs.stderr : logs.stdout;
+
+      // Async work can outlive its channel; a closed log must not throw.
+      if (stream.writableEnded || stream.destroyed) {
+        original(`[whatsapp ${logs.key}]`, ...args);
+
+        return;
+      }
+
+      stream.write(`${format(...args)}\n`);
     };
   }
 }
@@ -44,7 +54,8 @@ export function installChannelLogRouting(
 async function closeChannelLogs(logs: ChannelLogs): Promise<void> {
   logs.stdout.end();
   logs.stderr.end();
-  await Promise.all([finished(logs.stdout), finished(logs.stderr)]);
+  // An errored stream rejects finished(); one bad log must not stop the sync.
+  await Promise.allSettled([finished(logs.stdout), finished(logs.stderr)]);
 }
 
 /**
@@ -88,9 +99,19 @@ export function createWhatsAppHost(options: {
     const directory = options.getLogDir(owner);
 
     const logs = {
+      key,
       stderr: createWriteStream(join(directory, "stderr.log"), { flags: "a" }),
       stdout: createWriteStream(join(directory, "stdout.log"), { flags: "a" }),
     };
+
+    // An unhandled stream error would crash every channel in this process.
+    for (const stream of [logs.stderr, logs.stdout]) {
+      stream.on("error", (error) => {
+        process.stderr.write(
+          `WhatsApp channel ${key} log write failed: ${error.message}\n`
+        );
+      });
+    }
 
     try {
       const handle = await channelLogs.run(logs, () => options.start(owner));

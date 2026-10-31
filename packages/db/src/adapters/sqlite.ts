@@ -4091,20 +4091,26 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
 
   // The last-admin guard lives in the statement so two concurrent removals
   // cannot both pass a read-then-write check and leave the org with no admin.
+  // disabled_at lives on users and never touches org_members, so a disabled
+  // admin row must not count as usable coverage here.
   const deleteOrgMemberStmt = db.prepare(`
     DELETE FROM org_members
     WHERE org_id = ? AND user_id = ?
       AND (role != 'admin'
-        OR (SELECT COUNT(*) FROM org_members
-            WHERE org_id = ? AND role = 'admin') > 1)
+        OR (SELECT COUNT(*) FROM org_members m
+            JOIN users u ON u.id = m.user_id
+            WHERE m.org_id = ? AND m.role = 'admin'
+              AND u.disabled_at IS NULL) > 1)
   `);
 
   const updateOrgMemberRoleStmt = db.prepare(`
     UPDATE org_members SET role = ?
     WHERE org_id = ? AND user_id = ?
       AND (? = 'admin' OR role != 'admin'
-        OR (SELECT COUNT(*) FROM org_members
-            WHERE org_id = ? AND role = 'admin') > 1)
+        OR (SELECT COUNT(*) FROM org_members m
+            JOIN users u ON u.id = m.user_id
+            WHERE m.org_id = ? AND m.role = 'admin'
+              AND u.disabled_at IS NULL) > 1)
   `);
 
   const upsertPluginReleaseTx = db.transaction(
