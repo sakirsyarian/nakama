@@ -114,12 +114,12 @@ Orgs isolate profiles, sessions, automations, tools, MCP, skills, usage (`org_id
 
 Merged in `agent-service` `resolveProfileSystemPrompt` → `generateReply` (`provider.generateChat` / `streamChat`):
 
-| Change                                              | File                                  | Fn                                                                                          |
-| --------------------------------------------------- | ------------------------------------- | ------------------------------------------------------------------------------------------- |
-| Chat structure (USER.md, tools, timezone, channels) | `packages/agent/src/chat-prompt.ts`   | `buildChatSystemPrompt`                                                                     |
-| Soul content                                        | `packages/core/src/soul/compose.ts`   | `composeSoulSystemPrompt`                                                                   |
-| Skills catalog / matched / agent-browser            | `packages/core/src/skills/compose.ts` | `composeSkillsCatalog`, `composeMatchedSkillsPrompt`, `composeAgentBrowserCapabilityPrompt` |
-| Per-turn context (date, etc.)                       | `packages/agent/src/chat.ts`          | `generateReply`                                                                             |
+| Change | File | Fn |
+|---|---|---|
+| Chat structure (USER.md, tools, timezone, channels) | `packages/agent/src/chat-prompt.ts` | `buildChatSystemPrompt` |
+| Soul content | `packages/core/src/soul/compose.ts` | `composeSoulSystemPrompt` |
+| Skills catalog / loaded skill / agent-browser | `packages/core/src/skills/compose.ts` (`load_skill` tool: `apps/server/src/tools/skill-manage-tool.ts`) | `composeSkillsCatalog`, `composeLoadedSkillPrompt`, `composeAgentBrowserCapabilityPrompt` |
+| Per-turn context (date, etc.) | `packages/agent/src/chat.ts` | `generateReply` |
 
 ## Soul (`packages/core/src/soul/`)
 

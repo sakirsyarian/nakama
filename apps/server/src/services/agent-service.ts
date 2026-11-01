@@ -143,6 +143,7 @@ import {
   chatgptOAuthNeedsRefresh,
   cloudflareBaseUrlFromAccountId,
   composeKnowledgeBaseCatalog,
+  composeLoadedSkillPrompt,
   composeSoulSystemPrompt,
   createErrorTrackingSink,
   createId,
@@ -153,6 +154,7 @@ import {
   deleteArtifactFile,
   deleteAttachmentBytes,
   extractImageParts,
+  findCustomModel,
   findProviderInstance,
   getActiveProviderInstance,
   getProfileSoulDir,
@@ -253,11 +255,14 @@ import {
   createProviderFromActiveConfig,
   fetchCloudflareWorkersAiModels,
   fetchFireworksGatewayModels,
+  fetchNetraModelLimits,
   fetchNetraModels,
   fetchOllamaModels,
   fetchRemoteOpenAIModels,
   getModelsForProviderInstance,
   isCostEstimated,
+  NETRA_MAX_OUTPUT_TOKENS,
+  readApiKeyForInstance,
   resolveModelLimits,
 } from "../providers";
 import {
@@ -297,6 +302,7 @@ import {
   sendWhatsAppArtifactTool,
 } from "../tools/send-discord-artifact-tool";
 import {
+  createLoadSkillTool,
   createSkillManageTools,
   SKILL_MANAGE_CHANNELS,
 } from "../tools/skill-manage-tool";
@@ -437,6 +443,7 @@ export interface CreateSessionOptions {
   orgRole?: OrgRole | null;
   parentSessionId?: string;
   thinkingEffort?: ThinkingEffort | null;
+  title?: string;
 }
 
 /** Per-session settings a chat is built with. Branches copy them. */
@@ -2575,7 +2582,7 @@ export class AgentService {
       parentSessionId: options?.parentSessionId ?? null,
       profileId: resolvedProfileId,
       thinkingEffort: options?.thinkingEffort ?? null,
-      title: null,
+      title: options?.title ?? null,
       userId: userId ?? null,
     };
 
@@ -2629,13 +2636,9 @@ export class AgentService {
       );
     }
 
-    const siblings = parent.userId
-      ? await this.db.listSessionsForUser(parent.userId)
-      : await this.db.listSessions();
-
     if (
-      siblings.filter((session) => session.parentSessionId === parentSessionId)
-        .length >= MAX_CHILD_SESSIONS
+      (await this.db.listChildSessions(parentSessionId)).length >=
+      MAX_CHILD_SESSIONS
     ) {
       throw new NakamaApiError(
         `This chat already started ${MAX_CHILD_SESSIONS} chats.`,
@@ -2645,9 +2648,11 @@ export class AgentService {
 
     const inherited = inheritFrom(parent, "child");
 
-    const childId = await this.createSession(
+    // Web even under a Telegram or Discord chat: no bot chat is bound to the
+    // child, so the user opens it from Recents.
+    return await this.createSession(
       orgId,
-      parseAgentChannel(inherited.channel) ?? "web",
+      "web",
       inherited.profileId,
       inherited.userId,
       {
@@ -2656,12 +2661,9 @@ export class AgentService {
         model: inherited.model,
         parentSessionId,
         thinkingEffort: inherited.thinkingEffort,
+        title,
       }
     );
-
-    await this.db.renameSessionTitle(childId, title);
-
-    return childId;
   }
 
   async assertSessionProfileAccess(
@@ -3223,13 +3225,8 @@ export class AgentService {
 
     // Chats sub_agent started here go with it, or Recents keeps them without
     // their parent. A branch has a parent too but stays: it is its own chat.
-    const sessions = record.userId
-      ? await this.db.listSessionsForUser(record.userId)
-      : await this.db.listSessions();
-
-    for (const child of sessions) {
+    for (const child of await this.db.listChildSessions(sessionId)) {
       if (
-        child.parentSessionId === sessionId &&
         sessionKind(child) === "child" &&
         !child.closedAt &&
         (await this.db.updateSessionClosedAt(child.id, closedAt))
@@ -6048,6 +6045,22 @@ export class AgentService {
 
       resolved = [...resolved, ...skillTools];
 
+      if (await this.skillsService.hasModelLoadableSkills(orgId, profile.id)) {
+        resolved = [
+          ...resolved,
+          createLoadSkillTool({
+            extraContext: (skill, context) =>
+              this.formatSkillHostContext(
+                profile,
+                skill.name,
+                context.codingWorkspaceRoot
+              ),
+            recordUsage: kind !== "cognito",
+            skillsService: this.skillsService,
+          }),
+        ];
+      }
+
       // Interactive web/cli only: messaging, automation, task, and subagent omit this.
       if (hasOwnTools && policy.skillManage) {
         const assignedSkills = await this.skillsService.listSkillsForProfile(
@@ -6135,6 +6148,20 @@ export class AgentService {
     await this.ensureVisionSettingsLoaded();
     const profile = await this.requireExecutionProfile(orgId, profileId);
 
+    const selectedModel = modelOverride
+      ? this.normalizeSessionModelOverride(modelOverride)
+      : profile.model;
+
+    // Netra limits come from a network lookup, so start it now and let it
+    // run while the tools, prompt, and history load.
+    const compactionLookup = this.resolveCompactionConfig(
+      profile,
+      selectedModel
+    );
+
+    // Keep a failure for the await below, not as an unhandled rejection.
+    compactionLookup.catch(() => undefined);
+
     // A stored CLI folder can be moved or deleted after the chat started.
     // Then the chat goes back to the profile workspace.
     const { codingWorkspaceRoot } = record;
@@ -6210,11 +6237,7 @@ export class AgentService {
     const userTimezone = await this.getUserTimezone();
     const userContext = await this.loadUserContextForUser(orgId, userId);
 
-    const selectedModel = modelOverride
-      ? this.normalizeSessionModelOverride(modelOverride)
-      : profile.model;
-
-    const compaction = this.resolveCompactionConfig(profile, selectedModel);
+    const compaction = await compactionLookup;
 
     const workspaceThinking = this.resolveWorkspaceThinkingDefaults();
 
@@ -6453,44 +6476,27 @@ export class AgentService {
           parts.push(imageMentionContext);
         }
 
-        if (this.skillsService && context?.userMessage?.trim()) {
-          const skillContext =
-            await this.skillsService.formatMatchedSkillsForPrompt(
-              orgId,
-              profileId,
-              context.userMessage,
-              {
-                appendContext: async (matched) => {
-                  const parts: string[] = [];
+        const explicitSkill =
+          this.skillsService && context?.userMessage?.trim()
+            ? await this.skillsService.findExplicitSkillForMessage(
+                orgId,
+                profileId,
+                context.userMessage,
+                !cognito
+              )
+            : null;
 
-                  if (
-                    profile.isSuper &&
-                    matched.some((skill) => skill.name === "create-profile")
-                  ) {
-                    parts.push(
-                      await this.formatProfileAuthoringToolContext(orgId)
-                    );
-                  }
+        if (explicitSkill) {
+          parts.push(composeLoadedSkillPrompt(explicitSkill));
 
-                  if (matched.some((skill) => skill.name === "coding-agent")) {
-                    parts.push(
-                      await this.formatCodingDelegationContext(
-                        orgId,
-                        profileId,
-                        codingRoot
-                      )
-                    );
-                  }
+          const hostContext = await this.formatSkillHostContext(
+            profile,
+            explicitSkill.name,
+            codingRoot
+          );
 
-                  return parts.filter(Boolean).join("\n\n");
-                },
-                recordUsage: !cognito,
-                usageContext: skillUsageContext,
-              }
-            );
-
-          if (skillContext.trim()) {
-            parts.push(skillContext.trim());
+          if (hostContext) {
+            parts.push(hostContext);
           }
         }
 
@@ -6518,6 +6524,33 @@ export class AgentService {
     });
 
     return persistedSession;
+  }
+
+  /** Live host facts that the create-profile and coding-agent skills need. */
+  private async formatSkillHostContext(
+    profile: StoredProfileRecord,
+    skillName: string,
+    codingWorkspaceRoot: string | undefined
+  ): Promise<string> {
+    const orgId = profile.orgId;
+
+    if (!orgId) {
+      return "";
+    }
+
+    if (profile.isSuper && skillName === "create-profile") {
+      return await this.formatProfileAuthoringToolContext(orgId);
+    }
+
+    if (skillName === "coding-agent") {
+      return await this.formatCodingDelegationContext(
+        orgId,
+        profile.id,
+        codingWorkspaceRoot
+      );
+    }
+
+    return "";
   }
 
   private async formatProfileAuthoringToolContext(
@@ -6862,10 +6895,10 @@ export class AgentService {
     throw new Error("No profile available for playground execution.");
   }
 
-  private resolveCompactionConfig(
+  private async resolveCompactionConfig(
     profile: StoredProfileRecord,
     selectedModel: string | null = profile.model
-  ): CompactionConfig | undefined {
+  ): Promise<CompactionConfig | undefined> {
     // An ACP agent cannot write the summary that compaction asks a provider for.
     if (profile.acpAgent) {
       return;
@@ -6881,11 +6914,35 @@ export class AgentService {
       return;
     }
 
-    return resolveModelLimits(
-      resolved.instance.type,
-      resolved.model,
-      resolved.instance.customModels
+    const { instance, model } = resolved;
+
+    const limits = resolveModelLimits(
+      instance.type,
+      model,
+      instance.customModels
     );
+
+    if (instance.type !== "netra") {
+      return limits;
+    }
+
+    // Netra is not in the static catalog. A limit saved on the model wins,
+    // then the one Netra reports, so compaction matches the real window.
+    const saved = findCustomModel(instance.customModels, model);
+
+    const reported = await fetchNetraModelLimits(
+      readApiKeyForInstance(instance, process.env) ?? "",
+      model
+    );
+
+    return {
+      contextWindow:
+        saved?.contextWindow ?? reported.contextWindow ?? limits.contextWindow,
+      maxOutputTokens:
+        saved?.maxOutputTokens ??
+        reported.maxOutputTokens ??
+        NETRA_MAX_OUTPUT_TOKENS,
+    };
   }
 
   private resolveWorkspaceThinkingDefaults(): ThinkingSettings {
