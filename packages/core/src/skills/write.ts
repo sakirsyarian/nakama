@@ -7,6 +7,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import path from "node:path";
+import { NakamaApiError } from "../api-error";
 import { pathExists } from "../fs";
 import {
   comparablePath,
@@ -24,6 +25,7 @@ import {
   SKILL_TOOL_FILES,
 } from "./paths";
 import { getSkillPythonEnvDir } from "./python-env";
+import type { ParsedSkillFile } from "./types";
 
 const bundledSkillNames = new Set<string>(BUNDLED_SKILL_NAMES);
 
@@ -450,7 +452,11 @@ export async function writeRawProfileSkillMarkdown(options: {
   };
 }
 
-export async function patchSkillFile(options: {
+/**
+ * Checks a patch against the current SKILL.md without writing it: old_string must
+ * match exactly once and the result must parse and keep the skill name.
+ */
+export async function prepareSkillPatch(options: {
   orgId: string;
   profileId: string;
   name: string;
@@ -458,11 +464,13 @@ export async function patchSkillFile(options: {
   newString: string;
 }): Promise<{
   directory: string;
-  name: string;
-  description: string;
+  existing: string;
+  next: string;
+  parsed: ParsedSkillFile;
+  skillFilePath: string;
 }> {
   if (!options.oldString) {
-    throw new Error("old_string is required for patch.");
+    throw new NakamaApiError("old_string is required for patch.", 400);
   }
 
   const directory = resolveProfileSkillDirectory(
@@ -473,34 +481,63 @@ export async function patchSkillFile(options: {
 
   // resolveProfileSkillDirectory already assertValidSkillName + assertNotBundledSkillName
   // and keeps the directory inside the profile skills root; SKILL.md under it cannot escape.
-  const expectedName = options.name.trim().toLowerCase();
   const skillFilePath = path.join(directory, SKILL_FILE_NAME);
 
   if (!(await pathExists(skillFilePath))) {
-    throw new Error(`Skill "${options.name}" not found.`);
+    throw new NakamaApiError(`Skill "${options.name}" not found.`, 404);
   }
 
   const existing = await readFile(skillFilePath, "utf8");
-  const occurrences = existing.split(options.oldString).length - 1;
+  const parts = existing.split(options.oldString);
 
-  if (occurrences === 0) {
-    throw new Error("old_string not found in SKILL.md.");
+  if (parts.length === 1) {
+    throw new NakamaApiError("old_string not found in SKILL.md.", 409);
   }
 
-  if (occurrences > 1) {
-    throw new Error(
-      "old_string matched multiple times in SKILL.md; make the match unique."
+  if (parts.length > 2) {
+    throw new NakamaApiError(
+      "old_string matched multiple times in SKILL.md; make the match unique.",
+      409
     );
   }
 
-  const next = existing.replace(options.oldString, options.newString);
-  const parsed = parseSkillMarkdown(next, skillFilePath);
+  // join, not String.replace: replace reads `$&`, `$$`, etc. in new_string as patterns.
+  const next = parts.join(options.newString);
+  let parsed: ParsedSkillFile;
 
-  if (parsed.frontmatter.name !== expectedName) {
-    throw new Error(
-      "patch cannot rename a skill via frontmatter; create a new skill instead."
+  try {
+    parsed = parseSkillMarkdown(next, skillFilePath);
+  } catch (error) {
+    throw new NakamaApiError(
+      error instanceof Error ? error.message : String(error),
+      400
     );
   }
+
+  if (parsed.frontmatter.name !== options.name.trim().toLowerCase()) {
+    throw new NakamaApiError(
+      "patch cannot rename a skill via frontmatter; create a new skill instead.",
+      400
+    );
+  }
+
+  return { directory, existing, next, parsed, skillFilePath };
+}
+
+export async function patchSkillFile(options: {
+  orgId: string;
+  profileId: string;
+  name: string;
+  oldString: string;
+  newString: string;
+}): Promise<{
+  directory: string;
+  name: string;
+  description: string;
+  previousContent: string;
+}> {
+  const { directory, existing, next, parsed, skillFilePath } =
+    await prepareSkillPatch(options);
 
   await writeFile(
     skillFilePath,
@@ -512,6 +549,7 @@ export async function patchSkillFile(options: {
     description: parsed.frontmatter.description,
     directory,
     name: parsed.frontmatter.name,
+    previousContent: existing,
   };
 }
 

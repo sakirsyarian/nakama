@@ -450,6 +450,256 @@ describe("ComposioService", () => {
       restore();
     }
   });
+  test("a refused connected account is marked for reconnection and the other apps keep working", async () => {
+    const { db, service, restore } = await createConfiguredService();
+
+    try {
+      const now = "2026-01-01T00:00:00.000Z";
+      await seedOrgWithAdmin(db);
+
+      const profileId = "profile_stale";
+      await db.upsertProfile({
+        createdAt: now,
+        id: profileId,
+        isDefault: false,
+        isSuper: false,
+        model: null,
+        name: "Agent",
+        orgId: ORG_ID,
+        systemPrompt: "",
+        updatedAt: now,
+      });
+
+      const sessionCalls: Array<Record<string, string>> = [];
+      const refused = new Set(["ca_old_gmail"]);
+
+      injectMockComposioClient(service, {
+        async createProfileSession(_userId, _slugs, _actions, accounts = {}) {
+          sessionCalls.push(accounts);
+          const stale = Object.values(accounts).filter((id) => refused.has(id));
+
+          if (stale.length > 0) {
+            const details = {
+              code: 4306,
+              message: `Could not find connected account(s) ${stale.join(", ")} belonging to user "nakama:user:${USER_ID}".`,
+              slug: "ToolRouterV2_InvalidConnectedAccountIds",
+            };
+
+            throw Object.assign(
+              new Error(`400 ${JSON.stringify({ error: details })}`),
+              { details, status: 400 }
+            );
+          }
+
+          return { sessionId: "sess_ok", url: "https://mcp.example.com/ok" };
+        },
+        async listCatalogToolkits() {
+          return ["gmail", "notion"].map((slug) => ({
+            description: slug,
+            logoUrl: null,
+            name: slug,
+            slug,
+          }));
+        },
+      });
+
+      const assignments = [];
+
+      for (const [slug, accountId] of [
+        ["gmail", "ca_old_gmail"],
+        ["notion", "ca_notion"],
+      ] as const) {
+        const toolkit = await service.enableToolkit(ORG_ID, {
+          toolkitSlug: slug,
+        });
+
+        assignments.push({
+          allowedActions: null,
+          profileId,
+          toolkitId: toolkit.id,
+        });
+        await db.upsertComposioUserConnection({
+          connectedAccountId: accountId,
+          createdAt: now,
+          id: `connection_${slug}`,
+          lastError: null,
+          oauthStateHash: null,
+          orgId: ORG_ID,
+          sessionIdEnc: null,
+          status: "connected",
+          toolkitId: toolkit.id,
+          updatedAt: now,
+          userId: USER_ID,
+        });
+      }
+
+      await db.replaceProfileComposioToolkits(profileId, assignments);
+
+      const endpoint = await service.getProfileSessionEndpoint(
+        ORG_ID,
+        USER_ID,
+        profileId
+      );
+
+      expect(endpoint?.sessionId).toBe("sess_ok");
+      expect(sessionCalls).toEqual([
+        { gmail: "ca_old_gmail", notion: "ca_notion" },
+        { notion: "ca_notion" },
+      ]);
+
+      const records = await service.getAssignedToolkitRecords(
+        ORG_ID,
+        USER_ID,
+        profileId
+      );
+
+      const bySlug = new Map(
+        records.map((record) => [
+          record.orgToolkit.toolkitSlug,
+          record.userConnection,
+        ])
+      );
+
+      expect(bySlug.get("gmail")).toMatchObject({
+        lastError: expect.stringContaining("Connect the app again"),
+        status: "error",
+      });
+      expect(bySlug.get("notion")?.status).toBe("connected");
+
+      // With every account refused there is no session, and no error. A new
+      // account id changes the cached session's fingerprint.
+      const notion = await db.getComposioUserConnection(
+        USER_ID,
+        assignments[1]!.toolkitId
+      );
+
+      await db.upsertComposioUserConnection({
+        ...notion!,
+        connectedAccountId: "ca_notion_v2",
+      });
+      refused.add("ca_notion_v2");
+
+      expect(
+        await service.getProfileSessionEndpoint(ORG_ID, USER_ID, profileId)
+      ).toBeNull();
+    } finally {
+      restore();
+    }
+  });
+
+  test("an account connected again while Composio answers is kept, and the failure reaches the prompt", async () => {
+    const { db, service, restore } = await createConfiguredService();
+
+    try {
+      const now = "2026-01-01T00:00:00.000Z";
+      await seedOrgWithAdmin(db);
+
+      const profileId = "profile_race";
+      await db.upsertProfile({
+        createdAt: now,
+        id: profileId,
+        isDefault: false,
+        isSuper: false,
+        model: null,
+        name: "Agent",
+        orgId: ORG_ID,
+        systemPrompt: "",
+        updatedAt: now,
+      });
+
+      const connection = {
+        connectedAccountId: "ca_old_gmail",
+        createdAt: now,
+        id: "connection_gmail",
+        lastError: null,
+        oauthStateHash: null,
+        orgId: ORG_ID,
+        sessionIdEnc: null,
+        status: "connected" as const,
+        toolkitId: "",
+        updatedAt: now,
+        userId: USER_ID,
+      };
+
+      injectMockComposioClient(service, {
+        async createProfileSession(_userId, _slugs, _actions, accounts = {}) {
+          if (accounts.gmail !== "ca_old_gmail") {
+            return { sessionId: "sess_ok", url: "https://mcp.example.com/ok" };
+          }
+
+          // The user finishes OAuth again before Composio answers.
+          await db.upsertComposioUserConnection({
+            ...connection,
+            connectedAccountId: "ca_new_gmail",
+          });
+
+          const details = {
+            code: 4306,
+            message: "Could not find connected account(s) ca_old_gmail.",
+            slug: "ToolRouterV2_InvalidConnectedAccountIds",
+          };
+
+          throw Object.assign(
+            new Error(`400 ${JSON.stringify({ error: details })}`),
+            { details, status: 400 }
+          );
+        },
+        async listCatalogToolkits() {
+          return [
+            {
+              description: "gmail",
+              logoUrl: null,
+              name: "gmail",
+              slug: "gmail",
+            },
+          ];
+        },
+      });
+
+      const toolkit = await service.enableToolkit(ORG_ID, {
+        toolkitSlug: "gmail",
+      });
+
+      connection.toolkitId = toolkit.id;
+      await db.upsertComposioUserConnection(connection);
+      await db.replaceProfileComposioToolkits(profileId, [
+        { allowedActions: null, profileId, toolkitId: toolkit.id },
+      ]);
+
+      await expect(
+        service.getProfileSessionEndpoint(ORG_ID, USER_ID, profileId)
+      ).rejects.toThrow();
+
+      expect(
+        await db.getComposioUserConnection(USER_ID, toolkit.id)
+      ).toMatchObject({
+        connectedAccountId: "ca_new_gmail",
+        status: "connected",
+      });
+      expect(
+        await service.formatProfileConnectionsContext(
+          ORG_ID,
+          USER_ID,
+          profileId
+        )
+      ).toContain("ToolRouterV2_InvalidConnectedAccountIds");
+
+      expect(
+        (await service.getProfileSessionEndpoint(ORG_ID, USER_ID, profileId))
+          ?.sessionId
+      ).toBe("sess_ok");
+      expect(
+        await service.formatProfileConnectionsContext(
+          ORG_ID,
+          USER_ID,
+          profileId
+        )
+      ).not.toContain("ToolRouterV2_InvalidConnectedAccountIds");
+    } finally {
+      restore();
+    }
+  });
+
   test("shared profiles reject integration assignments and default auto-assignment after revocation", async () => {
     const { db, service, restore } = await createConfiguredService();
 
@@ -631,6 +881,46 @@ describe("ComposioService", () => {
         []
       );
       expect(toolkit.status).toBe("enabled");
+    } finally {
+      restore();
+    }
+  });
+
+  test("revision changes when toolkits or agent assignments change", async () => {
+    const { db, service, restore } = await createConfiguredService();
+
+    try {
+      await db.upsertProfile({
+        createdAt: new Date().toISOString(),
+        id: "profile_default",
+        isDefault: true,
+        isSuper: false,
+        model: null,
+        name: "Default",
+        orgId: ORG_ID,
+        systemPrompt: "",
+        updatedAt: new Date().toISOString(),
+      });
+
+      const seen = [service.revisionFor(ORG_ID)];
+
+      const toolkit = await service.enableToolkit(ORG_ID, {
+        toolkitSlug: "gmail",
+      });
+
+      seen.push(service.revisionFor(ORG_ID));
+
+      const profile = await db.getProfile("profile_default");
+      await service.updateProfileAssignments(ORG_ID, profile!, {
+        assignments: [{ toolkitId: toolkit.id }],
+      });
+      seen.push(service.revisionFor(ORG_ID));
+
+      await service.disableToolkit(ORG_ID, "gmail");
+      seen.push(service.revisionFor(ORG_ID));
+
+      expect(new Set(seen).size).toBe(seen.length);
+      expect(service.revisionFor("org_other")).toBe(seen[0]);
     } finally {
       restore();
     }

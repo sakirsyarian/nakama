@@ -70,7 +70,7 @@ Hit a bug that has no issue? Open one with the [issue templates](https://github.
 
 ### Before you start building
 
-Four questions. Any answer of no is worth raising in the issue first, where it
+Five questions. Any answer of no is worth raising in the issue first, where it
 costs nothing.
 
 1. Is the issue's `stage:` label `now`? The table above says what the other two
@@ -82,6 +82,10 @@ costs nothing.
    not see the same filesystem.
 4. Does the new abstraction have more than one caller today? A cache, a dedupe, a
    guard or a factory with a single call site gets deleted in review.
+5. Does it keep Nakama lean? The ceiling is 512 MB of RAM. If every install pays for
+   the change even when nobody uses it (a new process, worker, poller, browser or
+   heavy dependency), put a before and after RSS in the PR, or make it a plugin, a
+   skill or an MCP server. Bug and security fixes are not blocked by this.
 
 ## Workflow
 
@@ -94,6 +98,23 @@ issue number too, not just the issue:
 ```bash
 gh pr list --repo ahmadrosid/nakama --search "<issue-number>"
 ```
+
+**Who goes first.** The first claim on an issue holds it, counted from the comment,
+even if the assignment comes later. Say what you plan to change, so the direction is
+agreed before you build. Claimed work gets reviewed first.
+
+- No reply after 2 days on a `stage: now` issue: you may start, and say so on the issue.
+  On `stage: next` or `stage: later`, keep waiting, since the direction is still open.
+- A PR with no claim is not closed, but it waits behind claimed work until the direction
+  is agreed on the issue.
+- If someone claimed first, they are asked whether they have started. If they have not, or
+  give no answer in 3 days, the PR goes ahead and they are offered another issue.
+
+Maintainers and reviewers are not always available. A late reply only means nobody has
+seen it yet, and it does not change your place in the queue.
+
+These steps do not apply to maintainers, or to someone fixing an issue they filed
+themselves. That PR can still be declined if the direction is wrong.
 
 1. Branch from `main` (or fork, then branch). Without write access, fork first:
 

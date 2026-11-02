@@ -23,6 +23,7 @@ import type {
   AssignSkillRequest,
   AssignToolRequest,
   AutomationDeliveryChannel,
+  AutomationToolLimit,
   BranchSessionResponse,
   ChatContextUsage,
   ChatgptOAuthCredentials,
@@ -85,6 +86,7 @@ import type {
   SoulStackResponse,
   SoulStatusResponse,
   StartTelegramPairingRequest,
+  StoredAutomation,
   SuggestToolParamsResponse,
   SyncSkillsResponse,
   TelegramAccessRequestsResponse,
@@ -469,24 +471,8 @@ const SHARED_HISTORY_CHANNELS: readonly AgentChannel[] = [
   "whatsapp",
 ];
 
-/**
- * Any other chat belongs to the user who started it. Platform admins may open
- * any chat for support; everyone else gets the same 404 as a missing session,
- * so holding another user's session id reveals nothing.
- */
-function assertSessionOwner(
-  record: StoredSessionRecord,
-  access: ChatProfileAccess
-): void {
-  if (
-    access.isPlatformAdmin ||
-    SHARED_HISTORY_CHANNELS.some((channel) => channel === record.channel) ||
-    (access.user && record.userId === access.user.id)
-  ) {
-    return;
-  }
-
-  throw new NakamaApiError("Session not found", 404);
+function isSharedHistory(record: StoredSessionRecord): boolean {
+  return SHARED_HISTORY_CHANNELS.some((channel) => channel === record.channel);
 }
 
 export class AgentService {
@@ -534,6 +520,7 @@ export class AgentService {
       JSON.stringify([
         await this.capabilityRevisionForProfile(orgId, profileId),
         await this.pluginCapabilityRevision(orgId),
+        this.composioService?.revisionFor(orgId) ?? "",
       ]),
   });
   readonly turns = new TurnRunner({
@@ -793,10 +780,13 @@ export class AgentService {
           });
         }
       } catch (error) {
-        console.error(
-          "Failed to record post-turn skill review outcome:",
-          error
-        );
+        // A 4xx means the outcome was refused (e.g. old_string no longer matches), not a failure.
+        if (!(error instanceof NakamaApiError && error.status < 500)) {
+          console.error(
+            "Failed to record post-turn skill review outcome:",
+            error
+          );
+        }
       }
 
       return outcome;
@@ -2003,11 +1993,18 @@ export class AgentService {
     automationRunId?: string,
     handlers?: Parameters<AgentChatSession["sendStream"]>[1],
     resume = false,
-    deliveryChannel?: AutomationDeliveryChannel
+    deliveryChannel?: AutomationDeliveryChannel,
+    run: Pick<StoredAutomation, "runAsUserId" | "toolLimit"> = {}
   ): Promise<string> {
     if (!this._providerConfigured) {
       throw new Error("Provider is not configured.");
     }
+
+    // A person who left the org no longer lends their Composio sign-ins.
+    const userId =
+      run.runAsUserId && (await this.db.getOrgMember(orgId, run.runAsUserId))
+        ? run.runAsUserId
+        : undefined;
 
     const savedSteps = automationRunId
       ? await this.db.listAutomationRunSteps(automationRunId)
@@ -2036,6 +2033,8 @@ export class AgentService {
         },
         orgId,
         profileId,
+        toolLimit: run.toolLimit,
+        userId,
       }
     );
 
@@ -2120,6 +2119,7 @@ export class AgentService {
       orgId: string;
       orgRole?: OrgRole | null;
       profileId: string;
+      toolLimit?: AutomationToolLimit;
       userId?: string | null;
     }
   ): Promise<{
@@ -2134,7 +2134,10 @@ export class AgentService {
 
     const tools = policy.tools
       ? [
-          ...(await this.resolveProfileTools(profile, kind, { userId })),
+          ...(await this.resolveProfileTools(profile, kind, {
+            toolLimit: input.toolLimit,
+            userId,
+          })),
           ...(input.extraTools ?? []),
         ]
       : [];
@@ -2636,15 +2639,7 @@ export class AgentService {
       );
     }
 
-    if (
-      (await this.db.listChildSessions(parentSessionId)).length >=
-      MAX_CHILD_SESSIONS
-    ) {
-      throw new NakamaApiError(
-        `This chat already started ${MAX_CHILD_SESSIONS} chats.`,
-        400
-      );
-    }
+    await this.assertChildSessionRoom(parentSessionId);
 
     const inherited = inheritFrom(parent, "child");
 
@@ -2666,6 +2661,61 @@ export class AgentService {
     );
   }
 
+  /**
+   * Branches and closed chats do not count: the cap is on open sub_agent
+   * chats, so a closed one must also fit before it opens again.
+   */
+  private async assertChildSessionRoom(parentSessionId: string): Promise<void> {
+    const openChildren = (
+      await this.db.listChildSessions(parentSessionId)
+    ).filter((child) => sessionKind(child) === "child" && !child.closedAt);
+
+    if (openChildren.length >= MAX_CHILD_SESSIONS) {
+      throw new NakamaApiError(
+        `This chat already has ${MAX_CHILD_SESSIONS} open chats.`,
+        400
+      );
+    }
+  }
+
+  /**
+   * Any other chat belongs to the user who started it. A chat that sub_agent
+   * started under a shared chat is shared too, though it is a web chat.
+   * Platform admins may open any chat for support; everyone else gets the
+   * same 404 as a missing session, so holding another user's session id
+   * reveals nothing.
+   */
+  private async assertSessionOwner(
+    record: StoredSessionRecord,
+    access: ChatProfileAccess
+  ): Promise<void> {
+    if (
+      access.isPlatformAdmin ||
+      isSharedHistory(record) ||
+      (access.user && record.userId === access.user.id)
+    ) {
+      return;
+    }
+
+    if (await this.isChildOfSharedChat(record)) {
+      return;
+    }
+
+    throw new NakamaApiError("Session not found", 404);
+  }
+
+  /** The caller already scoped `record` to the org; its parent is in it too. */
+  private async isChildOfSharedChat(
+    record: StoredSessionRecord
+  ): Promise<boolean> {
+    const parent =
+      record.parentSessionId && sessionKind(record) === "child"
+        ? await this.db.getSession(record.parentSessionId)
+        : null;
+
+    return parent !== null && isSharedHistory(parent);
+  }
+
   async assertSessionProfileAccess(
     sessionId: string,
     orgId: string,
@@ -2680,7 +2730,7 @@ export class AgentService {
         await this.requireProfile(orgId, record.profileId),
         access
       );
-      assertSessionOwner(record, access);
+      await this.assertSessionOwner(record, access);
 
       // Only the local CLI can set this folder, so only it can run tools there.
       if (options.localClient === false && record.codingWorkspaceRoot) {
@@ -2720,7 +2770,7 @@ export class AgentService {
       return null;
     }
 
-    assertSessionOwner(sessionRecord, access);
+    await this.assertSessionOwner(sessionRecord, access);
 
     return createAttachmentLoader(this.db, {
       orgId,
@@ -2909,10 +2959,15 @@ export class AgentService {
     };
   }
 
+  /**
+   * A branch belongs to the user who made it, so it shows in their Recents
+   * even when the chat it came from belongs to someone else.
+   */
   async branchSession(
     sessionId: string,
     messageIndex: number,
-    orgId: string
+    orgId: string,
+    userId?: string
   ): Promise<BranchSessionResponse | null> {
     const record = await this.getSessionRecordForOrg(sessionId, orgId);
 
@@ -2949,6 +3004,7 @@ export class AgentService {
       id: nextSessionId,
       parentSessionId: sessionId,
       title: null,
+      userId: userId ?? record.userId ?? null,
     };
 
     await this.db.upsertSession(branchRecord);
@@ -3079,6 +3135,15 @@ export class AgentService {
       return true;
     }
 
+    // Chats sub_agent started here go with it, as on close. Left behind, they
+    // lose their parent and with it the sharing a shared parent gives them.
+    // A branch stays: it is its own chat.
+    for (const child of await this.db.listChildSessions(sessionId)) {
+      if (sessionKind(child) === "child") {
+        await this.purgeSession(child.id, orgId);
+      }
+    }
+
     discardInFlightSessionWrites(sessionId);
     await this.sessions.end(sessionId);
     this.superNakamaSessionState.clearSession(sessionId);
@@ -3204,11 +3269,14 @@ export class AgentService {
 
     // Everyone on the agent can read a messaging-app chat, but stopping its
     // turn hits the person who started it, so closing needs the owner or an admin.
+    // A sub_agent chat under it is a web chat in every member's Recents, so
+    // any member may close that one.
     if (
       !(
         access.isPlatformAdmin ||
         access.orgRole === "admin" ||
-        (access.user && record.userId === access.user.id)
+        (access.user && record.userId === access.user.id) ||
+        (await this.isChildOfSharedChat(record))
       )
     ) {
       throw new NakamaApiError("Session not found", 404);
@@ -3269,7 +3337,19 @@ export class AgentService {
   async detachSession(sessionId: string, orgId: string): Promise<boolean> {
     const record = await this.getSessionRecordForOrg(sessionId, orgId);
 
-    return record ? this.db.updateSessionParent(sessionId, null) : false;
+    if (!record) {
+      return false;
+    }
+
+    // Its parent is what shares it; without one, members lose it.
+    if (await this.isChildOfSharedChat(record)) {
+      throw new NakamaApiError(
+        "A chat started from a shared chat cannot leave it.",
+        400
+      );
+    }
+
+    return this.db.updateSessionParent(sessionId, null);
   }
 
   async setSessionOrder(
@@ -3306,6 +3386,10 @@ export class AgentService {
     orgId: string
   ): Promise<void> {
     if (record.closedAt) {
+      if (record.parentSessionId && sessionKind(record) === "child") {
+        await this.assertChildSessionRoom(record.parentSessionId);
+      }
+
       await this.db.updateSessionClosedAt(record.id, null);
     }
 
@@ -5718,6 +5802,8 @@ export class AgentService {
       actorRole?: "admin" | "member" | null;
       /** A session's channel; it decides skill_manage for chats. */
       channel?: AgentChannel;
+      /** An automation's limit; only the listed items stay. */
+      toolLimit?: AutomationToolLimit;
       userId?: string | null;
     } = {}
   ): Promise<ToolDefinition[]> {
@@ -5727,12 +5813,15 @@ export class AgentService {
       return [];
     }
 
+    const limit = options.toolLimit;
+
     const shared = profile.orgId
       ? await this.resolveSharedAgentProfile(profile.orgId, profile.id)
       : null;
 
-    const storedTools =
-      shared?.assignedTools ?? (await this.db.listToolsForProfile(profile.id));
+    const storedTools = (
+      shared?.assignedTools ?? (await this.db.listToolsForProfile(profile.id))
+    ).filter((record) => !limit || limit.toolIds.includes(record.id));
 
     const publishedTools = profile.orgId
       ? await this.publishedToolRevisionForRecords(profile.orgId, storedTools)
@@ -5876,9 +5965,10 @@ export class AgentService {
     let resolved = [...tools];
 
     if (this.mcpService) {
-      const mcpServers =
+      const mcpServers = (
         shared?.assignedMcpServers ??
-        (await this.db.listMcpServersForProfile(profile.id));
+        (await this.db.listMcpServersForProfile(profile.id))
+      ).filter((server) => !limit || limit.mcpServerIds.includes(server.id));
 
       const orgId = profile.orgId;
 
@@ -5994,19 +6084,44 @@ export class AgentService {
         throw new Error("Profile organization is missing.");
       }
 
+      const composio = this.composioService;
+
+      const composioService = {
+        connectToolkit: composio.connectToolkit.bind(composio),
+        getAssignedToolkitRecords: async (
+          ...args: Parameters<typeof composio.getAssignedToolkitRecords>
+        ) =>
+          (await composio.getAssignedToolkitRecords(...args)).filter(
+            ({ orgToolkit }) =>
+              !limit ||
+              limit.composioToolkits.includes(
+                orgToolkit.toolkitSlug.toLowerCase()
+              )
+          ),
+        getProfileSessionEndpoint:
+          composio.getProfileSessionEndpoint.bind(composio),
+        isAvailable: composio.isAvailable.bind(composio),
+      };
+
       resolved = [
         ...resolved,
         ...(await buildComposioConnectTools(
           orgId,
           options.userId,
           profile.id,
-          this.composioService
+          composioService,
+          {
+            // The web tool is always offered, so a profile with no tools of
+            // its own keeps the assigned-only tool and stays tool-free.
+            channel:
+              limit || resolved.length === 0 ? undefined : options.channel,
+          }
         )),
         ...(await buildComposioToolDefinitions(
           orgId,
           options.userId,
           profile.id,
-          this.composioService,
+          composioService,
           this.mcpClientManager
         )),
       ];
@@ -6038,10 +6153,11 @@ export class AgentService {
         throw new Error("Profile organization is missing.");
       }
 
-      const skillTools = await this.skillsService.loadToolsForProfile(
-        orgId,
-        profile.id
-      );
+      // A limit lists only tools, MCP servers, and connectors, so it leaves
+      // out skill tools.
+      const skillTools = limit
+        ? []
+        : await this.skillsService.loadToolsForProfile(orgId, profile.id);
 
       resolved = [...resolved, ...skillTools];
 
@@ -6084,7 +6200,9 @@ export class AgentService {
       }
     }
 
-    if (profile.isSuper) {
+    // Super Nakama and org memory tools are not in the picker, so a limit
+    // leaves them out too.
+    if (!limit && profile.isSuper) {
       resolved = [
         ...resolved,
         ...this.superNakamaTools.filter(
@@ -6093,6 +6211,7 @@ export class AgentService {
         ),
       ];
     } else if (
+      !limit &&
       this.skillsService &&
       (await this.skillsService.listSkillsForProfile(profile.id)).some(
         (skill) => skill.name === "create-plugin"
@@ -6107,7 +6226,7 @@ export class AgentService {
       ];
     }
 
-    if (hasOwnTools) {
+    if (hasOwnTools && !limit) {
       resolved = [...resolved, ...this.orgMemoryTools];
     }
 
@@ -6117,7 +6236,8 @@ export class AgentService {
       );
     }
 
-    if (!policy.subAgent) {
+    // A sub-agent resolves the agent's full set, so a limit turns it off.
+    if (!policy.subAgent || limit) {
       resolved = resolved.filter((tool) => tool.name !== SUB_AGENT_TOOL_NAME);
     }
 

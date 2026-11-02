@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   extractComposioListItems,
+  findRejectedConnectedAccountIds,
   listAllCatalogToolkits,
   parseCatalogToolkitItem,
   parseLinkRedirectUrl,
@@ -248,5 +249,82 @@ describe("parseSessionToolItems", () => {
         slug: "GMAIL_SEND_EMAIL",
       },
     ]);
+  });
+});
+
+describe("findRejectedConnectedAccountIds", () => {
+  const refusal = {
+    code: 4306,
+    message:
+      'Could not find connected account(s) ca_old, ca__dash-1 belonging to user "nakama:user:user_admin".',
+    slug: "ToolRouterV2_InvalidConnectedAccountIds",
+    status: 400,
+  };
+
+  test("returns the refused ids named by Composio", () => {
+    const error = Object.assign(
+      new Error(`400 ${JSON.stringify({ error: refusal })}`),
+      { details: refusal, status: 400 }
+    );
+
+    expect(
+      findRejectedConnectedAccountIds(error, ["ca_old", "ca__dash-1", "ca_ok"])
+    ).toEqual(["ca_old", "ca__dash-1"]);
+  });
+
+  test("reads the refusal from the response body or the cause", () => {
+    const body = Object.assign(new Error("400 Bad Request"), {
+      error: { error: refusal },
+    });
+
+    expect(findRejectedConnectedAccountIds(body, ["ca_old", "ca_ok"])).toEqual([
+      "ca_old",
+    ]);
+
+    const wrapped = new Error("Composio session failed", { cause: body });
+
+    expect(findRejectedConnectedAccountIds(wrapped, ["ca_old"])).toEqual([
+      "ca_old",
+    ]);
+  });
+
+  test("returns the only requested id when the refusal names none", () => {
+    const error = Object.assign(new Error("400"), {
+      details: { code: 4306, message: "Invalid connected accounts" },
+    });
+
+    expect(findRejectedConnectedAccountIds(error, ["ca_a"])).toEqual(["ca_a"]);
+    expect(findRejectedConnectedAccountIds(error, ["ca_a", "ca_b"])).toEqual(
+      []
+    );
+  });
+
+  test("matches whole ids, in any id format", () => {
+    const uuid = "0b6f1c7e-3c1f-4f6e-9a8e-2d1b7c9f4a10";
+
+    const error = Object.assign(new Error("400"), {
+      details: {
+        code: 4306,
+        message: `Could not find connected account(s) ca_old_gmail, ${uuid}.`,
+      },
+    });
+
+    expect(
+      findRejectedConnectedAccountIds(error, ["ca_old", "ca_old_gmail", uuid])
+    ).toEqual(["ca_old_gmail", uuid]);
+  });
+
+  test("ignores other errors", () => {
+    expect(
+      findRejectedConnectedAccountIds(new Error("fetch failed"), ["ca_a"])
+    ).toBeNull();
+    expect(
+      findRejectedConnectedAccountIds(
+        Object.assign(new Error("401"), {
+          details: { code: 401, slug: "Unauthorized" },
+        }),
+        ["ca_a"]
+      )
+    ).toBeNull();
   });
 });

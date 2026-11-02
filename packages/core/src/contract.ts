@@ -45,6 +45,18 @@ export interface AutomationDelivery {
   to?: string;
 }
 
+/**
+ * What an automation run may use from its agent. Each list holds ids from the
+ * agent's own set; anything not listed, including what the agent gets later,
+ * is left out.
+ */
+export interface AutomationToolLimit {
+  /** Composio toolkit slugs, for example `gmail`. */
+  composioToolkits: string[];
+  mcpServerIds: string[];
+  toolIds: string[];
+}
+
 export interface AutomationDefinition {
   delivery?: AutomationDelivery;
   description: string;
@@ -52,6 +64,8 @@ export interface AutomationDefinition {
   name: string;
   prompt: string;
   steps: AutomationStep[];
+  /** No limit: the run gets every tool its agent has. */
+  toolLimit?: AutomationToolLimit;
   trigger: AutomationTrigger;
   version: number;
 }
@@ -64,6 +78,8 @@ export interface StoredAutomation extends AutomationDefinition {
   nextRunAt?: string | null;
   orgId?: string | null;
   profileId: string;
+  /** The last person who saved it; runs use their Composio sign-ins. */
+  runAsUserId?: string | null;
   updatedAt: string;
 }
 
@@ -470,6 +486,8 @@ export interface NakamaUpgradeResponse {
   status: {
     at: string;
     message: string;
+    /** Image layers, while the new version downloads. */
+    progress?: { done: number; total: number };
     state: "running" | "done" | "failed" | "rolled_back";
     version: string;
   } | null;
@@ -1369,6 +1387,7 @@ export interface CreateAutomationRequest {
   name: string;
   profileId?: string;
   prompt: string;
+  toolLimit?: AutomationToolLimit;
   trigger: AutomationTrigger;
 }
 
@@ -1379,6 +1398,8 @@ export interface UpdateAutomationRequest {
   name?: string;
   profileId?: string;
   prompt?: string;
+  /** null removes the limit. */
+  toolLimit?: AutomationToolLimit | null;
   trigger?: AutomationTrigger;
 }
 
@@ -2487,6 +2508,31 @@ export interface TestMcpServerResponse {
   requiresAuthorization?: boolean;
   toolCount: number;
   tools: CachedMcpToolSummary[];
+}
+
+export interface McpRegistryRemoteHeader {
+  description?: string;
+  isRequired?: boolean;
+  isSecret?: boolean;
+  name: string;
+  value?: string;
+}
+
+export interface McpRegistryRemote {
+  headers?: McpRegistryRemoteHeader[];
+  type: string;
+  url: string;
+}
+
+export interface McpRegistryServer {
+  description?: string;
+  name: string;
+  remotes: McpRegistryRemote[];
+  transport: string;
+}
+
+export interface McpRegistrySearchResponse {
+  servers: McpRegistryServer[];
 }
 
 export interface ToolSummary {

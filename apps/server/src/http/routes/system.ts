@@ -66,7 +66,7 @@ export const ARTIFACT_FRAME_CSP = [
   "default-src 'none'",
   "script-src 'unsafe-inline' https://cdnjs.cloudflare.com https://cdn.jsdelivr.net https://unpkg.com https://cdn.tailwindcss.com https://code.jquery.com",
   "style-src 'unsafe-inline' data: https://fonts.googleapis.com",
-  "font-src https://fonts.gstatic.com",
+  "font-src data: https://fonts.gstatic.com",
   "img-src data:",
   "media-src data:",
   "connect-src 'none'",
@@ -247,7 +247,7 @@ export function registerSystemRoutes(
       },
       502: {
         content: { "application/json": { schema: errorSchema } },
-        description: "GitHub releases unreachable",
+        description: "Latest version unreachable",
       },
     },
     summary: "Check for a newer Nakama release",

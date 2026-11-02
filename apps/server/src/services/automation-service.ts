@@ -1,6 +1,7 @@
 import type {
   AutomationDeliveryStatus,
   AutomationRunRecord,
+  AutomationToolLimit,
   AutomationTrigger,
   AutomationUnreadSummary,
   CreateAutomationRequest,
@@ -27,8 +28,13 @@ import { z } from "zod";
 
 const DeliveryStatusSchema = z.enum(["sent", "failed", "skipped"]).nullish();
 
-/** Caller role context used to gate access to admin-only profiles (e.g. Super Nakama). */
-export type ProfileAccess = Parameters<typeof canAccessSuperNakamaProfile>[0];
+/**
+ * Caller role context used to gate access to admin-only profiles (e.g. Super
+ * Nakama). `userId` is the person saving, whose Composio sign-ins runs use.
+ */
+export type ProfileAccess = Parameters<
+  typeof canAccessSuperNakamaProfile
+>[0] & { userId?: string | null };
 
 export interface AutomationServiceOptions {
   canSendEmail?: (profileId: string, orgId: string) => Promise<boolean>;
@@ -160,6 +166,7 @@ export class AutomationService {
       orgId,
       profileId,
       prompt: input.prompt.trim(),
+      runAsUserId: access?.userId ?? null,
       steps: [],
       trigger,
       updatedAt: now,
@@ -168,6 +175,10 @@ export class AutomationService {
 
     if (delivery) {
       automation.delivery = delivery;
+    }
+
+    if (input.toolLimit) {
+      automation.toolLimit = normalizeToolLimit(input.toolLimit);
     }
 
     const profile = await this.db.getProfile(profileId);
@@ -253,6 +264,25 @@ export class AutomationService {
       profileId,
     });
 
+    let toolLimit = existing.toolLimit;
+
+    if (input.toolLimit === null) {
+      toolLimit = undefined;
+    } else if (input.toolLimit !== undefined) {
+      toolLimit = normalizeToolLimit(input.toolLimit);
+    }
+
+    const prompt = input.prompt?.trim() || existing.prompt;
+
+    // Whoever changes what a run does lends their Composio sign-ins, so
+    // nobody can steer another person's accounts. A pause, rename, or new
+    // schedule keeps the current person. The runner saves with no access.
+    const steers =
+      prompt !== existing.prompt ||
+      profileId !== existing.profileId ||
+      JSON.stringify(delivery) !== JSON.stringify(existing.delivery) ||
+      JSON.stringify(toolLimit) !== JSON.stringify(existing.toolLimit);
+
     const updated: StoredAutomation = {
       ...existing,
       delivery,
@@ -260,7 +290,10 @@ export class AutomationService {
       enabled: input.enabled ?? existing.enabled,
       name: input.name?.trim() || existing.name,
       profileId,
-      prompt: input.prompt?.trim() || existing.prompt,
+      prompt,
+      runAsUserId:
+        access && steers ? (access.userId ?? null) : existing.runAsUserId,
+      toolLimit,
       trigger,
       updatedAt: new Date().toISOString(),
       version: existing.version + 1,
@@ -590,4 +623,18 @@ function toRunRecord(
   }
 
   return record;
+}
+
+function normalizeToolLimit(limit: AutomationToolLimit): AutomationToolLimit {
+  const clean = (ids: string[]) => [
+    ...new Set(ids.flatMap((id) => id.trim() || [])),
+  ];
+
+  return {
+    composioToolkits: clean(
+      limit.composioToolkits.map((slug) => slug.toLowerCase())
+    ),
+    mcpServerIds: clean(limit.mcpServerIds),
+    toolIds: clean(limit.toolIds),
+  };
 }

@@ -12,6 +12,7 @@ import type { SkillProposal } from "@nakama/core/contract";
 import {
   assertNotBundledSkillName,
   assertValidSkillName,
+  prepareSkillPatch,
 } from "@nakama/core/skills/write";
 import type {
   DatabaseAdapter,
@@ -431,6 +432,14 @@ export class SkillProposalService {
 
     this.assertPatchFieldSize(oldString);
     this.assertPatchFieldSize(newString);
+
+    await prepareSkillPatch({
+      name,
+      newString,
+      oldString,
+      orgId: input.orgId,
+      profileId: input.profileId,
+    });
 
     const db = this.requireDatabase();
 

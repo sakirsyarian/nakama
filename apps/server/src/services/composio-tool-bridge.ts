@@ -1,7 +1,9 @@
-import type {
-  ComposioToolErrorResult,
-  ToolContext,
-  ToolDefinition,
+import {
+  type AgentChannel,
+  COMPOSIO_TOOLKIT_SLUG_PATTERN,
+  type ComposioToolErrorResult,
+  type ToolContext,
+  type ToolDefinition,
 } from "@nakama/core";
 import { z } from "zod";
 import {
@@ -201,6 +203,79 @@ function truncateComposioToolResult(result: JsonValue): JsonValue {
   };
 }
 
+/**
+ * Web chat gets a Connect button, so the tool takes any app and the browser
+ * starts sign-in. Other channels get an OAuth link, so only assigned apps.
+ */
+function buildWebConnectTool(
+  assigned: Awaited<ReturnType<ComposioService["getAssignedToolkitRecords"]>>
+): ToolDefinition {
+  return {
+    description:
+      "Show the user a one-click Connect button for a Composio app (for example gmail, googlecalendar, googledrive, slack, notion, github). Use it when the user asks for their own data in an app you have no tools for. Any app can be connected, also one that is not assigned to you: call this tool instead of saying the app is not enabled. Pass the Composio toolkit slug.",
+    name: "composio__connect_account",
+    parameters: {
+      properties: {
+        toolkit_slug: {
+          description:
+            "Composio toolkit slug: lowercase, no spaces (for example googlecalendar, not google_calendar).",
+          type: "string",
+        },
+      },
+      required: ["toolkit_slug"],
+      type: "object",
+    },
+    run(input) {
+      const parsed = z
+        .object({
+          toolkit_slug: z
+            .string()
+            .trim()
+            .toLowerCase()
+            .regex(COMPOSIO_TOOLKIT_SLUG_PATTERN),
+        })
+        .safeParse(input);
+
+      if (!parsed.success) {
+        return Promise.resolve({
+          code: "COMPOSIO_POLICY",
+          error:
+            "toolkit_slug must be a Composio toolkit slug such as gmail or googlecalendar.",
+        } satisfies ComposioToolErrorResult);
+      }
+
+      const toolkitSlug = parsed.data.toolkit_slug;
+
+      const record = assigned.find(
+        ({ orgToolkit }) => orgToolkit.toolkitSlug === toolkitSlug
+      );
+
+      const displayName = record?.orgToolkit.displayName ?? toolkitSlug;
+
+      if (
+        record?.orgToolkit.status === "enabled" &&
+        record.userConnection?.status === "connected"
+      ) {
+        return Promise.resolve({
+          connected: true,
+          message: `${displayName} is already connected for this agent.`,
+          toolkitSlug,
+        });
+      }
+
+      return Promise.resolve({
+        displayName,
+        instructions:
+          "The chat shows the user a Connect button for this app. Tell them in one short line to click it, then send a message when done. Do not write a link.",
+        // The browser adds the app to the agent only for someone who manages it.
+        onAgent: Boolean(record),
+        toolkitSlug,
+        type: "composio_connect",
+      });
+    },
+  };
+}
+
 export async function buildComposioConnectTools(
   orgId: string,
   userId: string,
@@ -208,7 +283,8 @@ export async function buildComposioConnectTools(
   composioService: Pick<
     ComposioService,
     "isAvailable" | "getAssignedToolkitRecords" | "connectToolkit"
-  >
+  >,
+  options: { channel?: AgentChannel } = {}
 ): Promise<ToolDefinition[]> {
   if (!userId) {
     return [];
@@ -223,6 +299,10 @@ export async function buildComposioConnectTools(
     userId,
     profileId
   );
+
+  if (options.channel === "web") {
+    return [buildWebConnectTool(assigned)];
+  }
 
   const needsConnection = assigned.filter(
     ({ orgToolkit, userConnection }) =>
@@ -318,6 +398,22 @@ export async function buildComposioConnectTools(
   ];
 }
 
+type AssignedToolkitRecord = Awaited<
+  ReturnType<ComposioService["getAssignedToolkitRecords"]>
+>[number];
+
+/** Assignments the agent can use now: enabled, connected and with tools. */
+function connectedWithTools(
+  assigned: AssignedToolkitRecord[]
+): AssignedToolkitRecord[] {
+  return assigned.filter(
+    ({ orgToolkit, userConnection }) =>
+      orgToolkit.status === "enabled" &&
+      userConnection?.status === "connected" &&
+      orgToolkit.cachedTools.length > 0
+  );
+}
+
 export async function buildComposioToolDefinitions(
   orgId: string,
   userId: string,
@@ -346,30 +442,42 @@ export async function buildComposioToolDefinitions(
     return [];
   }
 
-  const connectedAssignments = assigned.filter(
-    ({ orgToolkit, userConnection }) =>
-      orgToolkit.status === "enabled" &&
-      userConnection?.status === "connected" &&
-      orgToolkit.cachedTools.length > 0
-  );
-
-  if (connectedAssignments.length === 0) {
-    return [];
-  }
-
-  const session = await composioService.getProfileSessionEndpoint(
-    orgId,
-    userId,
-    profileId
-  );
-
-  if (!session) {
+  if (connectedWithTools(assigned).length === 0) {
     return [];
   }
 
   const connectionKey = composioConnectionKey(orgId, userId, profileId);
 
+  let session: Awaited<
+    ReturnType<ComposioService["getProfileSessionEndpoint"]>
+  >;
+
+  // Composio is an add-on: when it cannot open a session, the turn runs
+  // without its tools instead of failing. The service keeps the reason, and
+  // the system prompt tells the agent.
+  try {
+    session = await composioService.getProfileSessionEndpoint(
+      orgId,
+      userId,
+      profileId
+    );
+  } catch (error) {
+    console.error("Composio tools are unavailable for this turn:", error);
+
+    return [];
+  }
+
+  if (!session) {
+    return [];
+  }
+
   await ensureComposioMcpConnection(mcpClientManager, connectionKey, session);
+
+  // Opening the session can mark refused accounts as needing reconnection,
+  // so read the assignments again before offering their actions.
+  const connectedAssignments = connectedWithTools(
+    await composioService.getAssignedToolkitRecords(orgId, userId, profileId)
+  );
 
   const searchableActions = buildSearchableActions(connectedAssignments);
 
