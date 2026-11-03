@@ -1245,6 +1245,102 @@ describe("OrgService", () => {
     });
   });
 
+  // The service checks are read-then-write, so each pair can pass them
+  // together. The disable statement must refuse whichever write lands second.
+  const racingAdminChanges: [
+    string,
+    (
+      service: OrgService,
+      orgId: string,
+      a: string,
+      b: string
+    ) => Promise<unknown>[],
+  ][] = [
+    [
+      "disable A + remove B",
+      (service, orgId, a, b) => [
+        service.disableMember(orgId, a),
+        service.removeMember(orgId, b),
+      ],
+    ],
+    [
+      "remove B + disable A",
+      (service, orgId, a, b) => [
+        service.removeMember(orgId, b),
+        service.disableMember(orgId, a),
+      ],
+    ],
+    [
+      "demote B + disable A",
+      (service, orgId, a, b) => [
+        service.updateMember(orgId, b, { role: "member" }),
+        service.disableMember(orgId, a),
+      ],
+    ],
+    [
+      "disable A + disable B",
+      (service, orgId, a, b) => [
+        service.disableMember(orgId, a),
+        service.disableMember(orgId, b),
+      ],
+    ],
+  ];
+
+  for (const [name, race] of racingAdminChanges) {
+    test(`${name} in parallel leaves one usable admin`, async () => {
+      const { orgService } = createOrgService();
+
+      const created = await orgService.createOrganization({
+        admin: {
+          email: "admin@acme.com",
+          name: "Acme Admin",
+          phone: "+628123456789",
+        },
+        name: "Acme",
+        slug: "acme-race",
+      });
+
+      const orgId = created.organization.id;
+      const adminA = created.adminMember!.member.userId;
+
+      const added = await orgService.addMember({
+        email: "second@acme.com",
+        name: "Second Admin",
+        orgId,
+        phone: "+628987654321",
+        role: "admin",
+      });
+
+      const adminB = added.member.userId;
+
+      // A disabled admin row must not count as coverage.
+      await orgService.disableMember(orgId, LOCAL_CLIENT_USER_ID!);
+
+      const results = await Promise.allSettled(
+        race(orgService, orgId, adminA, adminB)
+      );
+
+      expect(results.map((result) => result.status).sort()).toEqual([
+        "fulfilled",
+        "rejected",
+      ]);
+
+      expect(
+        results.find((result) => result.status === "rejected")
+      ).toMatchObject({
+        reason: { status: 409 },
+      });
+
+      const { members } = await orgService.listMembers(orgId);
+
+      const usableAdmins = members.filter(
+        (member) => member.role === "admin" && !member.disabledAt
+      );
+
+      expect(usableAdmins).toHaveLength(1);
+    });
+  }
+
   // The member list is where an admin sees who is locked out; without the
   // field the web cannot offer Enable for a disabled account.
   test("the member list shows when an account is disabled, and clears it on enable", async () => {
@@ -4435,7 +4531,7 @@ if __name__ == "__main__":
     expect(
       (await db.getSharedAgentInstance("org_team_a", profile.id))?.publicationId
     ).toBe(republished.id);
-    await db.disableUser("user_other", now);
+    expect(await db.disableUserUnlessLastAdmin("user_other", now)).toBe(true);
     await expect(
       orgService.createSharedAgentInstance(
         "org_team_a",
@@ -5663,7 +5759,18 @@ describe("OrgService shared resource publications", () => {
         "user_platform"
       )
     ).toBe(false);
-    await db.disableUser("user_platform", now);
+    // The disable guard keeps the last usable platform admin enabled.
+    await db.createUser({
+      createdAt: now,
+      email: "platform_second@example.com",
+      id: "user_platform_second",
+      isPlatformAdmin: true,
+      passwordHash: "test",
+      updatedAt: now,
+    });
+    expect(await db.disableUserUnlessLastAdmin("user_platform", now)).toBe(
+      true
+    );
     await expect(
       orgService.publishSharedResource("org_parent", request, "user_platform")
     ).rejects.toMatchObject({ status: 403 });
