@@ -104,6 +104,40 @@ export async function requireProfileManageFromContext(
   return auth;
 }
 
+/**
+ * Null for an agent owner, an org admin or a platform admin, who reach every
+ * artifact. Any other org member gets their own user id back and reaches only
+ * the artifacts they made (#1816, #2314).
+ */
+export async function artifactCreatorScopeFromContext(
+  c: Context<AppEnv>,
+  agent: ProfileOwnerLookup
+): Promise<string | null> {
+  const auth = getRequestAuth(c);
+
+  if (auth.isPlatformAdmin || auth.orgRole === "admin") {
+    return null;
+  }
+
+  requireOrgMember(auth);
+
+  // Same answer as the manage guard for a missing agent: no probing ids.
+  const found = await agent
+    .getProfile(
+      requireActiveOrgIdFromContext(c),
+      decodeURIComponent(c.req.param("profileId") ?? "")
+    )
+    .catch(() => null);
+
+  if (!found) {
+    throw new NakamaApiError("Forbidden", 403);
+  }
+
+  return !found.profile.isSuper && found.profile.ownerUserId === auth.user.id
+    ? null
+    : auth.user.id;
+}
+
 export function requirePlatformAdminFromContext(
   c: Context<AppEnv>
 ): RequestAuthContext {

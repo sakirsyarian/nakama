@@ -11,6 +11,10 @@
   <a href="https://discord.gg/wG6FY4cKRx"><img src="https://img.shields.io/badge/Discord-5865F2?style=flat-square&logo=discord&logoColor=white" alt="Discord"></a>
 </p>
 
+<p align="center">
+  <a href="https://trendshift.io/repositories/109713?utm_source=repository-badge&amp;utm_medium=badge&amp;utm_campaign=badge-repository-109713" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/repositories/109713" alt="ahmadrosid%2Fnakama | Trendshift" width="250" height="55"/></a>
+</p>
+
 # Nakama
 
 [Documentation](https://ahmadrosid.github.io/nakama/) · [Managed hosting](https://getnakama.cloud/)
@@ -73,6 +77,26 @@ Or start the server alone:
 ```bash
 bun run dev:server
 ```
+
+### Run with PM2
+
+For a bare host, install PM2 and copy the example config:
+
+```bash
+bun add --global pm2
+cp ecosystem.config.js.example ecosystem.config.js
+```
+
+Edit `cwd`, `script`, and `NAKAMA_WEB_PUBLIC_URL` in `ecosystem.config.js`, then
+start Nakama and set it to start after a reboot:
+
+```bash
+pm2 start ecosystem.config.js
+pm2 startup
+pm2 save
+```
+
+Run the startup command that PM2 prints to enable the system service.
 
 ### Docker
 

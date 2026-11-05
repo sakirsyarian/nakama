@@ -22,16 +22,12 @@ data/logs/*
 !.agents/skills/adhd-pr-description/**
 !.agents/skills/eli5/
 !.agents/skills/eli5/**
-!.agents/skills/lean-pr-review/
-!.agents/skills/lean-pr-review/**
-!.agents/skills/browser-video-proof/
-!.agents/skills/browser-video-proof/**
-!.agents/skills/plan-review/
-!.agents/skills/plan-review/**
 !.agents/skills/verify-bs/
 !.agents/skills/verify-bs/**
 !.agents/skills/record-demo/
 !.agents/skills/record-demo/**
+!.agents/skills/release/
+!.agents/skills/release/**
 apps/data/*
 .cursor/
 docs/plans/*
@@ -51,3 +47,4 @@ tmp-repro-setup-auth.mjs
 .jscpd-report/
 nakama-secrets.env
 .idea
+ecosystem.config.js
