@@ -251,12 +251,11 @@ test.each(["fresh", "upgrade"])(
 );
 
 function closeDatabase(db: Database): void {
+  Bun.gc(true);
+
   try {
     db.close(true);
   } catch {
-    // bun on macOS throws "database is locked" from close(true) while the
-    // transient statements migrateDatabase prepares are not yet collected.
-    // The lazy close defers to GC, which is enough for test cleanup.
     db.close();
   }
 }
@@ -2137,14 +2136,21 @@ test("file pins migrate existing databases, survive reopen and cascade with prof
     closeDatabase(db);
     db = new Database(filename);
     migrateDatabase(db);
-    expect(db.query("SELECT path FROM file_pins").all()).toEqual([
-      { path: "notes.md" },
-    ]);
+    const selectQuery = db.query("SELECT path FROM file_pins");
+    expect(selectQuery.all()).toEqual([{ path: "notes.md" }]);
+    selectQuery.finalize();
     db.exec("DELETE FROM profiles WHERE id = 'pin-profile'");
-    expect(db.query("SELECT path FROM file_pins").all()).toEqual([]);
+    const selectQuery2 = db.query("SELECT path FROM file_pins");
+    expect(selectQuery2.all()).toEqual([]);
+    selectQuery2.finalize();
   } finally {
     closeDatabase(db);
-    rmSync(directory, { force: true, recursive: true });
+    rmSync(directory, {
+      force: true,
+      maxRetries: 5,
+      recursive: true,
+      retryDelay: 50,
+    });
   }
 });
 

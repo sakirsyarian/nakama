@@ -45,7 +45,9 @@ function frontmatterValue(frontmatter: string, key: string): string {
   return value;
 }
 
-function parseMdxPage(source: string, mdxPath: string): ContentPage {
+function parseMdxPage(rawSource: string, mdxPath: string): ContentPage {
+  const source = rawSource.replace(/\r\n/g, "\n");
+
   if (!source.startsWith("---\n")) {
     throw new Error(`Missing frontmatter in ${mdxPath}`);
   }

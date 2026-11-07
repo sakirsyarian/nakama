@@ -1,10 +1,11 @@
 import { existsSync } from "node:fs";
 import { mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { buildLlmsTxt, type PageMetadata } from "../lib/site-meta";
 import { type ContentPage, readContentPages } from "./content-inventory";
 
-const ROOT = path.dirname(new URL(import.meta.url).pathname);
+const ROOT = path.dirname(fileURLToPath(import.meta.url));
 
 const CONTENT_DIR = path.join(ROOT, "..", "content", "docs");
 
