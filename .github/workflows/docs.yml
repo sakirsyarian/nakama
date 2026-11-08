@@ -47,16 +47,31 @@ jobs:
           REQUIRED: ${{ github.event_name != 'pull_request' }}
         run: |
           version=""
-          for tag in $(git ls-remote --tags --refs origin 'v*' \
+          for tag in $(git ls-remote --tags --refs origin 'v*' 2>/dev/null \
             | sed 's#.*refs/tags/##' \
             | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' \
             | sort -Vr | head -n 5); do
-            published="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/docker-publish.yml/runs?branch=$tag&status=success&per_page=1" --jq .total_count)"
+            published="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/docker-publish.yml/runs?branch=$tag&status=success&per_page=1" --jq .total_count 2>/dev/null || echo 0)"
             if [ "$published" -gt 0 ]; then
               version="${tag#v}"
               break
             fi
           done
+          if [ -z "$version" ] && [ "$GITHUB_REPOSITORY" != "ahmadrosid/nakama" ]; then
+            for tag in $(git ls-remote --tags --refs https://github.com/ahmadrosid/nakama.git 'v*' 2>/dev/null \
+              | sed 's#.*refs/tags/##' \
+              | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' \
+              | sort -Vr | head -n 5); do
+              published="$(gh api "repos/ahmadrosid/nakama/actions/workflows/docker-publish.yml/runs?branch=$tag&status=success&per_page=1" --jq .total_count 2>/dev/null || echo 0)"
+              if [ "$published" -gt 0 ]; then
+                version="${tag#v}"
+                break
+              fi
+            done
+          fi
+          if [ -z "$version" ]; then
+            version="$(node -p "require('./package.json').version" 2>/dev/null || echo "")"
+          fi
           if [ -z "$version" ] && [ "$REQUIRED" = "true" ]; then
             echo "No v* tag with a successful Docker Publish run." >&2
             exit 1

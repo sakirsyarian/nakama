@@ -71,9 +71,19 @@ jobs:
       # listed before its file is ready. Bump it when BtbN drops this version.
       - name: Install FFmpeg
         if: env.WEB_ONLY != 'true'
+        id: ffmpeg_linux
+        uses: AnimMouse/setup-ffmpeg@178e0b4a408f06ce40d896c3cd79f50fa6f8b0c3 # v1.2.5
+        continue-on-error: true
+        with:
+          version: "8.1"
+          token: ${{ github.token }}
+
+      - name: Retry Install FFmpeg
+        if: env.WEB_ONLY != 'true' && steps.ffmpeg_linux.outcome == 'failure'
         uses: AnimMouse/setup-ffmpeg@178e0b4a408f06ce40d896c3cd79f50fa6f8b0c3 # v1.2.5
         with:
           version: "8.1"
+          token: ${{ github.token }}
 
       - parallel:
           # bun test does not type-check or bundle. Docker Publish does both, but
@@ -131,9 +141,19 @@ jobs:
       # Downloads from GitHub releases and caches, so a Chocolatey outage
       # cannot fail the Meet import tests. Keep the version the same as above.
       - name: Install FFmpeg
+        id: ffmpeg_windows
+        uses: AnimMouse/setup-ffmpeg@178e0b4a408f06ce40d896c3cd79f50fa6f8b0c3 # v1.2.5
+        continue-on-error: true
+        with:
+          version: "8.1"
+          token: ${{ github.token }}
+
+      - name: Retry Install FFmpeg
+        if: steps.ffmpeg_windows.outcome == 'failure'
         uses: AnimMouse/setup-ffmpeg@178e0b4a408f06ce40d896c3cd79f50fa6f8b0c3 # v1.2.5
         with:
           version: "8.1"
+          token: ${{ github.token }}
 
       - name: Run tests
         # Split the slow server suite across runners; run each smaller suite once.
