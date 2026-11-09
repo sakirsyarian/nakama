@@ -78,12 +78,9 @@ jobs:
           version: "8.1"
           token: ${{ github.token }}
 
-      - name: Retry Install FFmpeg
+      - name: Fallback Install FFmpeg
         if: env.WEB_ONLY != 'true' && steps.ffmpeg_linux.outcome == 'failure'
-        uses: AnimMouse/setup-ffmpeg@178e0b4a408f06ce40d896c3cd79f50fa6f8b0c3 # v1.2.5
-        with:
-          version: "8.1"
-          token: ${{ github.token }}
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
 
       # Electron's zip comes from GitHub releases, which sometimes return 504.
       # The cache skips the download on most runs; the loop retries the rest.
@@ -162,12 +159,9 @@ jobs:
           version: "8.1"
           token: ${{ github.token }}
 
-      - name: Retry Install FFmpeg
+      - name: Fallback Install FFmpeg
         if: steps.ffmpeg_windows.outcome == 'failure'
-        uses: AnimMouse/setup-ffmpeg@178e0b4a408f06ce40d896c3cd79f50fa6f8b0c3 # v1.2.5
-        with:
-          version: "8.1"
-          token: ${{ github.token }}
+        run: choco install ffmpeg --no-progress -y
 
       - name: Run tests
         # Split the slow server suite across runners; run each smaller suite once.
