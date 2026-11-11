@@ -34,6 +34,16 @@ export function isPublicRouteRequest(
     // browser arriving here has no Nakama session.
     (method === "GET" &&
       /^\/v1\/mcp\/oauth\/callback\/[^/]+$/.test(pathname)) ||
+    // The Meet extension pairs without a login, then sends its Meet key; the
+    // route itself checks that key and accepts no other credential.
+    (method === "POST" &&
+      /^\/v1\/meet\/extension\/(?:pair|start|leave)$/.test(pathname)) ||
+    (method === "GET" &&
+      /^\/v1\/meet\/extension\/(?:pair\/[^/]+|status|transcript)$/.test(
+        pathname
+      )) ||
+    // The capture socket sends a one-time ticket as its first message.
+    (method === "GET" && pathname === "/v1/meet/capture") ||
     (method === "GET" &&
       /^\/v1\/public\/artifact-shares\/[^/]+$/.test(pathname)) ||
     // Microsoft posts Teams activities with its own service token; the worker's
