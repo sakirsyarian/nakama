@@ -30,6 +30,9 @@ export function isPublicRouteRequest(
     // The stdio bridge an ACP agent starts has no login. The token in the path
     // is the credential, and it reaches only that chat's Nakama tools.
     (method === "POST" && /^\/v1\/acp-mcp\/[^/]+$/.test(pathname)) ||
+    // GitHub-style signed webhook; the route verifies X-Hub-Signature-256.
+    (method === "POST" &&
+      /^\/v1\/automations\/[^/]+\/webhook$/.test(pathname)) ||
     // OAuth provider redirect: it carries a single-use code and state, and the
     // browser arriving here has no Nakama session.
     (method === "GET" &&
@@ -37,7 +40,9 @@ export function isPublicRouteRequest(
     // The Meet extension pairs without a login, then sends its Meet key; the
     // route itself checks that key and accepts no other credential.
     (method === "POST" &&
-      /^\/v1\/meet\/extension\/(?:pair|start|leave)$/.test(pathname)) ||
+      /^\/v1\/meet\/extension\/(?:pair|start|leave|disconnect)$/.test(
+        pathname
+      )) ||
     (method === "GET" &&
       /^\/v1\/meet\/extension\/(?:pair\/[^/]+|status|transcript)$/.test(
         pathname
