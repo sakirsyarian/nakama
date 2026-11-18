@@ -137,6 +137,8 @@ export interface RegressionCase {
   expectedResult: string;
   id: string;
   input: string;
+  /** The newest rerun; null until the case is rerun. */
+  latestRun: RegressionCaseRun | null;
   profileId: string;
   source: RegressionCaseSource;
 }
@@ -1842,7 +1844,7 @@ export interface UpdateImageGenerationRequest {
 }
 
 /** Search back-end that replaces the provider-hosted `web_search` tool. */
-export type WebSearchProvider = "exa" | "firecrawl" | "serply";
+export type WebSearchProvider = "exa" | "firecrawl" | "serply" | "keenable";
 
 export interface WebSearchSettingsResponse {
   apiKeyMasked: string | null;
@@ -3526,6 +3528,12 @@ export interface ToolContext {
     filePath: string,
     maxBytes: number
   ) => Promise<Uint8Array>;
+  recordSessionToolStep?: (step: {
+    completedAt: string;
+    outcome: "success" | "error" | "cancelled";
+    startedAt: string;
+    toolName: string;
+  }) => Promise<void>;
   /** Records what the provider actually charged for one request. */
   recordTurnUsage?: (turn: {
     estimated: boolean;

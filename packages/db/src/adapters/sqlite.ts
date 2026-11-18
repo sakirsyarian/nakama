@@ -62,6 +62,7 @@ import type {
   StoredRegressionCaseRunRecord,
   StoredSessionMessageRecord,
   StoredSessionRecord,
+  StoredSessionStep,
   StoredSessionSummaryRecord,
   StoredSharedAgentInstanceRecord,
   StoredSkillProposal,
@@ -3013,6 +3014,29 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
     "SELECT * FROM users WHERE is_platform_admin = 1"
   );
 
+  const appendSessionStepStmt = db.prepare(`
+    INSERT INTO session_steps (
+      org_id, session_id, profile_id, actor, tool_name, started_at, completed_at, outcome
+    )
+    SELECT org_id, id, profile_id, ?, ?, ?, ?, ?
+    FROM sessions
+    WHERE org_id = ? AND id = ? AND profile_id = ? AND closed_at IS NULL
+  `);
+
+  const listSessionStepsStmt = db.prepare<
+    StoredSessionStep,
+    SQLQueryBindings[]
+  >(`
+    SELECT step.id, step.org_id AS orgId, step.session_id AS sessionId,
+      step.profile_id AS profileId, step.actor, step.tool_name AS toolName,
+      step.started_at AS startedAt, step.completed_at AS completedAt, step.outcome
+    FROM session_steps AS step
+    JOIN sessions AS session ON session.id = step.session_id
+    WHERE session.org_id = ? AND step.session_id = ? AND step.id > ?
+    ORDER BY step.id
+    LIMIT 100
+  `);
+
   const createAuditEventStmt = db.prepare(`
     INSERT INTO audit_events (
       id, actor_user_id, org_id, action, resource_type, resource_id,
@@ -3965,6 +3989,21 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
     LIMIT 1
   `);
 
+  const listLatestRegressionCaseRunsStmt = db.prepare<
+    RegressionCaseRunRow,
+    SQLQueryBindings[]
+  >(`
+    SELECT run.* FROM regression_case_runs run
+    WHERE run.org_id = ?1
+      AND run.case_id IN (SELECT value FROM json_each(?2))
+      AND run.id = (
+        SELECT newest.id FROM regression_case_runs newest
+        WHERE newest.org_id = ?1 AND newest.case_id = run.case_id
+        ORDER BY newest.created_at DESC, newest.id DESC
+        LIMIT 1
+      )
+  `);
+
   const setRegressionCaseRunVerdictStmt = db.prepare<
     RegressionCaseRunRow,
     SQLQueryBindings[]
@@ -4894,6 +4933,21 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
     },
     async appendMessagesForSession(sessionId, messages) {
       appendMessagesTransaction(sessionId, messages);
+    },
+
+    async appendSessionStep(step) {
+      return (
+        appendSessionStepStmt.run(
+          step.actor,
+          step.toolName,
+          step.startedAt,
+          step.completedAt,
+          step.outcome,
+          step.orgId,
+          step.sessionId,
+          step.profileId
+        ).changes === 1
+      );
     },
 
     async approveOrgJoinRequest(orgId, userId, approvedAt) {
@@ -6335,6 +6389,12 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
         .map((row) => row.path);
     },
 
+    async listLatestRegressionCaseRuns(orgId, caseIds) {
+      return listLatestRegressionCaseRunsStmt
+        .all(orgId, JSON.stringify(caseIds))
+        .map((row) => toRegressionCaseRunRecord(row));
+    },
+
     async listLlmTurnUsage(orgId) {
       return listLlmTurnUsageStmt.all(orgId).map((row) => ({
         bucket: row.bucket,
@@ -6533,6 +6593,10 @@ function createSqliteDatabaseAdapter(db: Database): DatabaseAdapter {
       return listRegressionCasesForProfileStmt
         .all(orgId, profileId, options.limit ?? 50, options.offset ?? 0)
         .map((row) => toRegressionCaseRecord(row));
+    },
+
+    async listSessionSteps(orgId, sessionId, afterId = 0) {
+      return listSessionStepsStmt.all(orgId, sessionId, afterId);
     },
 
     async listSessionSummaries(profileId, channels, options = {}) {

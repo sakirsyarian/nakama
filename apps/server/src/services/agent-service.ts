@@ -7112,7 +7112,8 @@ export class AgentService {
       {
         ...workspaceThinking,
         effort: record.thinkingEffort ?? workspaceThinking.effort,
-      }
+      },
+      sessionId
     );
 
     // Part of the "no tools" contract: session-history and channel-artifact
@@ -7182,6 +7183,26 @@ export class AgentService {
       orgId,
       orgRole: orgRole ?? undefined,
       profileId,
+      recordSessionToolStep:
+        !cognito && (channel === "web" || channel === "cli")
+          ? async (step) => {
+              // executeToolCall logs a thrown error with its cause.
+              const saved = await this.db.appendSessionStep({
+                ...step,
+                actor: "agent",
+                orgId,
+                profileId,
+                sessionId,
+                toolName: step.toolName.slice(0, 128),
+              });
+
+              if (!saved) {
+                console.warn(
+                  "Session tool step skipped because the session is no longer active."
+                );
+              }
+            }
+          : undefined,
       recordTurnUsage: this.turnUsageRecorderFor(orgId),
       sessionId,
       trackEphemeralAttachment,
@@ -7246,6 +7267,7 @@ export class AgentService {
               this.persistXaiOAuth(instanceId, oauth),
             resolveInstance: (instanceId) =>
               findProviderInstance(this.userConfig, instanceId),
+            sessionId,
           }
         );
 
@@ -7657,7 +7679,8 @@ export class AgentService {
     userId?: string | null,
     acpSessionKey?: string,
     acpTools?: { context: ToolContext; tools: ToolDefinition[] },
-    thinking: ThinkingSettings = this.resolveWorkspaceThinkingDefaults()
+    thinking: ThinkingSettings = this.resolveWorkspaceThinkingDefaults(),
+    sessionId?: string
   ): AgentDependencies {
     if (profile.acpAgent && profile.orgId) {
       const sessionKey = acpSessionKey ?? `${profile.id}:${randomUUID()}`;
@@ -7713,6 +7736,7 @@ export class AgentService {
           this.persistXaiOAuth(instanceId, oauth),
         resolveInstance: (instanceId) =>
           findProviderInstance(this.userConfig, instanceId),
+        sessionId,
       }
     );
 
