@@ -160,22 +160,33 @@ async function releaseFixture() {
     }
 
     if (kind === "api") {
-      const release = releases.get(action.split("/").at(-1));
+      const view = (tagName, release) => ({
+        assets: [...release.assets].map(([filename, content]) => ({
+          digest: `sha256:${createHash("sha256").update(content).digest("hex")}`,
+          name: filename,
+          size: content.length,
+        })),
+        draft: release.draft,
+        tag_name: tagName,
+      });
 
-      if (!release) {
+      if (action.endsWith("/releases?per_page=100")) {
+        return {
+          stdout: JSON.stringify(
+            [...releases].map(([tagName, release]) => view(tagName, release))
+          ),
+        };
+      }
+
+      const tagName = action.split("/").at(-1);
+      const release = releases.get(tagName);
+
+      // As on GitHub, the tag endpoint does not return a draft.
+      if (!release || release.draft) {
         throw Object.assign(new Error("Not found"), { stderr: "HTTP 404" });
       }
 
-      return {
-        stdout: JSON.stringify({
-          assets: [...release.assets].map(([filename, content]) => ({
-            digest: `sha256:${createHash("sha256").update(content).digest("hex")}`,
-            name: filename,
-            size: content.length,
-          })),
-          draft: release.draft,
-        }),
-      };
+      return { stdout: JSON.stringify(view(tagName, release)) };
     }
 
     if (action === "create") {
@@ -223,7 +234,8 @@ async function releaseFixture() {
   return {
     events,
     output,
-    publish: () => publishRelease({ output, run, sha: "commit", tag, version }),
+    publish: (targets) =>
+      publishRelease({ output, run, sha: "commit", tag, targets, version }),
     releases,
     setFailure: (fn) => {
       fail = fn;
@@ -248,6 +260,32 @@ test("publishes all installers before independently promoting both feeds", async
   );
 
   expect(published).toBeLessThan(promoted);
+});
+
+test("publishes macOS alone when Windows is not a target", async () => {
+  const f = await releaseFixture();
+  await rm(join(f.output, "windows"), { recursive: true });
+  await f.publish(["mac"]);
+  expect(f.releases.get(f.tag).draft).toBe(false);
+  expect(f.releases.get(f.tag).assets.size).toBe(5);
+  expect([...f.releases.get("desktop-updates").assets.keys()]).toEqual([
+    "latest-mac.yml",
+  ]);
+
+  // A retry of the public release stays macOS only.
+  await f.publish(["mac"]);
+  expect(f.releases.get(f.tag).assets.size).toBe(5);
+
+  // The public release cannot get an EXE later.
+  await expect(f.publish()).rejects.toThrow();
+  expect(f.releases.get(f.tag).assets.size).toBe(5);
+});
+
+test("rejects a release without macOS or with an unknown platform", async () => {
+  const f = await releaseFixture();
+  await expect(f.publish(["windows"])).rejects.toThrow();
+  await expect(f.publish(["mac", "linux"])).rejects.toThrow();
+  expect(f.releases.size).toBe(0);
 });
 
 for (const change of ["missing", "checksum"]) {
@@ -285,7 +323,7 @@ test("retry repairs partial promotion using public bytes even when local artifac
     (args) =>
       args[1] === "upload" &&
       args[2] === "desktop-updates" &&
-      args[3].endsWith("/latest.yml")
+      basename(args[3]) === "latest.yml"
   );
   await expect(f.publish()).rejects.toThrow();
   expect(f.releases.get("desktop-updates").assets.has("latest-mac.yml")).toBe(
