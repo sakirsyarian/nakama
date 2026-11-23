@@ -20,6 +20,7 @@ import {
 import { loadJavascriptTool } from "./javascript-tool-loader";
 import { ManagedSecrets } from "./managed-secrets";
 import { loadPythonTool } from "./python-tool-loader";
+import { resolveToolsFromStorage } from "./tool-resolver";
 
 const originalConfigDir = process.env.NAKAMA_CONFIG_DIR;
 
@@ -553,6 +554,16 @@ export async function run(input, context) {
 });
 
 describe("tool resolver", () => {
+  // Its own secret store: in random order this block can run first.
+  beforeEach(() => {
+    setToolSecrets(
+      new ManagedSecrets(
+        createInMemoryDatabaseAdapter(),
+        Buffer.alloc(32, 1).toString("base64")
+      )
+    );
+  });
+
   let configDir = "";
 
   afterEach(async () => {
@@ -581,8 +592,6 @@ describe("tool resolver", () => {
       "utf8"
     );
 
-    const { resolveToolsFromStorage } = await import("./tool-resolver");
-
     const tools = await resolveToolsFromStorage([
       {
         createdAt: new Date().toISOString(),
@@ -603,8 +612,6 @@ describe("tool resolver", () => {
   });
 
   test("skips unsupported handler types", async () => {
-    const { resolveToolsFromStorage } = await import("./tool-resolver");
-
     const tools = await resolveToolsFromStorage([
       {
         createdAt: new Date().toISOString(),

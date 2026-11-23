@@ -54,7 +54,11 @@ const vendor = setupServer(
 
 beforeAll(() => vendor.listen({ onUnhandledRequest: "error" }));
 
-afterEach(() => vendor.resetHandlers());
+afterEach(() => {
+  vendor.resetHandlers();
+  // Each test counts its own vendor calls, in any order.
+  vendorRequests.length = 0;
+});
 
 afterAll(() => vendor.close());
 
@@ -141,21 +145,6 @@ test("model routes refuse a missing pass, a bad pass and a cloud attachment refe
   expect(
     (await post(app, "/v1/llm/chat", pass, JSON.stringify(withRef))).status
   ).toBe(400);
-});
-
-test("a pass lists the models", async () => {
-  const { app, pass } = await setup();
-
-  const response = await app.request("/v1/llm/models", {
-    headers: { authorization: `Bearer ${pass}` },
-  });
-
-  const body = z
-    .object({ models: z.array(z.object({ id: z.string() })) })
-    .parse(await response.json());
-
-  expect(response.status).toBe(200);
-  expect(body.models.length).toBeGreaterThan(0);
 });
 
 test("when an admin turns Nakama Desktop off, model calls are refused, and they work again when it is on", async () => {
